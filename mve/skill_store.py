@@ -20,7 +20,8 @@
 
 本模块把这三条原样搬过来：
   1. add() 按 (topic, name) 去重，命中就 Rewriting（覆盖 + 归档旧版 + versions+1）
-  2. retrieve() 只返回 top_k 条（同题优先 + 词面相关性 + 有效性加权）
+  2. retrieve() 只返回 top_k 条（向量余弦优先，embedding 不通降级词面；
+     同题优先 + 有效性加权不变）
   3. add() 会丢掉低价值经验（太短 / 与已有技能几乎重复 / 只是复述题目）
 
 膨胀有没有真被拦住必须可观测 —— stats() 给出 writes（累计写入尝试）
@@ -45,6 +46,14 @@ DUP_THRESHOLD = 0.62    # 超过 → 视为同一条技能 → 覆盖（Rewritin
 SKIP_THRESHOLD = 0.90   # 超过 → 内容几乎没变 → 连覆盖都不用，直接丢弃
 MIN_LESSON_LEN = 12     # 照 "Deposit useless items" 特判：太短的经验没有复用价值
 MAX_HISTORY = 3         # 旧版本最多留几条（归档，不进 prompt）
+
+# 向量模式（embedding 走 Nebius Qwen3-Embedding-8B，原版同款思路但全栈不出
+# Token Factory、不引 Chroma）。余弦分布与 Jaccard 不同，跨题门槛必须分开设。
+# 0.40 是 2026-10-14 实测定标：8 条探针（Qwen3-Embedding-8B, 4096 维）——
+#   相关（同轴换说/跨语言）0.66-0.70；同领域异题 0.45-0.47；
+#   完全无关（红烧肉/天气/写诗）0.26-0.34 → 分界带 0.34-0.45，取中偏 recall。
+# 样本小（8 条），是定标起点不是定律；换 embedding 模型必须重测。
+VEC_CROSS_MIN_SIM = 0.40    # 跨题门槛（向量模式）：低于它视为不相关
 
 # 跨题经验注入 prompt 的两条门槛（不加就会被上一题的经验带偏）
 CROSS_TOPIC_MIN_SIM = 0.12   # 与本题题干的词面相关度下限
@@ -144,6 +153,46 @@ def similarity(a: str, b: str) -> float:
     return len(ta & tb) / len(ta | tb)
 
 
+# ---------------- 向量模式（照原版 SkillManager 的向量检索，轻量实现） ----------------
+# 原版（voyager_original/voyager/agents/skill.py:43-47,117-130）用 Chroma +
+# OpenAIEmbeddings 做相似度检索。这里同构其思路但不引重依赖：
+# embedding 走 voyager_vlml.llm.embed（Nebius Token Factory 上的
+# Qwen3-Embedding-8B），向量随技能存 JSON，检索时自算余弦。
+# embedding 不通时全程降级词面 Jaccard —— 检索可用性不依赖 Nebius 通不通。
+
+def _cos(a: list[float], b: list[float]) -> float:
+    if not a or not b or len(a) != len(b):
+        return 0.0
+    dot = sum(x * y for x, y in zip(a, b))
+    na = sum(x * x for x in a) ** 0.5
+    nb = sum(y * y for y in b) ** 0.5
+    if na <= 0 or nb <= 0:
+        return 0.0
+    return dot / (na * nb)
+
+
+def _skill_emb(s: dict[str, Any]) -> list[float]:
+    v = s.get("emb")
+    return [float(x) for x in v] if isinstance(v, list) and v else []
+
+
+def _embed_one(text: str) -> list[float]:
+    """算一条文本的向量；任何失败返回 []（调用方降级词面）。"""
+    try:
+        from voyager_vlml import llm
+        vs = llm.embed([str(text or "")[:2000]])
+        return vs[0] if vs else []
+    except Exception:
+        return []
+
+
+def _vec_or_lexical(qv: list[float], sv: list[float], q: str, text: str) -> tuple[float, bool]:
+    """有向量用余弦，没向量降级 Jaccard。返回 (sim, 是否向量模式)。"""
+    if qv and sv:
+        return _cos(qv, sv), True
+    return similarity(q, text), False
+
+
 # ---------------- 写入（去重覆盖） ----------------
 
 def add(
@@ -226,10 +275,14 @@ def add(
             s["blueprint"] = blueprint
         if code:
             s["code"] = code
+        emb = _embed_one(f"{s['name']} {text}")
+        if emb:
+            s["emb"] = emb
         data["rewrites"] += 1
         _save(data)
         return "rewritten", best_key
 
+    emb = _embed_one(f"{name} {text}")
     data["skills"][key] = {
         "topic": topic, "name": str(name or ""), "text": text,
         "hits": 0, "ok": 0, "created": now, "updated": now,
@@ -237,6 +290,7 @@ def add(
         "source": str(source or "practice"),
         "blueprint": dict(blueprint or {}),
         "code": str(code or ""),
+        **({"emb": emb} if emb else {}),
     }
     data["added"] += 1
     _save(data)
@@ -250,8 +304,14 @@ def retrieve(
 ) -> list[dict[str, Any]]:
     """照 SkillManager.retrieve_skills：只取 top_k 条进 prompt。
 
-    没有向量库，用「同题优先 + 词面相关 + 有效性」打分近似：
-      score = 3.0(同题) + 2.5*sim(query, name+text) + 0.25*min(hits,6) + 0.6*(ok/hits)
+    相似度双模（2026-10-14 向量化改造）：
+      - **向量模式**（默认）：问句与技能文本都过 Nebius embedding 算余弦 ——
+        照原版 skill.py:117-130 的向量检索思路，补词面 Jaccard 跨不过的
+        语义鸿沟（「首血后胜率」vs 配方文本「首血转换率分析」词面几乎不重叠）。
+      - **词面模式**（兜底）：embedding 不通 / 老技能没有向量时，退回
+        「同题优先 + Jaccard + 有效性」打分。
+    跨题门槛按模式分开（VEC_CROSS_MIN_SIM / CROSS_TOPIC_MIN_SIM）——
+    余弦与 Jaccard 分布不同，共用一个阈值必然误杀或漏放。
 
     两条硬门槛（实测不加就会被跨题经验带偏）：
       1. **跨题经验必须真的相关**才注入。库小的时候 top_k 装不满，
@@ -261,11 +321,14 @@ def retrieve(
       2. 跨题最多 2 条。prompt 里该占主导的是本题经验。
     """
     data = _load_raw()
+    qv = _embed_one(query)
     scored: list[tuple[float, str, dict[str, Any]]] = []
     for key, s in data["skills"].items():
         same_topic = s.get("topic") == topic
-        sim = similarity(query, f"{s.get('name','')} {s.get('text','')}")
-        if not same_topic and sim < CROSS_TOPIC_MIN_SIM:
+        text = f"{s.get('name','')} {s.get('text','')}"
+        sim, is_vec = _vec_or_lexical(qv, _skill_emb(s), query, text)
+        floor = VEC_CROSS_MIN_SIM if is_vec else CROSS_TOPIC_MIN_SIM
+        if not same_topic and sim < floor:
             continue                      # 门槛 1：不相关的跨题经验不进 prompt
         score = 3.0 if same_topic else 0.0
         score += 2.5 * sim

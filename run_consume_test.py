@@ -51,7 +51,7 @@ async def main():
         print("✅ 修复生效")
     else:
         print("❌ 仍未答对，需继续排查")
-        Path("/root/mve/consume_result.json").write_text(
+        Path(ROOT / "consume_result.json").write_text(
             json.dumps(r, ensure_ascii=False, indent=2, default=str),
             encoding="utf-8")
 

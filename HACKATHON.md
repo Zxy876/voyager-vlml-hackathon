@@ -110,7 +110,8 @@ same-task re-test.
 - **Single LLM egress** `voyager_vlml/llm.py`: OpenAI-compatible HTTP POST to
   `https://api.tokenfactory.nebius.com/v1/chat/completions`, Bearer
   `NEBIUS_API_KEY`, model `nvidia/nemotron-3-super-120b-a12b` (default;
-  swap to `nvidia/nemotron-3-nano-30b-a3b` for cheaper/faster).
+  swap to `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B` for cheaper/faster — note
+  the exact capitalization, verified against `GET /v1/models`).
 - **What the LLM does here (and only this)**: writes questions, writes SQL,
   generates critique guidance after vacuum detection, and narrates final
   answers. **The success/failure criterion never passes through the LLM** —

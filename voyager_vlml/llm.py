@@ -133,7 +133,7 @@ def chat(
         except Exception as e:
             last = f"{type(e).__name__}: {e}"
         time.sleep(1.5)
-    raise RuntimeError(f"LLM 调用失败：{last}")
+    raise RuntimeError(f"LLM call failed: {last}")
 
 
 def chat_json(messages: list[dict[str, str]], **kw: Any) -> dict:
@@ -148,3 +148,38 @@ def chat_json(messages: list[dict[str, str]], **kw: Any) -> dict:
         return json.loads(raw[s : e + 1])
     except json.JSONDecodeError:
         return {}
+
+
+def embed(texts: list[str]) -> list[list[float]] | None:
+    """Embedding 出口 —— 照原版 SkillManager 的向量检索思路（skill.py:43-47），
+    但 embedding 也走 Nebius（Qwen3-Embedding-8B，实见于 /v1/models 清单），
+    全栈不出 Token Factory；不引 Chroma 重依赖，向量由调用方自存自算余弦。
+
+    一批文本一次调用；任何失败返回 None（调用方降级到词面相似度，
+    检索可用性不依赖 embedding 通不通）。
+    """
+    if not texts:
+        return []
+    url, key, _ = _endpoint()
+    base = url.rsplit("/chat/completions", 1)[0]
+    model = os.getenv("NEBIUS_EMBED_MODEL", "Qwen/Qwen3-Embedding-8B")
+    try:
+        import httpx
+
+        r = httpx.post(
+            f"{base}/embeddings",
+            headers={
+                "Authorization": f"Bearer {key}",
+                "Content-Type": "application/json",
+            },
+            json={"model": model, "input": texts},
+            timeout=60.0,
+        )
+        r.raise_for_status()
+        data = r.json().get("data") or []
+        out = [[float(x) for x in (d.get("embedding") or [])] for d in data]
+        if len(out) != len(texts) or any(not v for v in out):
+            return None
+        return out
+    except Exception:
+        return None

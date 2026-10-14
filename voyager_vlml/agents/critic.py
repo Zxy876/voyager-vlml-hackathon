@@ -107,6 +107,65 @@ def has_real_data(observation: dict[str, Any]) -> bool:
     return not is_vacuous(observation.get("data"))
 
 
+# ---------------------------------------------------------------------------
+# 报错点名：从 SQL 错误里抠出编造的名字，从 schema 里找最像的真名
+# ---------------------------------------------------------------------------
+#
+# 2026-10-14 照原版 critic.txt 的 few-shot 思路加的「具体化」改造：
+# 原版 critique 会点名差什么（「还该存 copper_block、diorite…」），因为它的
+# few-shot 示例就是这么写的。MVE 的 critique 是确定性生成的，学不到 few-shot，
+# 但可以更狠：**直接从 DuckDB 报错里解析出模型编造的列名/表名，再用
+# difflib 从实查 schema 里找最接近的真名告诉他**。这不是提示，是取证。
+
+def _schema_names(schema: str) -> set[str]:
+    """从 schema_block 的文本里收集真实表名与列名。
+
+    行格式：`- 表名（N 行）: 列::类型，列::类型`；末尾可能有空表禁用名单
+    （`表名、表名` 一行）。宁放过不错杀，SQL 关键词不进候选（由 difflib
+    的 cutoff 兜底，且关键词与列名形态差异大）。
+    """
+    import re as _re
+
+    names: set[str] = set()
+    for m in _re.finditer(r"(?m)^\s*-\s*([A-Za-z_]\w*)\s*[（(]", schema or ""):
+        names.add(m.group(1))
+    for m in _re.finditer(r"([A-Za-z_]\w*)\s*::", schema or ""):
+        names.add(m.group(1))
+    return names
+
+
+def _suggest_names(error: str, schema: str) -> str:
+    """错误里点出编造的名字 + schema 里最像的真名。没有可建议的返回 ""。"""
+    import difflib
+    import re as _re
+
+    err = str(error or "")
+    bad: list[str] = []
+    for pat in (
+        r"no such column:\s*([A-Za-z_][\w.]*)",
+        r'Referenced column "([^"]+)" not found',
+        r'does not have a column named "([^"]+)"',
+        r'Table with name ([A-Za-z_]\w*) does not exist',
+        r'Referenced table "([^"]+)" not found',
+    ):
+        m = _re.search(pat, err, _re.I)
+        if m:
+            bad.append(m.group(1).split(".")[-1])
+    if not bad or not schema:
+        return ""
+    real = _schema_names(schema)
+    if not real:
+        return ""
+    out = []
+    for b in dict.fromkeys(bad):
+        near = difflib.get_close_matches(b, sorted(real), n=3, cutoff=0.55)
+        if near:
+            out.append(f"`{b}` 不存在；库里最接近的是：{'、'.join('`'+n+'`' for n in near)}")
+        else:
+            out.append(f"`{b}` 不存在；schema 里没有相近的名字，换一个列名/表名")
+    return "\n".join(out)
+
+
 class VLMLCriticAgent:
     """VLML 版 critic：以 DB 取证为成败判据，critique 用 SQL 语言。"""
 
@@ -115,7 +174,8 @@ class VLMLCriticAgent:
 
     # ---------- 成败判据：DB 取证，不比标准答案 ----------
     def check_task_success(
-        self, *, observations: list[dict[str, Any]], task: dict[str, Any] | None = None
+        self, *, observations: list[dict[str, Any]], task: dict[str, Any] | None = None,
+        schema: str = "",
     ) -> tuple[bool, str]:
         """(success, critique)。
 
@@ -125,21 +185,31 @@ class VLMLCriticAgent:
 
         ⚠️ 第三条「真实值」是 2026-10-14 补的：纯聚合 SQL 在空表上返回
         1 行 (NULL, 0)，行数判据会被它骗过（详见 is_vacuous 的 docstring）。
+
+        `schema` = 当前库实查 schema（vlml_mcp.schema_block 的产物）——给了它，
+        render_critique 就能在报错里**点名**模型编造的表名/列名，并从 schema
+        里找最接近的真名建议给它（原版 few-shot critique 的 MVE 确定性版本）。
         """
         obs = list(observations or [])
         ok_calls = [o for o in obs if o.get("ok")]
         rows = sum(int(o.get("rows") or 0) for o in ok_calls)
         real = any(has_real_data(o) for o in ok_calls)
         success = bool(ok_calls) and rows >= self.min_rows and real
-        return success, self.render_critique(observations=obs, task=task or {})
+        return success, self.render_critique(
+            observations=obs, task=task or {}, schema=schema)
 
     # ---------- critique：SQL 语言的可枚举反馈 ----------
     def render_critique(
-        self, *, observations: list[dict[str, Any]], task: dict[str, Any]
+        self, *, observations: list[dict[str, Any]], task: dict[str, Any],
+        schema: str = "",
     ) -> str:
         """回给 Voyager 的话：工具成败、取到几行、SQL 报什么错、口径提示。
 
         刻意**不含**：VLML 判决、得分、覆盖率、参考答案数值。
+
+        2026-10-14：失败调用的报错会过 `_suggest_names` —— 点名编造的名字、
+        附 schema 里最像的真名（比「检查表名/列名是否在库里」这种泛泛指引
+        具体得多，原版 critic few-shot 的确定性同构）。
         """
         lines: list[str] = []
         if task.get("task"):
@@ -161,6 +231,9 @@ class VLMLCriticAgent:
                 lines.append(f"  ✓ {tool}：取到 {o.get('rows', 0)} 行")
             else:
                 lines.append(f"  ✗ {tool}：{o.get('error') or '调用失败'}")
+                sug = _suggest_names(o.get("error") or "", schema)
+                if sug:
+                    lines.append(f"    → {sug}")
 
         if not ok_calls:
             lines.append("所有取数都失败了 —— 链路没跑通。检查表名/列名是否在库里、SQL 是否可执行。")

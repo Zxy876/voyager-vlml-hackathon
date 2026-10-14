@@ -244,7 +244,7 @@ def _retrieve_skills(
 
 
 async def _generate_new_task(curr: Any, env: Any, act: Any = None,
-                             max_tries: int = 3, max_iters: int = 3
+                             max_tries: int = 3, max_iters: int = 4
                              ) -> tuple[str, str, list[dict[str, Any]], str,
                                         list[str]]:
     """生成一个新任务，**并且先验证它真的能从库里取到数**。
@@ -372,7 +372,7 @@ async def run_one_round(
     scope: dict[str, Any] | None = None,
     topic_id: str | None = None,
     use_llm: bool = True,
-    max_iters: int = 3,
+    max_iters: int = 4,
     curr: Any = None,
     env: Any = None,
 ) -> dict[str, Any]:
@@ -575,7 +575,7 @@ async def run_rounds(
     *,
     scope: dict[str, Any] | None = None,
     use_llm: bool = True,
-    max_iters: int = 3,
+    max_iters: int = 4,
 ) -> list[dict[str, Any]]:
     """连跑 n 轮（共享 env 与课程状态）。
 
@@ -685,7 +685,7 @@ def _main() -> int:
     ap = argparse.ArgumentParser(description="VLML 同构学习循环 · 一轮（自己出题取数）")
     ap.add_argument("--topic", default="", help="钉住某个知识点（不给则走课程选题）")
     ap.add_argument("--no-llm", action="store_true", help="不出题不写 SQL（仅演示骨架）")
-    ap.add_argument("--iters", type=int, default=3, help="写 SQL 的迭代修正轮数")
+    ap.add_argument("--iters", type=int, default=4, help="写 SQL 的迭代修正轮数（对齐原版 task_max_retries=4）")
     ap.add_argument("--rounds", type=int, default=1,
                     help="连跑几轮；**0 = 不停**（同构原版 while True，只有点停止才退出）")
     ap.add_argument("--max-iterations", type=int, default=0,

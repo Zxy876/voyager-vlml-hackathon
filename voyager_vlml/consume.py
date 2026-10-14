@@ -341,6 +341,11 @@ def _method_compare(question: str, v_sql: str, v_obs: list[dict[str, Any]],
                          "并在 diff 里写清「是裁判多算了什么/少算了什么」。\n"
                          "    reason 里必须写「Voyager 无硬伤」或「Voyager 有硬伤：…」，"
                          "与 voyager_sound 保持一致（别自相矛盾）。\n"
+                         "⚠️ 两边结果的**形态可能不同**（Voyager 常是宽列结果，"
+                         "VLML 裁判常回 dimension/value 两列的行）—— 比值上同一个数，"
+                         "不要因为长得不像就判不一致：先在两边各自找到对应的数值"
+                         "（如 100% vs 1.0、7 vs sample_size=7）再判。"
+                         "只有同一个量两边算出**不同的值**时，agreement 才该低。\n"
                          "⚠️ 两边都取到 0 行时，SQL 再像也**没有数可比** —— "
                          "这时 agreement 必须给 0，same_metric=false，"
                          "reason 写明「两边都没取到数，无从比对」。别把两个空结果"
@@ -387,12 +392,31 @@ def _narrate(question: str, obs: list[dict[str, Any]],
         ensure_ascii=False, default=str)[:9000]
     extra = ""
     if compare:
+        # ⚠️ 2026-10-14：一致度低 ≠ 谁有硬伤。实测踩过：两边值其实一样
+        #    （100% vs 1.0、7 vs sample_size=7）只是形态不同，裁判模型误判
+        #    agreement=0，叙事端照「一致度 0%」写成「结论不可靠」——
+        #    把「没能相互印证」错译成「答案不可靠」，冤枉了正确的答案。
+        #    现在三种情形分开措辞，**只有 voyager_sound=false 才允许说硬伤**：
+        ag = float(compare.get("agreement") or 0.0)
+        same = bool(compare.get("same_metric"))
+        sound = bool(compare.get("voyager_sound"))
+        if not sound:
+            verdict = f"Voyager 的做法有硬伤：{compare.get('reason') or ''}"
+        elif ag >= 0.8:
+            verdict = ("两种独立做法算出同一个结果，结论可互相印证"
+                       f"（一致度 {ag:.0%}）")
+        elif same:
+            verdict = (f"两种做法算的是同一个量，但算出的值不一致"
+                       f"（一致度 {ag:.0%}）—— 需谨慎对待这个结论")
+        else:
+            verdict = (f"两种做法口径不同，这次没能相互印证（一致度 {ag:.0%}）"
+                       "—— 注意：**这不等于答案错误**，Voyager 自己的做法没有硬伤")
         extra = (
-            f"\n\n另外，VLML 独立取过一遍，比对结论：一致度 {compare['agreement']:.0%}，"
-            f"{'做法站得住' if compare.get('voyager_sound') else '做法有硬伤'}；"
+            f"\n\n另外，VLML 独立取过一遍，比对结论：{verdict}；"
             f"{compare.get('reason') or ''}"
             f"{('；差别：' + compare['diff']) if compare.get('diff') else ''}\n"
-            "回答里照实说，别替它遮掩硬伤。"
+            "回答里照实说这个比对结论，用上面给的措辞口径，不要自行升级成"
+            "「结论不可靠」（只有「做法有硬伤」那种情形才这么说）。"
         )
     return chat(
         [
@@ -531,7 +555,7 @@ async def consume(
             print(f"  （配方回填后没取到真数，降级为现场写 SQL：{note[:60]}）")
         reused, sql = False, ""
         act = VLMLActionAgent(env=env)
-        observations, sql = await act.solve(question, max_iters=3)
+        observations, sql = await act.solve(question, max_iters=4)
 
     ok_calls = [o for o in observations if o.get("ok")]
     # 真的取到了数（ok 且非真空）—— 判分 / 回答 / 沉淀都只认这个，
@@ -931,7 +955,7 @@ async def _referee_observations(question: str,
     if env is not None:
         from voyager_vlml.agents.action import VLMLActionAgent
         act = VLMLActionAgent(env=env)
-        observations, sql2 = await act.solve(q2, max_iters=3)
+        observations, sql2 = await act.solve(q2, max_iters=4)
         ok_obs = [o for o in observations if o.get("ok")]
         # ⚠️ 2026-10-14：ok ≠ 取到数。空表纯聚合返回 1 行 (NULL, 0)，
         #   ok=True 但是真空 —— 重新打包时不能把真空洗成"成功观察"，

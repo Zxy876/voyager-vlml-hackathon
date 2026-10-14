@@ -139,11 +139,15 @@ class VLMLMCPEnv:
         """执行一条 SQL（模型写的取数代码在这里跑）。"""
         return await self.call("query_sql", sql_query=sql)
 
-    async def schema_block(self, max_cols: int = 14, max_tables: int = 24) -> str:
+    async def schema_block(self, max_cols: int = 20, max_tables: int = 24) -> str:
         """实查当前库的表与列，渲染成给模型看的 schema 文本块。
 
         照伴学 entity_catalog 的「实查不写死」原则：出题与写 SQL 都只能引用
         这里真实存在的表名/列名，避免模型编造。
+
+        ⚠️ max_cols=20 是 2026-10-14 实测调过的：14 列时
+        `ext_player_round_stats` 的 `first_kill`（第 16 列）**正好被截掉**——
+        模型看不到首血列，首血题就永远写不对。列预算必须盖住最宽的表。
         """
         obs = await self.run_sql(
             "SELECT table_name, column_name, data_type FROM information_schema.columns "
@@ -231,6 +235,25 @@ class VLMLMCPEnv:
         # 有数据的表排前面、空表沉到最后：schema 文本有长度上限（max_tables），
         # 真被截断时宁可丢空表，也不能把唯一有数据的 ext_* 表截没了
         # （它们字母序靠后，不排序就会被先截掉）。
+        #
+        # ⚠️ 2026-10-14 结构性修法（Nemotron 实测）：光在 prompt 里警告
+        # 「空表别查」不够 —— 模型看到名字「对」的表（agg_first_blood_stats
+        # 就是为首血而生的表）就选它，哪怕旁边标着 0 行，实测 3 轮迭代都
+        # 改不了口。所以把空表**移出可选列表**、单独列成禁用名单：
+        # 选错表在结构上不可能，而不是靠模型自觉。
+        #   原版 Voyager 不需要这一条——MineDojo 的 env  API 是固定的，
+        #   没有「哪张表有数据」这个问题；MVE 直面 DuckDB，必须自己管。
+        if counts:
+            live = [(t, c) for t, c in cols.items() if (counts.get(t) or 0) > 0]
+            dead = sorted(t for t in cols if not (counts.get(t) or 0))
+            live.sort(key=lambda kv: -(counts.get(kv[0]) or 0))
+            lines = [_line(t, c) for t, c in live[:max_tables]]
+            if dead:
+                lines.append(
+                    "\n⚠️ 以下表是 **0 行空表**——禁止在 SQL 里引用（查它们只会得到 "
+                    "(NULL, 0) 这种看似有结果的真空值，行数判据会被它骗过）：\n"
+                    + "、".join(dead))
+            return "\n".join(lines)
         ordered = sorted(cols.items(), key=lambda kv: -(counts.get(kv[0]) or 0))
         return "\n".join(_line(t, c) for t, c in ordered[:max_tables])
 

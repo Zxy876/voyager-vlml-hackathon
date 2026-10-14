@@ -1,0 +1,104 @@
+{
+  "question": "在 'Split' 地图上，G2 Esports 队在赢得首血之后，平均每回合能赢下多少比例的回合？请同时给出样本量。",
+  "topic_id": "fb_conversion_analysis",
+  "topic_hit": "首血之后（归到的题与这句话不是同一个问题：第一个问题是关于 G2 Esports 在 Split 地图上赢得首血后每回合获胜的平均比例及样本量；第二个问题是关于 Cloud9 在某系列赛中输掉比赛时首血转换出现的问题。涉及的队伍、地图、问题类型（定量比率 vs 定性问题）均不同，故不是同一个问题。）",
+  "mode": "voyager_consume",
+  "source": "human_import",
+  "validated_target": false,
+  "reused": false,
+  "reuse_note": "The existing formula calculates total rounds in a given series_id, which is a different quantity than the win proportion after first blood on a specific map for a team; therefore it cannot be reused.",
+  "used_skills": [
+    {
+      "topic": "vlml_grain_round",
+      "name": "vlml_grain_round",
+      "key": "vlml_grain_round::vlml_grain_round"
+    }
+  ],
+  "skills_found": 1,
+  "trajectory": [
+    "query_sql"
+  ],
+  "tool_calls": 2,
+  "ok_tool_calls": 1,
+  "rows": 1,
+  "real_rows": 1,
+  "vacuous": false,
+  "sql": "SELECT \n    SUM(CASE WHEN r.winning_team_name = 'G2 Esports' THEN 1 ELSE 0 END) * 1.0 / COUNT(*) AS win_proportion,\n    COUNT(*) AS sample_size\nFROM ext_player_round_stats eprs\nJOIN rounds r\n  ON eprs.series_id = r.series_id\n AND eprs.game_id = r.game_id\n AND eprs.map_name = r.map_name\n AND eprs.round_number = r.round_number\nWHERE eprs.team_name = 'G2 Esports'\n  AND eprs.map_name = 'Split'\n  AND eprs.first_kill = TRUE;",
+  "errors": [
+    "Query execution failed: Binder Error: Table \"r\" does not have a column named \"map\"\n\nCandidate bindings: : \"map_name\", \"game_id\", \"started_at\"\n\nLINE 8:  AND eprs.map_name = r.map\n                             ^"
+  ],
+  "facts": [
+    {
+      "subject": {
+        "team": "G2 Esports",
+        "map": "Split"
+      },
+      "dimension": "win_rate_after_first_blood",
+      "value": 1.0,
+      "unit": "ratio",
+      "base": 7,
+      "scope": {},
+      "source": {
+        "tool": "query_sql",
+        "args": {}
+      }
+    },
+    {
+      "subject": {
+        "team": "G2 Esports",
+        "map": "Split"
+      },
+      "dimension": "sample_size",
+      "value": 7,
+      "unit": "count",
+      "base": 1,
+      "scope": {},
+      "source": {
+        "tool": "query_sql",
+        "args": {}
+      }
+    }
+  ],
+  "facts_count": 2,
+  "answer": "\n\n在 Split 地图上，G2 Esports 首血后赢得的回合比例为 **1.0**（即全胜），样本量为 **7**。VLML 独立复核得出完全一致的结果（比例 1.0，样本 7），两种方法结论完全一致，无任何硬伤。",
+  "answer_note": "（叙事洞察：LLM 基于取到的原始数据产出，并照实说了与 VLML 做法比对的结论）",
+  "referee_sql": "SELECT\n  SUM(CASE WHEN r.winning_team_name = 'G2 Esports' THEN 1 ELSE 0 END) * 1.0 / NULLIF(COUNT(*), 0) AS win_rate_after_first_blood,\n  COUNT(*) AS sample_size\nFROM ext_player_round_stats epr\nJOIN rounds r\n  ON epr.series_id = r.series_id\n AND epr.game_id = r.game_id\n AND epr.round_number = r.round_number\n AND epr.map_name = r.map_name\nWHERE epr.team_name = 'G2 Esports'\n  AND epr.map_name = 'Split'\n  AND epr.first_kill = true;",
+  "referee_rows": 1,
+  "referee_trajectory": [
+    "query_sql"
+  ],
+  "method_compare": {
+    "agreement": 1.0,
+    "same_metric": true,
+    "voyager_sound": true,
+    "reason": "两种方法均计算 G2 Esports 在 Split 地图首血后获胜的回合比例，结果均为 1.0，样本量均为 7，无任何硬伤。",
+    "diff": ""
+  },
+  "method_reason": "两种方法均计算 G2 Esports 在 Split 地图首血后获胜的回合比例，结果均为 1.0，样本量均为 7，无任何硬伤。",
+  "method_diff": "",
+  "same_metric": true,
+  "voyager_sound": true,
+  "judged": true,
+  "coverage": 1.0,
+  "score": 100,
+  "verdict": "两边口径一致",
+  "covered_points": [
+    "在 Split 地图上，G2 Esports 在赢得首血后赢得回合的比例",
+    "在 Split 地图上，G2 Esports 赢得首血的回合数（样本量）"
+  ],
+  "missing_points": [],
+  "unjudgeable": [],
+  "coverage_referee": null,
+  "verdict_referee": "",
+  "mastered": true,
+  "skill_action": "已有配方，标记为用过且有效",
+  "mastered_total": 1,
+  "ability_total": 31,
+  "mastery": 0.0323,
+  "judge": "method_compare",
+  "skipped": "",
+  "derived_points": [
+    "在 Split 地图上，G2 Esports 在赢得首血后赢得回合的比例",
+    "在 Split 地图上，G2 Esports 赢得首血的回合数（样本量）"
+  ]
+}
