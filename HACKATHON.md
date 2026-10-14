@@ -1,5 +1,8 @@
 # MVE — Nebius × NVIDIA Global AI Hackathon Submission
 
+> **Devpost story field** (inspiration / what we learned / how we built it /
+> challenges): **[STORY.md](STORY.md)** — English, Markdown with LaTeX.
+
 > **Track: Personal AI** — *"Build an always-on, private assistant that works
 > for you while keeping your data under your control. Give it persistent
 > memory, reusable skills, access to the tools and information you choose,
