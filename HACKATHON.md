@@ -46,6 +46,65 @@ does not look at the model's attitude, only at the database:
 
 Under this criterion, "learned" is a verifiable event, not a self-reported one.
 
+## Learning from the original Voyager — and what we measured
+
+The project is a faithful re-implementation of Voyager's learning loop against a
+real database, so we went back to the original source
+(`voyager_original/`, MineDojo/Voyager) and ported three engineering mechanisms
+— while explicitly *not* porting its LLM-based success criterion (ours is
+stricter: database ground truth, not model opinion):
+
+| # | Mechanism | Original (line-referenced) | MVE implementation |
+|---|---|---|---|
+| 1 | 4-attempt retry budget per task | `action_agent_task_max_retries=4` (`voyager.py:30`), `done = iter >= 4 or success` (`:277-280`) | `solve(max_iters=4)` across practice, consumption and CLI; from attempt 3 the prompt mandates a *simplify-and-rewrite* (drop CTEs/nesting) |
+| 2 | Explain before code | `action_template.txt`'s Explain→Plan→Code structure | Two-part output `Explain: … / SQL: …`; extraction is line-anchored on `SQL:` (Explain text can contain the word "selected") |
+| 3 | Specific, name-calling critique | `critic.txt`'s few-shots teach the model to name exactly what's missing | `critic._suggest_names`: parses DuckDB Binder/Catalog errors for invented table/column names and suggests the closest real names from the live schema (difflib) — the deterministic isomorphic of few-shot specificity |
+
+Two correctness bugs surfaced only through **10 consecutive runs of the same
+question** (G2 Esports' round win rate after first blood on Split; expected
+100%, n=7 — verified against the vendored rib.gg database):
+
+1. **Empty tables had to leave the selectable list.** A prompt warning
+   "0-row tables return nothing" was not enough — the model kept selecting
+   `agg_first_blood_stats` (a table whose *name* is purpose-built for first
+   blood) across 3 correction rounds. `schema_block` now moves 0-row tables
+   into a separate forbidden list, so picking a dead table is structurally
+   impossible. Same fix round: `max_cols` 14→20, because `first_kill` (column
+   16 of `ext_player_round_stats`) was being truncated out of the schema.
+2. **agreement=0 ≠ "the answer is unreliable".** When the two sides return
+   different *shapes* (wide columns vs dimension/value rows), the comparison
+   model mis-scored agreement as 0 and the narrator wrote "conclusion
+   unreliable" — mistaking "failed to cross-check" for "wrong answer". Now
+   only `voyager_sound=false` licenses the phrase "has flaws".
+
+**Measured results (10 consecutive runs, Nemotron on Nebius Token Factory):**
+
+| Metric | Result |
+|---|---|
+| Voyager side retrieved real (non-vacuous) data | **10/10** |
+| Answer numerically correct (100% / n=7) | **10/10** |
+| Referee's independent query succeeded | 7/10 |
+| When the referee failed | Coverage left **empty** (never a faked 0) |
+| Practice loop under Nemotron | 3/3 rounds succeeded in 25s; skills grow from zero |
+
+**Skill retrieval is now vector-based, the way the original does it** — but
+without the heavy dependency: embeddings run on Nebius itself
+(`Qwen/Qwen3-Embedding-8B`, present in the live `/v1/models` catalogue), vectors
+are stored beside each skill in JSON, and cosine similarity replaces lexical
+matching (with automatic fallback to lexical when the embedding endpoint is
+unavailable). The cross-topic threshold was **calibrated, not guessed**: 8
+probes gave 0.66–0.70 for related rephrasings (including cross-language),
+0.45–0.47 for same-domain different questions, 0.26–0.34 for unrelated text →
+`VEC_CROSS_MIN_SIM = 0.40` (the midpoint of the measured 0.34–0.45 gap).
+
+**An honest open question**: we have *not* yet measured "how many skills until
+it can answer" as a number, and today's data says why — all 10 correct answers
+came from **on-the-spot SQL writing**, not skill reuse (the library had no
+first-blood recipe). The skill library's value shows up on questions where
+on-the-spot writing fails but reuse saves the round. The experiment is designed
+(clear library → human import → run k rounds → measure hit rate / reuse success
+/ degradation per k); the number gets reported when it exists, not before.
+
 ## Significant updates during the submission period
 
 The core prototype began on 2026-09-30 (inside the submission window that
@@ -73,6 +132,16 @@ between 2026-10-14 and 2026-10-30, during the submission period:
    (falsely green) now answers **100% / n=7** — G2 Esports' round win rate
    after winning first blood on Split, rib.gg public match data — with an
    independent referee re-query and coverage 1.0.
+5. **Three mechanisms ported from the original Voyager** (line-referenced in
+   code comments): 4-attempt retry budget (`voyager.py:30`),
+   Explain-before-SQL output (`action_template.txt`), and a deterministic
+   name-calling critique that parses DuckDB errors and suggests real schema
+   names — plus two correctness fixes those ports exposed (empty tables
+   structurally excluded from the schema; `agreement=0` no longer narrated
+   as "unreliable"). Measured on 10 consecutive runs: 10/10 real data.
+6. **Vector-based skill retrieval** (Qwen3-Embedding-8B on Nebius, cosine
+   similarity, threshold calibrated on 8 probes) — the original's Chroma
+   approach without the heavyweight dependency.
 
 ## Setup — running on Nebius
 

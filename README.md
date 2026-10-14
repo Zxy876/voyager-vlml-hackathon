@@ -1935,7 +1935,79 @@ python audit_skills.py
 
 ---
 
-## 22. 文档索引
+## 22. 向原版 Voyager 学习的三项改造（2026-10-14 实测）
+
+### 22.1 学什么、不学什么
+
+原版的**成败判据**是 LLM + 6 个 few-shot（`voyager_original/voyager/prompts/critic.txt`）；
+MVE 已换成 DuckDB 真值判据（`critic.is_vacuous` / `has_real_data`），比原版严——
+这个不学回去。学的是原版三个**工程机制**：
+
+| # | 机制 | 原版出处 | MVE 落地 |
+|---|---|---|---|
+| 1 | 重试预算 4 轮 | `action_agent_task_max_retries=4`（`voyager.py:30`），`done = iter>=4 or success`（`:277-280`） | `solve(max_iters=4)` + 消费线/练习线/CLI 默认全部对齐；第 3 轮起勒令「简化重写」（去掉 CTE/嵌套） |
+| 2 | Explain 前置 | `action_template.txt` 的 Explain→Plan→Code 三段式 | 输出改两段式 `Explain: … / SQL: …`；`_extract_sql` 的 `SQL:` 行锚定规则**必须先于**裸 SELECT 兜底（Explain 里可能出现 "selected the wrong table"） |
+| 3 | 点名式 critique | `critic.txt` few-shot 教出「具体指出差什么」（「还该存 copper_block、diorite…」） | `critic._suggest_names`：解析 DuckDB Binder/Catalog 报错里编造的表名/列名，difflib 从实查 schema 找最接近的真名——few-shot 具体性的**确定性同构**。实测 `winner_team` → `winning_team_name`（今天真踩过的坑） |
+
+原版没有而 MVE 已有的（不学回去）：planner 的 RETRY_COOLDOWN 冷却 + stalled 检测
+（原版 failed_tasks 只是账本，失败的任务还会重遇）。
+
+### 22.2 顺带修掉的两个正确性问题（10 连跑才暴露的）
+
+1. **空表必须移出可选列表**：只在 prompt 里警告「0 行别查」不够——Nemotron 看到
+   `agg_first_blood_stats` 这名字「就是为首血而生」反复选它（实测 3 轮迭代改不了口）。
+   `schema_block` 现在把 0 行表单独列成**禁用名单**，选错表在结构上不可能。
+   连带修：`max_cols` 14→20——`ext_player_round_stats.first_kill` 是第 16 列，
+   14 列预算正好把它截掉，模型根本看不到首血列。
+2. **一致度 0 ≠ 结论不可靠**：两边结果形态不同（Voyager 宽列 vs 裁判 dimension/value 行）
+   会让裁判模型误判 `agreement=0`，叙事端照「0%」写成「结论不可靠」——把「没能相互印证」
+   错译成「答案错误」。现在只有 `voyager_sound=false` 才允许说「有硬伤」；
+   形态无关的比值指引也加进了比对 prompt。
+
+### 22.3 实测：同题 10 连跑（G2 Split 首血后胜率，期望 100%/n=7）
+
+| 指标 | 结果 |
+|---|---|
+| Voyager 侧取到真数（非真空） | **10/10** |
+| 答案数值正确（100%/n=7） | **10/10**（2 次表述写「1.0/全胜」没写「100%」字样，是测试脚本字符串判定的粗糙，数值全对） |
+| 裁判独立取数成功 | 7/10 |
+| 裁判失败时的行为 | **如实留空**（coverage=None），不拿 0 分冒充——判据层设计如此 |
+| 练习线（Nemotron 驱动） | 3/3 成功，25 秒，技能从 0 增长 |
+
+### 22.4 轻量向量库（用户定的「原版用向量库我们也用」）
+
+原版 = Chroma + OpenAIEmbeddings（`skill.py:43-47`）。MVE 同构思路但不引重依赖：
+embedding 走 **Nebius Token Factory 的 Qwen3-Embedding-8B**（在 `/v1/models` 清单里
+实测存在），向量随技能存 JSON，检索时自算余弦；embedding 不通全程降级词面 Jaccard。
+**全栈不出 Token Factory**，符合参赛规则。
+
+跨题阈值实测定标（8 探针，2026-10-14）：
+
+| 探针类别 | cos 区间 |
+|---|---|
+| 同轴换说 / 跨语言（相关） | 0.66 – 0.70 |
+| 同领域异题 / 同义换说 | 0.45 – 0.47 |
+| 完全无关（红烧肉/天气/写诗） | 0.26 – 0.34 |
+
+分界带 0.34–0.45，`VEC_CROSS_MIN_SIM=0.40`。样本小（8 条），是定标起点不是定律；
+换 embedding 模型必须重测。
+
+### 22.5 「多少条技能才有回答能力」——实验设计与诚实状态
+
+用户问的阈值问题，今日数据**还答不出数字**，先把实验设计钉在这里：
+
+1. 清空技能库（从 0 开始）；
+2. 人导入目标题（control fact 驱动出题器，`planner.human_focus`）；
+3. 练习线跑 k = 1,2,3,… 轮，每轮后测一次消费线同题，记三个数：
+   检索命中率（有没有复用上）、复用成功率、降级为现场写的成功率；
+4. 阈值 = 三个数都稳定的最小 k。
+
+**为什么今天答不出**：今天的同题 10/10 全是**现场写**答出来的（库里没有首血配方，
+检索不到 → 现场写 → 选对表 → 答对）。也就是说「能回答」的下限由现场写兜着，
+不由技能库兜着——技能库的价值要在「现场写会失败、复用能救」的题上才测得出来
+（多步题、口径刁钻的题）。这个数字等跑到那种题再报，**不编**。
+
+## 23. 文档索引
 
 | 文档 | 内容 |
 |---|---|
