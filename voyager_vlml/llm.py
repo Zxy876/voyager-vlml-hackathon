@@ -31,9 +31,9 @@ def _warn_no_nebius() -> None:
         return
     _WARNED_FALLBACK = True
     print(
-        "⚠️ [llm] 未配置 NEBIUS_API_KEY，LLM 调用回退到非 Nebius 后端。\n"
-        "   黑客松提交必须跑在 Nebius Token Factory + NVIDIA 开源模型上——\n"
-        "   请在 mve/.env 里填 NEBIUS_API_KEY（见 .env.example）。",
+        "WARNING [llm]: NEBIUS_API_KEY is not set; LLM calls are falling back to a non-Nebius backend.\n"
+        "   The hackathon rules require running on Nebius Token Factory + NVIDIA open models —\n"
+        "   set NEBIUS_API_KEY in mve/.env (see .env.example).",
         file=sys.stderr,
     )
 
@@ -100,7 +100,7 @@ def chat(
 
     url, key, model = _endpoint()
     if not key:
-        raise RuntimeError("缺少 LLM 密钥（MVE_QUIZ_API_KEY 或 ZHIPU_API_KEY）")
+        raise RuntimeError("No LLM key configured (NEBIUS_API_KEY, MVE_QUIZ_API_KEY, or ZHIPU_API_KEY)")
 
     last = ""
     for _ in range(retries):

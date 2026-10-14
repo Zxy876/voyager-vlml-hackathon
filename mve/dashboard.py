@@ -254,6 +254,7 @@ button,textarea,select{font:inherit}
   color:var(--brand-strong);border:1px solid rgba(47,125,87,.20);border-radius:10px;
   background:rgba(237,248,240,.92);font-size:17px}
 .workspace-tab__label{min-width:0;font-size:13.5px;font-weight:700;line-height:1.25}
+.tab-en{display:block;font-size:10px;font-weight:400;opacity:.62;letter-spacing:.02em}
 .workspace-tab__status{min-width:0;font-size:11.5px;color:var(--muted);line-height:1.35;
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
@@ -401,22 +402,22 @@ li{margin:3px 0}
 const ESC = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 
 const TABS = [
-  {id:'overview', icon:'📈', label:'概览',
+  {id:'overview', icon:'📈', label:'概览', en:'Overview',
    // 学习曲线接消费能力侧之后，这一格直接报"累计会做几道"（原版口径），
    // 没有消费记录时报本页有什么，不报"掌握度 xx%"（练习线不判分，那个数恒空）。
    status:s=>{const cc=s.consume_curve||[];
      return cc.length?('会做 '+(cc[cc.length-1].mastered_total||0)+' 道'):'判据区 / 学习曲线';}},
-  {id:'practice', icon:'🎯', label:'练习',   status:s=>s.topic_id||'—'},
-  {id:'import',   icon:'✍️', label:'人导入', status:s=>(s.imports||[]).length+' 条导入'},
-  {id:'trace',    icon:'🧭', label:'轨迹',   status:s=>s.total_rounds+' 轮'},
-  {id:'skill',    icon:'🧠', label:'技能 · 因果', status:s=>(s.skill_stats&&s.skill_stats.skills||0)+' 条技能'},
-  {id:'graph',    icon:'🕸', label:'知识图谱',
+  {id:'practice', icon:'🎯', label:'练习', en:'Practice',   status:s=>s.topic_id||'—'},
+  {id:'import',   icon:'✍️', label:'人导入', en:'Human Import', status:s=>(s.imports||[]).length+' 条导入'},
+  {id:'trace',    icon:'🧭', label:'轨迹', en:'Trace', status:s=>s.total_rounds+' 轮'},
+  {id:'skill',    icon:'🧠', label:'技能 · 因果', en:'Skills & Causal', status:s=>(s.skill_stats&&s.skill_stats.skills||0)+' 条技能'},
+  {id:'graph',    icon:'🕸', label:'知识图谱', en:'Knowledge Graph',
    status:s=>s.practice_scope&&s.practice_scope.active?('范围：'+s.practice_scope.label):'维度 → 工具'},
-  {id:'voyager', icon:'🤖', label:'MC 真实学习',
+  {id:'voyager', icon:'🤖', label:'MC 真实学习', en:'MC Real Learning',
    status:s=>(s.voyager&&s.voyager.running)?'学习中':((s.voyager&&s.voyager.completed_count)?('已学 '+(s.voyager.completed_count)+' 技能'):'空闲')},
-  {id:'adaptive', icon:'🧩', label:'自适应练习',
+  {id:'adaptive', icon:'🧩', label:'自适应练习', en:'Adaptive Practice',
    status:s=>(s.teaching&&s.teaching.target)?('目标难度'+s.teaching.target):'知识点图谱'},
-  {id:'console',  icon:'🖥', label:'运行日志',
+  {id:'console',  icon:'🖥', label:'运行日志', en:'Run Log',
    status:s=>{const p=s.pilot||{}; return p.running?'运行中':(p.winding_down?'收尾中':'空闲');}},
 ];
 let TAB = localStorage.getItem('mve_tab') || 'overview';
@@ -566,7 +567,7 @@ function renderNav(s){
   document.getElementById('nav').innerHTML = TABS.map(t=>`
     <button class="workspace-tab" role="tab" data-tab="${t.id}" aria-selected="${TAB===t.id}">
       <span class="workspace-tab__icon">${t.icon}</span>
-      <span class="workspace-tab__label">${t.label}</span>
+      <span class="workspace-tab__label">${t.label}<span class="tab-en">${t.en||''}</span></span>
       <span class="workspace-tab__status">${ESC(t.status(s))}</span>
     </button>`).join('');
 }

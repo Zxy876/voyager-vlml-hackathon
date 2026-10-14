@@ -62,3 +62,4 @@ vlml/data/raw_events_rib/
 vlml/data/vlml_vlr.duckdb
 vlml/data/vlml_events.duckdb
 _parsed/
+vlml/data/raw_events
