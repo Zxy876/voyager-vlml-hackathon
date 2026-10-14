@@ -1,0 +1,58 @@
+# Schema Initialization Configuration
+# Defines the order and files for initializing the VLML OLAP database
+
+database:
+  path: "data/vlml_events.duckdb"
+
+# Schema initialization steps (executed in order)
+steps:
+  - name: "Reference Tables"
+    description: "Create reference/lookup tables"
+    files:
+      - "database/seeds/agent_roles.sql"
+      - "database/seeds/weapon_types.sql"
+      - "database/seeds/map_zones.sql"
+      - "database/seeds/ref_win_probability_factors.sql"
+
+  - name: "Layer 1: Atomic Tables"
+    description: "Create atomic event tables"
+    files:
+      - "database/schema/series.sql"
+      - "database/schema/games.sql"
+      - "database/schema/rounds.sql"
+      - "database/schema/base_events.sql"
+
+  - name: "Layer 2: Aggregated Metrics"
+    description: "Create aggregated player and team tables"
+    files:
+      - "database/schema/agg_player_round_stats.sql"
+      - "database/schema/agg_player_game_stats.sql"
+      - "database/schema/agg_player_series_stats.sql"
+      - "database/schema/agg_team_round_stats.sql"
+      - "database/schema/agg_team_game_stats.sql"
+
+  - name: "Layer 3: Time-Series Aggregations"
+    description: "Create time-series aggregation tables"
+    files:
+      - "database/schema/agg_player_daily_stats.sql"
+      - "database/schema/agg_tournament_stats.sql"
+
+  - name: "Layer 4: Derived Aggregates"
+    description: "Create derived aggregate tables for analytics"
+    files:
+      - "database/schema/agg_first_blood_stats.sql"
+      - "database/schema/agg_post_plant_stats.sql"
+      - "database/schema/agg_team_round_summary.sql"
+      - "database/schema/agg_team_map_stats.sql"
+      - "database/schema/agg_team_series_stats.sql"
+      - "database/schema/agg_player_win_shares.sql"
+
+# Validation query to check if initialization was successful
+validation:
+  query: |
+    SELECT
+      'Schema initialized' AS status,
+      COUNT(*) AS table_count
+    FROM information_schema.tables
+    WHERE table_schema = 'main'
+  expected_table_count: 21

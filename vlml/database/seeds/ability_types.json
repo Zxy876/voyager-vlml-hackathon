@@ -1,0 +1,12 @@
+{
+  "overrides": {},
+  "keywords": {
+    "flash": ["flash", "blind", "curveball", "dazzle", "flare", "nearsight"],
+    "stun": ["stun", "concuss", "seize", "gravnet", "tether", "detain", "slow"],
+    "smoke": ["smoke", "cloud", "orb", "screen", "wall", "cove", "darkcover", "poisoncloud"],
+    "recon": ["recon", "scan", "reveal", "drone", "haunt", "prowler", "camera", "trailblazer", "reconbolt", "owl"],
+    "damage": ["molly", "incendiary", "grenade", "blast", "shock", "nanoswarm", "paintshells", "snakebite", "frag", "rocket", "shrapnel"],
+    "heal": ["heal", "mend", "regrowth", "resurrection", "devour", "rejuvenate"],
+    "movement": ["dash", "slide", "teleport", "updraft", "satchel", "blastpack", "tunnel", "gatecrash", "shroudedstep"]
+  }
+}

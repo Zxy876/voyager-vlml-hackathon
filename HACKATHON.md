@@ -1,6 +1,6 @@
-# MVE — Nebius × NVIDIA Global AI Hackathon 提交说明
+# MVE — Nebius × NVIDIA Global AI Hackathon Submission
 
-> **Track: Personal AI** —— *"Build an always-on, private assistant that works
+> **Track: Personal AI** — *"Build an always-on, private assistant that works
 > for you while keeping your data under your control. Give it persistent
 > memory, reusable skills, access to the tools and information you choose,
 > and the ability to carry out tasks across your daily workflows."*
@@ -11,106 +11,141 @@
 > success verified against the database itself, not against another model's
 > opinion.
 
-## 一句话
+## In one sentence
 
-**Voyager 的学习闭环 × 真实数据库取证**：agent 自己出题、自己写 SQL、取到数才算学会；
-学会的每条取数配方进技能库；下次你再问，它复用配方回答——**记忆在技能库里，
-不在模型权重里**（这正是本赛道的 "persistent memory, reusable skills"）。
+**Voyager's learning loop × database ground truth**: the agent writes its own
+questions, writes its own SQL, and only counts a question as "learned" when it
+actually retrieved data from the database; every learned recipe goes into a
+skill library; the next time you ask, it reuses the recipe to answer you —
+**the memory lives in the skill library, not in the model weights** (which is
+precisely this track's "persistent memory, reusable skills").
 
-## 为什么是 Personal AI，而不是又一个聊天机器人
+## Why Personal AI, not another chatbot
 
-| Personal AI 赛道要求 | MVE 的对应实现 |
+| Personal AI track requirement | How MVE implements it |
 |---|---|
-| persistent memory（持久记忆） | `mve/skill_store.json`：每条技能 = 一条验证过的 SQL 配方 + 一句话方法 + 命中/成功计数。重启不丢，跨会话复用 |
-| reusable skills（可复用技能） | 检索键是**任务文本**（同构原版 Voyager `retrieve_skills(query=context)`，无 topic_id 路由层）；同名技能 Rewriting 不膨胀 |
-| access to the tools you choose（自选工具） | 10 个 MCP 数据工具（`query_sql` + `get_database_info` + 8 个报告），agent 自己决定调哪个 |
-| carry out tasks across workflows（跨工作流执行） | 两条线：**练习线**（自己出题→写 SQL→取数→固化技能）和**消费线**（你问一句→复用技能回答→裁判独立复核） |
-| your data under your control（数据自主） | 全部数据在本地 DuckDB；LLM 只生成 SQL，**不回传数据**；换数据源 = 改一行 `db_config.json` |
+| persistent memory | `mve/skill_store.json`: every skill = a verified SQL recipe + a one-line method description + hit/success counters. Survives restarts, reused across sessions |
+| reusable skills | the retrieval key is the **task text** (isomorphic to the original Voyager `retrieve_skills(query=context)` — no topic_id routing layer); same-name skills get rewritten, not duplicated |
+| access to the tools you choose | 10 MCP data tools (`query_sql` + `get_database_info` + 8 report tools); the agent itself decides which one to call |
+| carry out tasks across workflows | two loops: the **practice loop** (self-quiz → write SQL → retrieve → consolidate skill) and the **consumption loop** (you ask one sentence → reuse skills → referee independently re-checks) |
+| your data under your control | all data lives in a local DuckDB file; the LLM only ever generates SQL and **never receives the data**; switching data sources = one line in `db_config.json` |
 
-## 它解决的真实问题（Potential Impact）
+## The real problem it solves (Potential Impact)
 
-LLM 会"答得像"但取不到真数：空表上一条聚合 SQL 返回 `(NULL, 0)`，行数判据
-`rows ≥ 1` 会把它当成"取到数了"——坏配方就此固化成"技能"，复用时答出
-**0% / 样本量 0** 这种看起来完整的假答案（本项目 2026-10-14 实测踩到并修复，
-见 README 第 21 章）。MVE 的 critic 不看模型态度，只看数据库：
-**取到数 ⇔ 至少一次工具调用成功 且 结果里有真实值**（全 NULL、除 0 外全 NULL
-都算没取到）。在这个判据下，"学会"是可验证的事件，不是自报的。
+LLMs can *answer as if* they retrieved data without retrieving any: on an
+empty table, an aggregate SQL still returns one row `(NULL, 0)`, and a
+row-count criterion `rows >= 1` counts that as "data retrieved" — the bad
+recipe gets frozen into a "skill", and its later reuse produces a **0% /
+sample size 0** fake answer that looks perfectly complete (we hit and fixed
+exactly this on 2026-10-14; full record in README chapter 21). MVE's critic
+does not look at the model's attitude, only at the database:
 
-## 提交期内的重大更新（项目早于提交期，按规则说明）
+> **Data retrieved ⇔ at least one tool call succeeded AND the result contains
+> at least one real value.** All-NULL, or all-NULL-except-zeros, both count as
+> "not retrieved".
 
-项目主体开发于 2026-09-30 起（Voyager × VLML 同构迁移）。提交期内
-（2026-10-14 → 10-30）完成：
+Under this criterion, "learned" is a verifiable event, not a self-reported one.
 
-1. **LLM 后端迁到 Nebius Token Factory**：全仓库 LLM 调用收敛到唯一出口
-   `voyager_vlml/llm.py`（OpenAI 兼容 HTTP，无 SDK 依赖），`NEBIUS_API_KEY`
-   在即走 Token Factory + NVIDIA Nemotron；未配密钥时每次调用大声警告，
-   防止演示悄悄回退到非 Nebius 后端（那等于提交不符合规则的项目）。
-2. **「真空成功」修复**（判据层）：`critic.is_vacuous` / `has_real_data`——
-   把"取到数"从"工具 ok 且行数 ≥ 1"收紧到"至少一个真实值"；消费线五处闸门
-   （降级判据/事实/裁判/方法比对/叙事/沉淀）与裁判侧重打包逻辑全部只认真数。
-   单测 22 项（`test_vacuum.py`）。
-3. **技能库真空审计**（`audit_skills.py`）：19 条技能逐条对库实跑，6 条真空，
-   4 条换已验证 SQL、2 条修模式/口径 bug——换数据源后必跑此脚本。
+## Significant updates during the submission period
 
-## 怎么在 Nebius 上跑（Setup）
+The core prototype began on 2026-09-30 (inside the submission window that
+opened 2026-08-26), evolving along the main development line at
+<https://github.com/Zxy876/voyager-vlml-mve>. Everything below was built
+between 2026-10-14 and 2026-10-30, during the submission period:
+
+1. **LLM backend moved to Nebius Token Factory.** Every LLM call in the repo
+   now funnels through a single egress, `voyager_vlml/llm.py`
+   (OpenAI-compatible HTTP, zero SDK dependencies). With `NEBIUS_API_KEY`
+   set, calls go to Token Factory + NVIDIA Nemotron; without a key, every
+   call prints a loud warning — so a demo can never silently fall back to a
+   non-Nebius backend (that would be a rule-violating submission).
+2. **"Vacuum success" fix (criterion layer).** `critic.is_vacuous` /
+   `has_real_data` tighten "data retrieved" from "tool ok AND rows >= 1" to
+   "at least one real value". All five gates on the consumption loop
+   (degraded criterion / facts / referee / method comparison / narrative /
+   consolidation) and the referee observation repacking now only count real
+   values. 22 unit tests (`test_vacuum.py`).
+3. **Skill-store vacuum audit (`audit_skills.py`).** Every skill is re-run
+   against the live database: 19 audited, 6 found vacuous, 4 replaced with
+   verified SQL, 2 fixed for pattern/definition bugs. Run this script after
+   every data-source switch.
+4. **Same-task re-verification.** The recipe that used to answer 0% / n=0
+   (falsely green) now answers **100% / n=7** — G2 Esports' round win rate
+   after winning first blood on Split, rib.gg public match data — with an
+   independent referee re-query and coverage 1.0.
+
+## Setup — running on Nebius
 
 ```bash
-# 0) 依赖（duckdb + httpx，其余标准库；Python ≥ 3.10）
+# 0) dependencies (duckdb + httpx; everything else is stdlib; Python >= 3.10)
 pip install -r requirements.txt
 
-# 1) LLM 后端 = Nebius Token Factory + NVIDIA Nemotron
-cp .env.example mve/.env      # 填入 NEBIUS_API_KEY（studio.nebius.ai 创建）
-python scripts/check_llm.py   # 冒烟：列模型 + 实跑一次对话和 JSON 通道
+# 1) LLM backend = Nebius Token Factory + NVIDIA Nemotron
+cp .env.example mve/.env      # fill in NEBIUS_API_KEY (create at studio.nebius.ai)
+python scripts/check_llm.py   # smoke test: resolve endpoint + list models + real chat + JSON round-trip
 
-# 2) 数据层（VLML 数据层为第三方目录 vlml/，本仓库不含；数据来自 rib.gg 公开赛况）
-#    ingest 落盘 raw_events/ → run_pipeline 幂等入库（详见 README 第 14 章）
+# 2) the database is vendored in this repo (vlml/data/vlml_rib.duckdb,
+#    built from rib.gg public match records). To rebuild from source instead:
 python mve/vlml_source/ingest.py --event 2977 --max 8 --db vlml/data/vlml_rib.duckdb
-python mve/knowledge_graph.py --build    # 建图谱（可选，load() 带指纹守卫）
+python mve/knowledge_graph.py --build    # build the knowledge graph (optional; load() has a fingerprint guard)
 
-# 3) 跑起来
-python mve/dashboard.py                  # 面板 http://127.0.0.1:8777
-python -m voyager_vlml.loop --rounds 5   # 练习线：自己出题写 SQL，技能库开始增长
-# 消费线：面板「人导入」问一句，例如：
-#   在 'Split' 地图上，G2 Esports 队在赢得首血之后，平均每回合能赢下多少比例？
-#   请同时给出样本量。
-# 期望（已在 rib 库实查验证）：100%、样本量 7；裁判独立取数复核，覆盖率 1.0
+# 3) run it
+python mve/dashboard.py                  # dashboard at http://127.0.0.1:8777
+python -m voyager_vlml.loop --rounds 5   # practice loop: self-quiz + SQL; the skill library starts growing
+# consumption loop: in the dashboard's "Human Import" panel, ask one sentence, e.g.:
+#   On the 'Split' map, after G2 Esports wins the first blood, what fraction
+#   of rounds do they win on average? Include the sample size.
+# Expected (verified against the vendored rib database): 100%, sample size 7;
+# the referee independently re-queries; coverage 1.0
 ```
 
-**Demo（线上实例，Nebius 后端）**：部署后填写 —— 面板九个分区，建议走法：
-数据源确认 → 启动 Voyager → 运行中 → 轨迹 → 技能·因果（看技能库从 0 增长）
-→ 人导入同题复测。
+**Live demo (online instance on the Nebius backend)**:
+`<DEMO_URL — filled in before submission>` — the dashboard has nine panels;
+suggested tour: data-source check → Start Voyager → running → trajectory →
+skills & causal timeline (watch the skill library grow from 0) → Human Import
+same-task re-test.
 
-## 技术栈与 Nebius/NVIDIA 用量
+## Tech stack & Nebius/NVIDIA usage
 
-- **唯一 LLM 出口** `voyager_vlml/llm.py`：OpenAI 兼容 HTTP POST
-  `https://api.tokenfactory.nebius.com/v1/chat/completions`，Bearer `NEBIUS_API_KEY`，
-  模型 `nvidia/nemotron-3-super-120b-a12b`（默认；更省可换 nemotron-3-nano-30b-a3b）。
-- **LLM 在系统里干什么**（也只干这些）：出题、写 SQL、判真空后的 critique 引导、
-  叙事回答。**成败判据不经过 LLM**——由 DuckDB 取证给出（见上）。
-- **Token Factory 加速工作流的点**：练习线每轮 3 次以内迭代修正 + 消费线
-  裁判独立取数，都是 Nemotron 的短上下文、高频、低延迟调用；nano/super 分档
-  正好覆盖"快速日常调用 vs 认真推理"两档。
+- **Single LLM egress** `voyager_vlml/llm.py`: OpenAI-compatible HTTP POST to
+  `https://api.tokenfactory.nebius.com/v1/chat/completions`, Bearer
+  `NEBIUS_API_KEY`, model `nvidia/nemotron-3-super-120b-a12b` (default;
+  swap to `nvidia/nemotron-3-nano-30b-a3b` for cheaper/faster).
+- **What the LLM does here (and only this)**: writes questions, writes SQL,
+  generates critique guidance after vacuum detection, and narrates final
+  answers. **The success/failure criterion never passes through the LLM** —
+  it is decided by DuckDB ground truth (see above).
+- **Where Token Factory accelerates the workflow**: the practice loop's
+  up-to-3-iteration correction rounds and the consumption loop's independent
+  referee re-query are all short-context, high-frequency, low-latency calls —
+  the nano/super tier split maps exactly onto "fast everyday calls vs.
+  serious reasoning".
 
-## 诚实的限制（ Judges 值得知道 ）
+## Honest limitations (worth knowing for judges)
 
-1. 演示数据集是 Valorant 公赛数据（rib.gg）——引擎与数据源无关
-   （`db_config.json` 换库即换领域），但仓库里**验证过的技能是这份数据上的**。
-2. 模型能力上限如实报告：Nemotron/GLM 在 SQL 列名纠错上都会 3 轮改不对
-   （Binder Error 不消退），这时系统**如实记失败**，不假装学会——
-   判据保证"失败如实报失败"，不保证"模型一定写对 SQL"。
-3. 面板是原型完成度，不是产品打磨度；代码注释与 README 第 20 章
-   （调试档案）记录了完整踩坑史。
+1. The demo dataset is public Valorant match data (rib.gg). The engine is
+   data-source agnostic (swap the DB in `db_config.json` to switch domains),
+   but the **verified skills in this repo are specific to this dataset**.
+2. Model capability ceiling, reported honestly: both Nemotron and GLM can
+   spend 3 correction rounds still failing to fix a SQL column name (Binder
+   Error persists). The system then **records the failure as a failure** —
+   the criterion guarantees "failures are reported as failures"; it does not
+   guarantee the model always writes correct SQL.
+3. The dashboard is prototype-grade completeness, not product polish; code
+   comments and README chapter 20 (debugging archive) record the full
+   pitfall history.
 
-## 仓库结构（评委快速定位）
+## Repository map (for judges)
 
-| 路径 | 内容 |
+| Path | Contents |
 |---|---|
-| `voyager_vlml/loop.py` | 练习线：里程碑选题 → 出题 → 写 SQL → 判据 → 固化技能 |
-| `voyager_vlml/consume.py` | 消费线：问一句 → 复用技能 → 裁判复核 → 叙事回答 |
-| `voyager_vlml/agents/critic.py` | 判据层：真空检测 + SQL 语言 critique（回灌迭代） |
-| `voyager_vlml/llm.py` | **唯一 LLM 出口**（Nebius Token Factory 优先） |
-| `mve/skill_store.py` | 技能库（同构原版 SkillManager：同名 Rewriting） |
-| `mve/dashboard.py` | 面板（九个分区，线上演示入口） |
-| `test_vacuum.py` | 判据层单测（22 项） |
-| `audit_skills.py` | 技能库真空审计（换数据源后必跑） |
-| `README.md` | 完整文档（第 21 章 = 原版 Voyager 技能↔里程碑关系取证 + 本次修复全记录） |
+| `voyager_vlml/loop.py` | practice loop: milestone topic → self-quiz → write SQL → criterion → consolidate skill |
+| `voyager_vlml/consume.py` | consumption loop: one question → reuse skills → referee re-check → narrative answer |
+| `voyager_vlml/agents/critic.py` | criterion layer: vacuum detection + SQL-language critique (fed back into iteration) |
+| `voyager_vlml/llm.py` | **single LLM egress** (Nebius Token Factory first) |
+| `mve/skill_store.py` | skill library (isomorphic to the original SkillManager: same-name rewriting) |
+| `mve/dashboard.py` | dashboard (nine panels; the online demo entry) |
+| `vlml/` | the VLML data layer (21 tables + 46 insight SQL + 10 MCP tools), vendored with its LICENSE |
+| `test_vacuum.py` | criterion-layer unit tests (22 cases) |
+| `audit_skills.py` | skill-store vacuum audit (run after every data-source switch) |
+| `README.md` | full documentation (ch. 21 = original Voyager skill↔milestone provenance + this fix's full record; an English guide for judges sits at the top) |

@@ -1,0 +1,750 @@
+# VLML Database Data Dictionary
+
+Format: **Table name** followed by columns and descriptions.
+
+Notes:
+- Rate metrics are stored as numerator/denominator totals (no precomputed %).
+- Time averages use `*_sum_s` + `*_denom` when available.
+
+## agent_roles
+- `agent_name`: Agent name (primary key).
+- `agent_role`: Role category (duelist/initiator/controller/sentinel).
+- `is_duelist`: Role flag.
+- `is_initiator`: Role flag.
+- `is_controller`: Role flag.
+- `is_sentinel`: Role flag.
+
+## weapon_types
+- `weapon_name`: Weapon display name (primary key).
+- `weapon_type`: Type classification (rifle/smg/pistol/sniper/shotgun/heavy/melee/ability).
+
+## series
+- `series_id`: Series identifier (primary key).
+- `tournament_id`: Tournament identifier.
+- `tournament_name`: Tournament display name.
+- `tournament_year`: Tournament year.
+- `tournament_region`: Region bucket (americas/emea/pacific/china).
+- `team1_name`: Team 1 name.
+- `team2_name`: Team 2 name.
+- `winning_team_name`: Winning team name.
+- `start_time`: Series start timestamp.
+- `ingested_at`: Ingestion timestamp.
+
+## games
+- `game_id`: Game identifier (primary key).
+- `series_id`: Parent series identifier.
+- `game_number`: Game number within series.
+- `map_name`: Map name.
+- `team1_name`: Team 1 name.
+- `team2_name`: Team 2 name.
+- `winning_team_name`: Winning team name.
+- `game_duration_seconds`: Game duration in seconds.
+- `total_rounds`: Total rounds played.
+
+## rounds
+- `round_id`: Round identifier (primary key).
+- `series_id`: Parent series identifier.
+- `game_id`: Parent game identifier.
+- `round_number`: Round number within the game.
+- `map_name`: Map name.
+- `started_at`: Round start timestamp.
+- `ended_at`: Round end timestamp.
+- `duration_seconds`: Round duration in seconds.
+- `winning_team_name`: Winning team name.
+- `losing_team_name`: Losing team name.
+- `end_reason`: Round end reason (detonated/defused/eliminated/time).
+- `tournament_name`: Tournament display name.
+- `tournament_year`: Tournament year.
+- `ingested_at`: Ingestion timestamp.
+
+## base_events
+- `event_id`: Event identifier (primary key).
+- `occurred_at`: Event timestamp.
+- `series_id`: Series identifier.
+- `game_id`: Game identifier.
+- `round_id`: Round identifier.
+- `event_type`: Event type (e.g., player-killed-player).
+- `actor_player_id`: Acting player ID.
+- `actor_player_name`: Acting player name.
+- `actor_team_name`: Acting team name.
+- `actor_agent_name`: Acting agent name.
+- `target_player_id`: Target player ID.
+- `target_player_name`: Target player name.
+- `target_team_name`: Target team name.
+- `target_agent_name`: Target agent name.
+- `target_side`: Target player side (attacker/defender).
+- `actor_side`: Acting player side (attacker/defender).
+- `actor_pos_x`: Acting player X coordinate (when available).
+- `actor_pos_y`: Acting player Y coordinate (when available).
+- `target_pos_x`: Target player X coordinate (when available).
+- `target_pos_y`: Target player Y coordinate (when available).
+- `action`: Action verb from feed.
+- `ability_id`: Ability identifier (when event is ability usage).
+- `ability_name`: Ability name (when event is ability usage).
+- `ability_type`: Ability category (flash/smoke/molly/recon/other).
+- `tournament_name`: Tournament display name.
+- `tournament_year`: Tournament year.
+- `map_name`: Map name.
+- `is_kill`: Kill event flag.
+- `is_death`: Death event flag.
+- `is_assist`: Assist event flag.
+- `is_first_blood`: First blood flag.
+- `is_plant`: Spike plant flag.
+- `is_defuse`: Spike defuse flag.
+- `is_begin_defuse`: Defuse start flag.
+- `is_stop_defuse`: Defuse stop flag.
+- `is_half_defuse`: Half defuse checkpoint flag.
+- `is_defuse_complete`: Defuse completion flag.
+- `is_bomb_exploded`: Bomb explosion flag.
+- `is_ability_use`: Ability usage flag.
+- `damage_dealt`: Damage dealt for damage events.
+- `actor_loadout_value`: Acting player loadout value (when available).
+- `actor_net_worth`: Acting player net worth (when available).
+- `team_loadout_value`: Team loadout value snapshot (team events).
+- `team_net_worth`: Team net worth snapshot (team events).
+- `weapon_name`: Weapon or ability name.
+- `weapon_type`: Weapon category (if known).
+- `is_headshot`: Headshot flag (when available).
+- `is_wallbang`: Wallbang flag (when available).
+- `hit_location`: Hit location (head/body/leg/general).
+- `metadata`: Raw event metadata (JSON).
+
+## agg_player_round_stats
+- `round_id`: Round identifier.
+- `player_id`: Player identifier.
+- `player_name`: Player name.
+- `team_name`: Team name.
+- `opponent_team_name`: Opponent Team name.
+- `tournament_name`: Tournament name.
+- `tournament_year`: Tournament year.
+- `map_name`: Map name.
+- `agent_name`: Agent name.
+- `round_number`: Round number within the game.
+- `started_at`: Start timestamp.
+- `ended_at`: End timestamp.
+- `round_won`: Flag indicating round won.
+- `side`: Side for the round/team (attack/defense).
+- `kills`: Total kills in the round.
+- `deaths`: Total deaths in the round.
+- `assists`: Total assists in the round.
+- `first_bloods`: Metric for first bloods.
+- `first_deaths`: Metric for first deaths.
+- `plants`: Total spike plants in the round.
+- `defuses`: Total spike defuses in the round.
+- `abilities_used`: Metric for abilities used.
+- `damage_dealt`: Total damage dealt in the round.
+- `damage_received`: Total damage received in the round.
+- `survived`: Flag indicating the player survived the round.
+- `time_first_blood`: Metric for time first blood.
+- `time_first_death`: Metric for time first death.
+- `time_alive`: Metric for time alive.
+- `time_to_first_kill`: Metric for time to first kill.
+- `agent_role`: Metric for agent role.
+- `is_duelist`: Flag indicating duelist.
+- `is_initiator`: Flag indicating initiator.
+- `is_controller`: Flag indicating controller.
+- `is_sentinel`: Flag indicating sentinel.
+- `kast`: Deprecated; compute KAST via kills/assists/deaths/is_traded.
+- `damage_per_kill`: Metric for damage per kill.
+- `overkill_damage`: Metric for overkill damage.
+- `is_entry_fragger`: Flag indicating entry fragger.
+- `is_opening_kill`: Flag indicating opening kill.
+- `is_opening_death`: Flag indicating opening death.
+- `is_entry_denied`: Flag indicating entry denied.
+- `is_traded`: Flag indicating traded.
+- `is_trade_kill`: Flag indicating trade kill.
+- `trade_kill_time`: Metric for trade kill time.
+- `is_untraded_death`: Flag indicating untraded death.
+- `multi_kill_count`: Metric for multi kill count.
+- `is_double_kill`: Flag indicating double kill.
+- `is_triple_kill`: Flag indicating triple kill.
+- `is_quad_kill`: Flag indicating quad kill.
+- `is_ace`: Flag indicating ace.
+- `is_clutch`: Flag indicating clutch.
+- `is_1v1`: Flag indicating 1v1.
+- `is_1v2`: Flag indicating 1v2.
+- `is_1v3`: Flag indicating 1v3.
+- `is_1v4`: Flag indicating 1v4.
+- `is_1v5`: Flag indicating 1v5.
+- `clutch_won`: Metric for clutch won.
+- `clutch_lost`: Metric for clutch lost.
+- `clutch_opponents`: Metric for clutch opponents.
+- `loadout_value`: Metric for loadout value.
+- `net_worth`: Metric for net worth.
+- `is_eco_round`: Flag indicating eco round (team has 0 primary weapons from first seen weapon per player).
+- `is_force_buy`: Flag indicating force buy (team has 1-2 primary weapons from first seen weapon per player).
+- `is_full_buy`: Flag indicating full buy (team has 3+ primary weapons from first seen weapon per player).
+- `is_thrifty`: Flag indicating thrifty (won with <=2 primary weapons vs opponent with 3+).
+- `flash_assists`: Metric for flash assists.
+- `early_util`: Metric for early util.
+- `weapon_name`: Weapon name.
+- `weapon_type`: Metric for weapon type.
+- `total_headshot_kills`: Metric for total headshot kills.
+- `headshot_kills_denom`: Denominator for headshot kills.
+- `headshot_hits_total`: Total count of hit_location='head' in player-damaged-player events.
+- `hits_total`: Total count of hit_location in ('head','body','leg') in player-damaged-player events.
+- `bodyshot_kills`: Metric for bodyshot kills.
+- `rifle_kills`: Metric for rifle kills.
+- `smg_kills`: Metric for smg kills.
+- `pistol_kills`: Metric for pistol kills.
+- `sniper_kills`: Metric for sniper kills.
+- `shotgun_kills`: Metric for shotgun kills.
+- `util_used_total`: Total count of util used.
+- `flash_used_total`: Total count of flash used.
+- `util_effect_kills_total`: Total count of util effect kills.
+- `util_effect_kills_denom`: Denominator for util effect kills.
+- `flash_assist_kills_total`: Total count of flash assist kills.
+- `flash_assist_kills_denom`: Denominator for flash assist kills.
+- `self_flash_kills_total`: Total count of self flash kills.
+- `self_flash_kills_denom`: Denominator for self flash kills.
+- `duel_initiated_total`: Duels where player dealt first damage within 3s of kill (participant count).
+- `duel_initiated_wins_total`: Initiated duels won (player is killer and dealt first damage).
+- `duel_initiated_denom`: Initiated duel count (same as initiated_total).
+- `duel_held_wins_total`: Duels won where opponent dealt first damage.
+- `duel_held_denom`: Duels where opponent dealt first damage (participant count).
+- `duel_resolution_time_sum_s`: Sum of seconds from first damage to kill (3s window).
+- `duel_resolution_time_denom`: Count of duels with first damage in window.
+- `duel_wins_rifle_total`: Duel wins where kill weapon type is rifle.
+- `duel_losses_rifle_total`: Duel losses to rifle (opponent kill weapon).
+- `duel_rifle_denom`: Duels with kill weapon type rifle.
+- `duel_wins_smg_total`: Duel wins where kill weapon type is smg.
+- `duel_losses_smg_total`: Duel losses to smg (opponent kill weapon).
+- `duel_smg_denom`: Duels with kill weapon type smg.
+- `duel_wins_pistol_total`: Duel wins where kill weapon type is pistol.
+- `duel_losses_pistol_total`: Duel losses to pistol (opponent kill weapon).
+- `duel_pistol_denom`: Duels with kill weapon type pistol.
+- `duel_wins_sniper_total`: Duel wins where kill weapon type is sniper.
+- `duel_losses_sniper_total`: Duel losses to sniper (opponent kill weapon).
+- `duel_sniper_denom`: Duels with kill weapon type sniper.
+- `duel_wins_shotgun_total`: Duel wins where kill weapon type is shotgun.
+- `duel_losses_shotgun_total`: Duel losses to shotgun (opponent kill weapon).
+- `duel_shotgun_denom`: Duels with kill weapon type shotgun.
+- `repeek_deaths_total`: Total count of repeek deaths.
+- `repeek_deaths_denom`: Denominator for repeek deaths.
+- `iso_deaths_total`: Total count of iso deaths.
+- `iso_deaths_denom`: Denominator for iso deaths.
+- `stack_deaths_total`: Total count of stack deaths.
+- `stack_deaths_denom`: Denominator for stack deaths.
+- `survival_time_sum_s`: Sum of seconds for survival time.
+- `survival_time_denom`: Denominator for survival time.
+- `calculated_at`: Aggregation timestamp.
+
+## agg_player_game_stats
+- `game_id`: Game identifier.
+- `player_id`: Player identifier.
+- `player_name`: Player name.
+- `team_name`: Team name.
+- `opponent_team_name`: Opponent Team name.
+- `tournament_name`: Tournament name.
+- `tournament_year`: Tournament year.
+- `map_name`: Map name.
+- `agent_name`: Agent name.
+- `game_started_at`: Timestamp for game started.
+- `game_ended_at`: Timestamp for game ended.
+- `game_won`: Flag indicating game won.
+- `rounds_played`: Metric for rounds played.
+- `rounds_won`: Metric for rounds won.
+- `kills`: Total kills in the round.
+- `deaths`: Total deaths in the round.
+- `assists`: Total assists in the round.
+- `first_bloods`: Metric for first bloods.
+- `first_deaths`: Metric for first deaths.
+- `plants`: Total spike plants in the round.
+- `defuses`: Total spike defuses in the round.
+- `abilities_used`: Metric for abilities used.
+- `damage_dealt`: Total damage dealt in the round.
+- `damage_received`: Total damage received in the round.
+- `kd_ratio`: Metric for kd ratio.
+- `kda`: Metric for kda.
+- `adr`: Metric for adr.
+- `kpr`: Metric for kpr.
+- `fk_percentage`: Metric for fk percentage.
+- `fd_percentage`: Metric for fd percentage.
+- `kast_percentage`: Percentage of rounds with kill, assist, survived (deaths=0), or traded (is_traded).
+- `impact_rating`: Metric for impact rating.
+- `trade_kills`: Metric for trade kills.
+- `traded_deaths`: Metric for traded deaths.
+- `untraded_deaths`: Metric for untraded deaths.
+- `trade_success_rate`: Rate for trade success.
+- `avg_trade_time`: Metric for avg trade time.
+- `opening_kills`: Metric for opening kills.
+- `opening_deaths`: Metric for opening deaths.
+- `fk_fd_differential`: Metric for fk fd differential.
+- `opening_duel_win_rate`: Rate for opening duel win.
+- `clutches_attempted`: Metric for clutches attempted.
+- `clutches_won`: Metric for clutches won.
+- `clutch_win_rate`: Rate for clutch win.
+- `clutches_1v1_won`: Metric for clutches 1v1 won.
+- `clutches_1v2_won`: Metric for clutches 1v2 won.
+- `clutches_1v3_won`: Metric for clutches 1v3 won.
+- `double_kills`: Metric for double kills.
+- `triple_kills`: Metric for triple kills.
+- `quad_kills`: Metric for quad kills.
+- `aces`: Metric for aces.
+- `eco_rounds_played`: Metric for eco rounds played.
+- `eco_rounds_won`: Metric for eco rounds won.
+- `eco_win_rate`: Rate for eco win.
+- `thrifty_count`: Metric for thrifty count.
+- `avg_loadout_value`: Metric for avg loadout value.
+- `rating_variance`: Metric for rating variance.
+- `first_half_rating`: Metric for first half rating.
+- `second_half_rating`: Metric for second half rating.
+- `half_diff`: Metric for half diff.
+- `total_headshot_kills`: Metric for total headshot kills.
+- `headshot_kills_denom`: Denominator for headshot kills.
+- `headshot_hits_total`: Total count of hit_location='head' in player-damaged-player events.
+- `hits_total`: Total count of hit_location in ('head','body','leg') in player-damaged-player events.
+- `total_bodyshot_kills`: Metric for total bodyshot kills.
+- `vandal_kills`: Metric for vandal kills.
+- `phantom_kills`: Metric for phantom kills.
+- `operator_kills`: Metric for operator kills.
+- `sheriff_kills`: Metric for sheriff kills.
+- `classic_kills`: Metric for classic kills.
+- `rifle_kills`: Metric for rifle kills.
+- `smg_kills`: Metric for smg kills.
+- `pistol_kills`: Metric for pistol kills.
+- `sniper_kills`: Metric for sniper kills.
+- `weapon_preference`: Metric for weapon preference.
+- `is_operator_player`: Flag indicating operator player.
+- `calculated_at`: Aggregation timestamp.
+
+## agg_player_series_stats
+- `series_id`: Series identifier.
+- `player_id`: Player identifier.
+- `player_name`: Player name.
+- `team_name`: Team name.
+- `opponent_team_name`: Opponent Team name.
+- `tournament_name`: Tournament name.
+- `tournament_year`: Tournament year.
+- `tournament_region`: Metric for tournament region.
+- `series_started_at`: Timestamp for series started.
+- `series_won`: Flag indicating series won.
+- `maps_played`: Metric for maps played.
+- `maps_won`: Metric for maps won.
+- `rounds_played`: Metric for rounds played.
+- `rounds_won`: Metric for rounds won.
+- `kills`: Total kills in the round.
+- `deaths`: Total deaths in the round.
+- `assists`: Total assists in the round.
+- `first_bloods`: Metric for first bloods.
+- `first_deaths`: Metric for first deaths.
+- `plants`: Total spike plants in the round.
+- `defuses`: Total spike defuses in the round.
+- `abilities_used`: Metric for abilities used.
+- `damage_dealt`: Total damage dealt in the round.
+- `damage_received`: Total damage received in the round.
+- `kd_ratio`: Metric for kd ratio.
+- `kda`: Metric for kda.
+- `adr`: Metric for adr.
+- `kpr`: Metric for kpr.
+- `fk_percentage`: Metric for fk percentage.
+- `fd_percentage`: Metric for fd percentage.
+- `acs`: Metric for acs.
+- `agents_played`: Metric for agents played.
+- `calculated_at`: Aggregation timestamp.
+
+## agg_team_round_stats
+- `round_id`: Round identifier.
+- `team_name`: Team name.
+- `opponent_team_name`: Opponent Team name.
+- `tournament_name`: Tournament name.
+- `tournament_year`: Tournament year.
+- `map_name`: Map name.
+- `round_number`: Round number within the game.
+- `started_at`: Start timestamp.
+- `ended_at`: End timestamp.
+- `round_won`: Flag indicating round won.
+- `side`: Side for the round/team (attack/defense).
+- `end_reason`: Metric for end reason.
+- `team_score_before`: Metric for team score before.
+- `enemy_score_before`: Metric for enemy score before.
+- `prev_round_won`: Metric for prev round won.
+- `current_win_streak`: Metric for current win streak.
+- `current_loss_streak`: Metric for current loss streak.
+- `is_match_point`: Flag indicating match point.
+- `is_ot`: Flag indicating ot.
+- `team_kills`: Metric for team kills.
+- `team_deaths`: Metric for team deaths.
+- `team_assists`: Metric for team assists.
+- `first_bloods`: Metric for first bloods.
+- `first_deaths`: Metric for first deaths.
+- `plants`: Total spike plants in the round.
+- `defuses`: Total spike defuses in the round.
+- `abilities_used`: Metric for abilities used.
+- `team_damage_dealt`: Metric for team damage dealt.
+- `team_damage_received`: Metric for team damage received.
+- `players_alive_at_end`: Metric for players alive at end.
+- `entry_kill`: Metric for entry kill.
+- `entry_death`: Metric for entry death.
+- `team_credits_spent`: Metric for team credits spent.
+- `loadout_value`: Metric for loadout value.
+- `net_worth`: Metric for net worth.
+- `eco_rounds_total`: Total count of eco rounds.
+- `force_buy_rounds_total`: Total count of force buy rounds.
+- `full_buy_rounds_total`: Total count of full buy rounds.
+- `round_duration_s`: Seconds for round duration.
+- `time_to_first_contact_s`: Seconds for time to first contact.
+- `time_to_first_kill_s`: Seconds for time to first kill.
+- `time_to_first_death_s`: Seconds for time to first death.
+- `time_to_plant_s`: Seconds for time to plant.
+- `post_plant_duration_s`: Seconds for post plant duration.
+- `fb_won_total`: Total count of fb won.
+- `fb_converted_total`: Total count of fb converted.
+- `fb_attempts_total`: Total count of fb attempts.
+- `fb_traded_total`: Total count of fb traded.
+- `fb_trade_delay_sum_s`: Sum of seconds for fb trade delay.
+- `fb_trade_delay_denom`: Denominator for fb trade delay.
+- `deaths_traded_total`: Total count of deaths traded.
+- `deaths_untraded_total`: Total count of deaths untraded.
+- `avg_trade_delay_sum_s`: Sum of seconds for avg trade delay.
+- `avg_trade_delay_denom`: Denominator for avg trade delay.
+- `post_plant_kills_total`: Total count of post plant kills.
+- `post_plant_deaths_total`: Total count of post plant deaths.
+- `retake_attempted_total`: Total count of retake attempted.
+- `retake_kills_total`: Total count of retake kills.
+- `defuse_attempts_total`: Total count of defuse attempts.
+- `defuse_denied_total`: Total count of defuse denied.
+- `defuse_denied_denom`: Denominator for defuse denied.
+- `defuse_commit_total`: Total count of defuse commit.
+- `defuse_commit_success_total`: Total count of defuse commit success.
+- `defuse_commit_denom`: Denominator for defuse commit.
+- `half_defuse_taps_total`: Total count of half defuse taps.
+- `half_defuse_bait_success_total`: Total count of half defuse bait success.
+- `half_defuse_bait_denom`: Denominator for half defuse bait.
+- `time_to_defuse_attempt_sum_s`: Sum of seconds for time to defuse attempt.
+- `time_to_defuse_attempt_denom`: Denominator for time to defuse attempt.
+- `bomb_time_remaining_sum_s`: Sum of seconds for bomb time remaining.
+- `bomb_time_remaining_denom`: Denominator for bomb time remaining.
+- `util_used_total`: Total count of util used.
+- `flash_used_total`: Total count of flash used.
+- `smoke_used_total`: Total count of smoke used.
+- `molly_used_total`: Total count of molly used.
+- `recon_used_total`: Total count of recon used.
+- `other_util_used_total`: Total count of other util used.
+- `util_effect_kills_total`: Total count of util effect kills.
+- `util_effect_kills_denom`: Denominator for util effect kills.
+- `flash_assist_kills_total`: Total count of flash assist kills.
+- `flash_assist_kills_denom`: Denominator for flash assist kills.
+- `self_flash_kills_total`: Total count of self flash kills.
+- `self_flash_kills_denom`: Denominator for self flash kills.
+- `util_dump_rounds_total`: Total count of util dump rounds.
+- `util_dump_rounds_denom`: Denominator for util dump rounds.
+- `site_hit_A_total`: Total count of site hit A.
+- `site_hit_B_total`: Total count of site hit B.
+- `site_hit_mid_total`: Total count of site hit mid.
+- `site_hit_denom`: Denominator for site hit.
+- `mid_control_total`: Total count of mid control.
+- `mid_control_denom`: Denominator for mid control.
+- `fake_rounds_total`: Total count of fake rounds.
+- `fake_rounds_denom`: Denominator for fake rounds.
+- `calculated_at`: Aggregation timestamp.
+
+## agg_team_game_stats
+- `game_id`: Game identifier.
+- `team_name`: Team name.
+- `series_id`: Series identifier.
+- `opponent_team_name`: Opponent Team name.
+- `tournament_name`: Tournament name.
+- `tournament_year`: Tournament year.
+- `map_name`: Map name.
+- `game_started_at`: Timestamp for game started.
+- `game_ended_at`: Timestamp for game ended.
+- `game_won`: Flag indicating game won.
+- `rounds_won`: Metric for rounds won.
+- `rounds_lost`: Metric for rounds lost.
+- `attack_rounds_won`: Metric for attack rounds won.
+- `attack_rounds_played`: Metric for attack rounds played.
+- `defense_rounds_won`: Metric for defense rounds won.
+- `defense_rounds_played`: Metric for defense rounds played.
+- `team_kills`: Metric for team kills.
+- `team_deaths`: Metric for team deaths.
+- `team_assists`: Metric for team assists.
+- `first_bloods`: Metric for first bloods.
+- `first_deaths`: Metric for first deaths.
+- `plants`: Total spike plants in the round.
+- `defuses`: Total spike defuses in the round.
+- `abilities_used`: Metric for abilities used.
+- `team_damage_dealt`: Metric for team damage dealt.
+- `team_damage_received`: Metric for team damage received.
+- `kd_ratio`: Metric for kd ratio.
+- `adr`: Metric for adr.
+- `kpr`: Metric for kpr.
+- `attack_win_rate`: Rate for attack win.
+- `defense_win_rate`: Rate for defense win.
+- `fk_percentage`: Metric for fk percentage.
+- `fd_percentage`: Metric for fd percentage.
+- `agents_played`: Metric for agents played.
+- `num_duelists`: Metric for num duelists.
+- `num_initiators`: Metric for num initiators.
+- `num_controllers`: Metric for num controllers.
+- `num_sentinels`: Metric for num sentinels.
+- `is_double_duelist`: Flag indicating double duelist.
+- `is_no_duelist`: Flag indicating no duelist.
+- `agent_comp_string`: Metric for agent comp string.
+- `entry_duels_won`: Metric for entry duels won.
+- `entry_duels_lost`: Metric for entry duels lost.
+- `opening_duel_win_rate`: Rate for opening duel win.
+- `fk_conversion_rate`: Rate for fk conversion.
+- `fd_loss_rate`: Rate for fd loss.
+- `team_trade_success_rate`: Rate for team trade success.
+- `team_untraded_deaths`: Metric for team untraded deaths.
+- `pistol_rounds_won`: Metric for pistol rounds won.
+- `pistol_rounds_played`: Metric for pistol rounds played.
+- `pistol_win_rate`: Rate for pistol win.
+- `bonus_rounds_won`: Metric for bonus rounds won.
+- `anti_eco_rounds_won`: Metric for anti eco rounds won.
+- `aces_count`: Metric for aces count.
+- `quad_kills_count`: Metric for quad kills count.
+- `triple_kills_count`: Metric for triple kills count.
+- `clutches_attempted`: Metric for clutches attempted.
+- `clutches_won`: Metric for clutches won.
+- `clutch_win_rate`: Rate for clutch win.
+- `rounds_5v4`: Metric for rounds 5v4.
+- `wins_5v4`: Metric for wins 5v4.
+- `conversion_5v4`: Metric for conversion 5v4.
+- `rounds_4v5`: Metric for rounds 4v5.
+- `wins_4v5`: Metric for wins 4v5.
+- `comeback_4v5`: Metric for comeback 4v5.
+- `post_plant_rounds`: Metric for post plant rounds.
+- `post_plant_wins`: Metric for post plant wins.
+- `post_plant_win_rate`: Rate for post plant win.
+- `longest_win_streak`: Metric for longest win streak.
+- `longest_loss_streak`: Metric for longest loss streak.
+- `rounds_after_timeout`: Metric for rounds after timeout.
+- `wins_after_timeout`: Metric for wins after timeout.
+- `calculated_at`: Aggregation timestamp.
+
+## agg_player_daily_stats
+- `date`: Metric for date.
+- `player_id`: Player identifier.
+- `player_name`: Player name.
+- `team_name`: Team name.
+- `tournament_name`: Tournament name.
+- `tournament_year`: Tournament year.
+- `series_played`: Metric for series played.
+- `series_won`: Flag indicating series won.
+- `maps_played`: Metric for maps played.
+- `maps_won`: Metric for maps won.
+- `rounds_played`: Metric for rounds played.
+- `rounds_won`: Metric for rounds won.
+- `kills`: Total kills in the round.
+- `deaths`: Total deaths in the round.
+- `assists`: Total assists in the round.
+- `first_bloods`: Metric for first bloods.
+- `first_deaths`: Metric for first deaths.
+- `plants`: Total spike plants in the round.
+- `defuses`: Total spike defuses in the round.
+- `damage_dealt`: Total damage dealt in the round.
+- `damage_received`: Total damage received in the round.
+- `kd_ratio`: Metric for kd ratio.
+- `kda`: Metric for kda.
+- `adr`: Metric for adr.
+- `kpr`: Metric for kpr.
+- `fk_percentage`: Metric for fk percentage.
+- `fd_percentage`: Metric for fd percentage.
+- `win_rate`: Rate for win.
+- `agents_played`: Metric for agents played.
+- `calculated_at`: Aggregation timestamp.
+
+## agg_tournament_stats
+- `tournament_id`: Tournament identifier.
+- `tournament_name`: Tournament name.
+- `entity_type`: Metric for entity type.
+- `entity_id`: Entity identifier.
+- `entity_name`: Entity name.
+- `tournament_year`: Tournament year.
+- `tournament_region`: Metric for tournament region.
+- `tournament_start_date`: Metric for tournament start date.
+- `tournament_end_date`: Metric for tournament end date.
+- `placement`: Metric for placement.
+- `prize_money`: Metric for prize money.
+- `series_played`: Metric for series played.
+- `series_won`: Flag indicating series won.
+- `maps_played`: Metric for maps played.
+- `maps_won`: Metric for maps won.
+- `rounds_played`: Metric for rounds played.
+- `rounds_won`: Metric for rounds won.
+- `kills`: Total kills in the round.
+- `deaths`: Total deaths in the round.
+- `assists`: Total assists in the round.
+- `first_bloods`: Metric for first bloods.
+- `first_deaths`: Metric for first deaths.
+- `plants`: Total spike plants in the round.
+- `defuses`: Total spike defuses in the round.
+- `damage_dealt`: Total damage dealt in the round.
+- `damage_received`: Total damage received in the round.
+- `kd_ratio`: Metric for kd ratio.
+- `kda`: Metric for kda.
+- `adr`: Metric for adr.
+- `kpr`: Metric for kpr.
+- `fk_percentage`: Metric for fk percentage.
+- `fd_percentage`: Metric for fd percentage.
+- `win_rate`: Rate for win.
+- `map_win_rate`: Rate for map win.
+- `agents_played`: Metric for agents played.
+- `team_name`: Team name.
+- `roster`: Metric for roster.
+- `calculated_at`: Aggregation timestamp.
+
+## ref_win_probability_factors
+- `factor_name`: Factor name (primary key).
+- `factor_type`: Factor type (event/state).
+- `win_rate_with`: Win rate when factor is present.
+- `win_rate_without`: Win rate when factor is absent.
+- `probability_lift`: Difference (win_rate_with - win_rate_without).
+- `weight`: Win share weight (equals probability_lift for events).
+- `sample_size`: Number of observations in analysis.
+- `notes`: Description of the factor.
+
+## agg_first_blood_stats
+- `round_id`: Round identifier (primary key).
+- `game_id`: Game identifier.
+- `series_id`: Series identifier.
+- `tournament_name`: Tournament name.
+- `tournament_year`: Tournament year.
+- `map_name`: Map name.
+- `round_number`: Round number within game.
+- `fb_team`: Team that got first blood.
+- `fd_team`: Team that suffered first death.
+- `fb_player`: Player who got first blood.
+- `fb_player_id`: Player ID of first blood.
+- `fb_agent`: Agent of first blood player.
+- `fd_player`: Player who died first.
+- `fd_agent`: Agent of first death player.
+- `fb_side`: Side of first blood team (attacker/defender).
+- `winning_team_name`: Round winning team.
+- `losing_team_name`: Round losing team.
+- `end_reason`: Round end reason.
+- `fb_team_won`: Flag indicating if FB team won the round.
+- `fd_team_won`: Flag indicating if FD team won the round.
+- `calculated_at`: Aggregation timestamp.
+
+## agg_post_plant_stats
+- `round_id`: Round identifier (primary key).
+- `game_id`: Game identifier.
+- `series_id`: Series identifier.
+- `tournament_name`: Tournament name.
+- `tournament_year`: Tournament year.
+- `map_name`: Map name.
+- `round_number`: Round number within game.
+- `planting_team`: Team that planted the spike.
+- `defending_team`: Team defending against plant.
+- `planter`: Player who planted.
+- `planter_id`: Player ID of planter.
+- `planter_agent`: Agent of planter.
+- `winning_team_name`: Round winning team.
+- `end_reason`: Round end reason.
+- `plant_converted`: Flag indicating if plant led to attacker win.
+- `detonated`: Flag indicating spike detonated.
+- `defused`: Flag indicating spike was defused.
+- `attacker_elim_win`: Flag indicating attackers won by elimination post-plant.
+- `defender_elim_win`: Flag indicating defenders won by elimination post-plant.
+- `calculated_at`: Aggregation timestamp.
+
+## agg_team_round_summary
+- `round_id`: Round identifier.
+- `team_name`: Team name.
+- `opponent_team_name`: Opponent team name.
+- `game_id`: Game identifier.
+- `tournament_name`: Tournament name.
+- `tournament_year`: Tournament year.
+- `map_name`: Map name.
+- `round_number`: Round number within game.
+- `side`: Side for the round (attacker/defender).
+- `round_won`: Flag indicating round won.
+- `team_kills`: Total team kills in round.
+- `team_deaths`: Total team deaths in round.
+- `team_assists`: Total team assists in round.
+- `team_damage`: Total team damage dealt.
+- `team_adr`: Team ADR for the round.
+- `team_fb`: Team first bloods.
+- `team_fd`: Team first deaths.
+- `fb_differential`: First blood differential (FB - FD).
+- `team_survivors`: Players alive at round end.
+- `team_deaths_traded`: Deaths that were traded.
+- `team_trade_kills`: Trade kills secured.
+- `team_untraded_deaths`: Untraded deaths.
+- `team_multikills`: Multi-kills (2+) in round.
+- `team_aces`: Aces in round.
+- `team_plants`: Spike plants.
+- `team_defuses`: Spike defuses.
+- `team_abilities`: Abilities used.
+- `team_early_util`: Early utility usage count.
+- `team_clutch_situations`: Clutch situations faced.
+- `team_clutches_won`: Clutches won.
+- `team_kast_count`: Players with KAST in round.
+- `calculated_at`: Aggregation timestamp.
+
+## agg_team_map_stats
+- `team_name`: Team name.
+- `opponent_team_name`: Most frequent opponent (if applicable).
+- `map_name`: Map name.
+- `tournament_name`: Tournament name.
+- `games_played`: Total games played on map.
+- `games_won`: Games won on map.
+- `games_lost`: Games lost on map.
+- `map_win_rate`: Win rate on map.
+- `total_rounds`: Total rounds played on map.
+- `rounds_won`: Rounds won on map.
+- `round_win_rate`: Round win rate on map.
+- `avg_adr`: Average ADR on map.
+- `avg_kd`: Average K/D on map.
+- `avg_kast`: Average KAST percentage on map.
+- `total_fb`: Total first bloods on map.
+- `total_fd`: Total first deaths on map.
+- `avg_opening_wr`: Average opening duel win rate.
+- `avg_trade_rate`: Average trade success rate.
+- `total_clutches_won`: Total clutches won on map.
+- `total_clutches_attempted`: Total clutch attempts on map.
+- `calculated_at`: Aggregation timestamp.
+
+## agg_team_series_stats
+- `series_id`: Series identifier.
+- `team_name`: Team name.
+- `tournament_name`: Tournament name.
+- `tournament_year`: Tournament year.
+- `start_time`: Series start timestamp.
+- `opponent_name`: Opponent team name.
+- `series_won`: Flag indicating series won.
+- `series_lost`: Flag indicating series lost.
+- `maps_played`: Maps played in series.
+- `maps_won`: Maps won in series.
+- `maps_lost`: Maps lost in series.
+- `calculated_at`: Aggregation timestamp.
+
+## agg_player_win_shares
+- `player_id`: Player identifier.
+- `game_id`: Game identifier.
+- `player_name`: Player name.
+- `team_name`: Team name.
+- `opponent_team_name`: Opponent team name.
+- `tournament_name`: Tournament name.
+- `tournament_year`: Tournament year.
+- `map_name`: Map name.
+- `agent_name`: Agent played.
+- `agent_role`: Agent role.
+- `rounds_played`: Rounds played in game.
+- `rounds_won`: Rounds won in game.
+- `first_bloods`: First blood count.
+- `first_deaths`: First death count.
+- `trade_kills`: Trade kills secured.
+- `survivals`: Rounds survived.
+- `deaths_traded`: Deaths that were traded.
+- `multi_kills`: Multi-kill rounds (2+).
+- `plants`: Spike plants.
+- `defuses`: Spike defuses.
+- `fb_win_share`: First blood win share contribution.
+- `trade_kill_share`: Trade kill win share contribution.
+- `survival_share`: Survival win share contribution.
+- `traded_death_share`: Traded death win share contribution.
+- `multikill_share`: Multi-kill win share contribution.
+- `plant_share`: Plant win share contribution.
+- `defuse_share`: Defuse win share contribution.
+- `total_win_share`: Total win share for game.
+- `win_share_per_round`: Win share per round.
+- `opening_duel_efficiency`: Opening duel win rate (FB / (FB + FD)).
+- `survival_rate`: Rounds survived / rounds played.
+- `trade_efficiency`: Trade kills / rounds with deaths.
+- `adr`: Average damage per round.
+- `kd_ratio`: Kill/death ratio.
+- `calculated_at`: Aggregation timestamp.

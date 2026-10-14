@@ -1,0 +1,141 @@
+tables:
+  agent_roles:
+    description: Agent role lookup table.
+    columns:
+      agent_name: Agent name (primary key).
+      agent_role: Role category (duelist/initiator/controller/sentinel).
+      is_duelist: Role flag.
+      is_initiator: Role flag.
+      is_controller: Role flag.
+      is_sentinel: Role flag.
+  weapon_types:
+    description: Weapon classification lookup table.
+    columns:
+      weapon_name: Weapon display name (primary key).
+      weapon_type: Type classification (rifle/smg/pistol/sniper/shotgun/heavy/melee/ability).
+  map_zones:
+    description: Map zone bounding boxes for spatial metrics.
+    columns:
+      map_name: Map name.
+      zone_name: Zone label (e.g., A Site, B Site, Mid).
+      zone_type: Zone type category (default/site/mid/other).
+      min_x: Minimum X coordinate.
+      max_x: Maximum X coordinate.
+      min_y: Minimum Y coordinate.
+      max_y: Maximum Y coordinate.
+  series:
+    description: Series-level metadata.
+    columns:
+      series_id: Series identifier (primary key).
+      tournament_id: Tournament identifier.
+      tournament_name: Tournament display name.
+      tournament_year: Tournament year.
+      tournament_region: Region bucket (americas/emea/pacific/china).
+      team1_name: Team 1 name.
+      team2_name: Team 2 name.
+      winning_team_name: Winning team name.
+      start_time: Series start timestamp.
+      ingested_at: Ingestion timestamp.
+  games:
+    description: Game/map metadata within a series.
+    columns:
+      game_id: Game identifier (primary key).
+      series_id: Parent series identifier.
+      game_number: Game number within series.
+      map_name: Map name.
+      team1_name: Team 1 name.
+      team2_name: Team 2 name.
+      winning_team_name: Winning team name.
+      game_duration_seconds: Game duration in seconds.
+      total_rounds: Total rounds played.
+  rounds:
+    description: Round metadata within a game.
+    columns:
+      round_id: Round identifier (primary key).
+      series_id: Parent series identifier.
+      game_id: Parent game identifier.
+      round_number: Round number within the game.
+      map_name: Map name.
+      started_at: Round start timestamp.
+      ended_at: Round end timestamp.
+      duration_seconds: Round duration in seconds.
+      winning_team_name: Winning team name.
+      losing_team_name: Losing team name.
+      end_reason: Round end reason (detonated/defused/eliminated/time).
+      tournament_name: Tournament display name.
+      tournament_year: Tournament year.
+      ingested_at: Ingestion timestamp.
+  base_events:
+    description: Atomic event stream (kills, deaths, plants, defuses, abilities, damage).
+    columns:
+      event_id: Event identifier (primary key).
+      occurred_at: Event timestamp.
+      series_id: Series identifier.
+      game_id: Game identifier.
+      round_id: Round identifier.
+      event_type: Event type (e.g., player-killed-player).
+      actor_player_id: Acting player ID.
+      actor_player_name: Acting player name.
+      actor_team_name: Acting team name.
+      actor_agent_name: Acting agent name.
+      actor_side: Acting player side (attacker/defender).
+      actor_pos_x: Acting player X coordinate (when available).
+      actor_pos_y: Acting player Y coordinate (when available).
+      target_player_id: Target player ID.
+      target_player_name: Target player name.
+      target_team_name: Target team name.
+      target_agent_name: Target agent name.
+      target_side: Target player side (attacker/defender).
+      target_pos_x: Target player X coordinate (when available).
+      target_pos_y: Target player Y coordinate (when available).
+      action: Action verb from feed.
+      ability_id: Ability identifier (when event is ability usage).
+      ability_name: Ability name (when event is ability usage).
+      ability_type: Ability category (flash/smoke/molly/recon/other).
+      tournament_name: Tournament display name.
+      tournament_year: Tournament year.
+      map_name: Map name.
+      is_kill: Kill event flag.
+      is_death: Death event flag.
+      is_assist: Assist event flag.
+      is_first_blood: First blood flag.
+      is_plant: Spike plant flag.
+      is_defuse: Spike defuse flag.
+      is_begin_defuse: Defuse start flag.
+      is_stop_defuse: Defuse stop flag.
+      is_half_defuse: Half defuse checkpoint flag.
+      is_defuse_complete: Defuse completion flag.
+      is_bomb_exploded: Bomb explosion flag.
+      is_ability_use: Ability usage flag.
+      damage_dealt: Damage dealt for damage events.
+      actor_loadout_value: Acting player loadout value (when available).
+      actor_net_worth: Acting player net worth (when available).
+      team_loadout_value: Team loadout value snapshot (team events).
+      team_net_worth: Team net worth snapshot (team events).
+      weapon_name: Weapon or ability name.
+      weapon_type: Weapon category (if known).
+      is_headshot: Headshot flag (when available).
+      is_wallbang: Wallbang flag (when available).
+      hit_location: Hit location (head/body/leg/general).
+      metadata: Raw event metadata (JSON).
+  agg_player_round_stats:
+    description: Player performance aggregated per round.
+    see_schema: database/schema/agg_player_round_stats.sql
+  agg_player_game_stats:
+    description: Player performance aggregated per game.
+    see_schema: database/schema/agg_player_game_stats.sql
+  agg_player_series_stats:
+    description: Player performance aggregated per series.
+    see_schema: database/schema/agg_player_series_stats.sql
+  agg_team_round_stats:
+    description: Team performance aggregated per round.
+    see_schema: database/schema/agg_team_round_stats.sql
+  agg_team_game_stats:
+    description: Team performance aggregated per game.
+    see_schema: database/schema/agg_team_game_stats.sql
+  agg_player_daily_stats:
+    description: Player performance aggregated per day.
+    see_schema: database/schema/agg_player_daily_stats.sql
+  agg_tournament_stats:
+    description: Tournament-level aggregates for players and teams.
+    see_schema: database/schema/agg_tournament_stats.sql

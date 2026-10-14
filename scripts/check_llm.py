@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""LLM 网关冒烟测试：确认当前后端（应为 Nebius Token Factory + NVIDIA 模型）真的能跑。
+"""LLM gateway smoke test: confirm the current backend (should be Nebius Token Factory + an NVIDIA model) actually works.
 
-用法（在仓库根目录）：
+Usage (from the repository root):
     python scripts/check_llm.py
 
-检查三件事：
-  1. 端点解析：当前走哪条后端、什么模型（未配 NEBIUS_API_KEY 会大声警告）
-  2. 模型清单：GET {base}/models 列几个可用的 NVIDIA 开源模型
-  3. 实跑一次：普通对话 + chat_json（MVE 的判据/出题都靠 JSON 通道）
+Checks three things:
+  1. Endpoint resolution: which backend and model are in use (a loud warning prints if NEBIUS_API_KEY is missing)
+  2. Model listing: GET {base}/models, showing a few available NVIDIA open models
+  3. A real round-trip: plain chat + chat_json (MVE's question-generation and criteria both rely on the JSON channel)
 
-退出码 0 = 全过；1 = 有一步不过（错误信息照实输出，不静默）。
+Exit code 0 = all checks pass; 1 = a check failed (errors are printed as-is, never silenced).
 """
 from __future__ import annotations
 
@@ -29,16 +29,16 @@ def main() -> int:
     url, key, model = llm._endpoint()
     base = url.rsplit("/chat/completions", 1)[0]
 
-    print("== 1. 端点解析 ==")
-    backend = "Nebius Token Factory" if os.getenv("NEBIUS_API_KEY") else "非 Nebius 回退后端"
-    print(f"  后端  ：{backend}")
-    print(f"  URL   ：{url}")
-    print(f"  模型  ：{model}")
+    print("== 1. Endpoint resolution ==")
+    backend = "Nebius Token Factory" if os.getenv("NEBIUS_API_KEY") else "non-Nebius fallback backend"
+    print(f"  Backend: {backend}")
+    print(f"  URL    : {url}")
+    print(f"  Model  : {model}")
     if not os.getenv("NEBIUS_API_KEY"):
-        print("  ⚠️ 未配 NEBIUS_API_KEY —— 黑客松提交不允许跑在这个后端上")
-        print("     （上面的警告应已打印；填好 mve/.env 后重跑）")
+        print("  WARNING: NEBIUS_API_KEY is not set — the hackathon rules do not allow running on this backend")
+        print("           (the warning above should have printed; fill in mve/.env and re-run)")
 
-    print("\n== 2. 模型清单（前 12 个）==")
+    print("\n== 2. Model listing (first 12) ==")
     try:
         r = httpx.get(
             f"{base}/models",
@@ -49,46 +49,46 @@ def main() -> int:
         data = r.json()
         ids = [m.get("id", "?") for m in (data.get("data") or [])]
         for mid in ids[:12]:
-            mark = " ← NVIDIA" if "nvidia" in mid.lower() or "nemotron" in mid.lower() else ""
+            mark = " <- NVIDIA" if "nvidia" in mid.lower() or "nemotron" in mid.lower() else ""
             print(f"  {mid}{mark}")
         if not ids:
-            print("  （清单为空——端点可能不支持 /models 列举，跳过）")
+            print("  (empty list — the endpoint may not support /models enumeration; skipping)")
     except Exception as e:
-        print(f"  列举失败（不致命，很多端点禁列模型）：{type(e).__name__}: {str(e)[:100]}")
+        print(f"  listing failed (non-fatal; many endpoints forbid listing models): {type(e).__name__}: {str(e)[:100]}")
 
-    print("\n== 3. 实跑一次 ==")
+    print("\n== 3. Real round-trip ==")
     try:
         text = llm.chat(
-            [{"role": "user", "content": "用一句话解释什么是技能库（skill library）。"}],
+            [{"role": "user", "content": "Explain in one sentence what a skill library is."}],
             temperature=0.2, max_tokens=120, timeout=60.0,
         )
         ok_text = bool(text.strip())
-        print(f"  对话通道：{'✓' if ok_text else '✗ 返回空'} {text.strip()[:80]}")
+        print(f"  chat channel : {'OK' if ok_text else 'FAIL (empty response)'} {text.strip()[:80]}")
     except Exception as e:
-        print(f"  对话通道：✗ {type(e).__name__}: {str(e)[:150]}")
+        print(f"  chat channel : FAIL {type(e).__name__}: {str(e)[:150]}")
         ok_text = False
 
     try:
         js = llm.chat_json(
             [{"role": "user",
-              "content": '只返回 JSON：{"skill": "SQL recipe", "reusable": true}'}],
+              "content": 'Return JSON only: {"skill": "SQL recipe", "reusable": true}'}],
             temperature=0.1, max_tokens=120, timeout=60.0,
         )
         ok_json = isinstance(js, dict) and bool(js)
-        print(f"  JSON 通道：{'✓' if ok_json else '✗ 没解析出对象'} {js}")
+        print(f"  JSON channel : {'OK' if ok_json else 'FAIL (no object parsed)'} {js}")
     except Exception as e:
-        print(f"  JSON 通道：✗ {type(e).__name__}: {str(e)[:150]}")
+        print(f"  JSON channel : FAIL {type(e).__name__}: {str(e)[:150]}")
         ok_json = False
 
     nebius_ok = bool(os.getenv("NEBIUS_API_KEY"))
-    print("\n== 判定 ==")
+    print("\n== Verdict ==")
     if ok_text and ok_json and nebius_ok:
-        print("✅ 网关可用，且跑在 Nebius + NVIDIA 开源模型上（符合参赛规则）")
+        print("PASS: gateway works and runs on Nebius + NVIDIA open models (compliant with the rules)")
         return 0
     if ok_text and ok_json:
-        print("⚠️ 网关可用，但不在 Nebius 上 —— 演示前必须配好 NEBIUS_API_KEY")
+        print("WARN: gateway works but is NOT on Nebius — NEBIUS_API_KEY must be set before the demo")
         return 1
-    print("❌ 网关不可用 —— 检查密钥 / 网络 / 模型 ID")
+    print("FAIL: gateway unusable — check the key / network / model ID")
     return 1
 
 

@@ -4,11 +4,60 @@
 > （**Personal AI track**，提交截止 2026-10-30）。本仓库是该赛事的提交支线：
 > LLM 后端已切到 **Nebius Token Factory + NVIDIA Nemotron**（唯一出口
 > `voyager_vlml/llm.py`），并新增判据层「真空成功」修复。
-> **提交叙事与 Setup 见 [HACKATHON.md](HACKATHON.md)**；主仓库（开发主线）在
+> **提交叙事与 Setup 见 [HACKATHON.md](HACKATHON.md)（英文）**；主仓库（开发主线）在
 > <https://github.com/Zxy876/voyager-vlml-mve>。
 >
-> **线上面板**：<https://43.161.203.50:8443/mve/>（腾讯云，无鉴权，任何设备直接打开）
-> **最后更新**：2026-10-14（黑客松支线：Nebius 后端 + 真空判据修复）
+> **线上面板（黑客松演示，Nebius 后端）**：`<DEMO_URL — 提交前部署填写>`
+> **最后更新**：2026-10-14（黑客松支线：Nebius 后端 + 真空判据修复 + 英文物料）
+
+---
+
+## For Judges — English Quick Guide
+
+MVE (Minimum Viable Egocentric) is an agent that answers your questions
+against your own database — and, the part most demos skip, **learns a
+reusable skill for every question it answers**, with success verified
+against the database itself rather than another model's opinion. The full
+submission narrative lives in **[HACKATHON.md](HACKATHON.md)** (English);
+this section is the fastest path to running and testing the project.
+
+**What it is, in one sentence:** Voyager's learning loop × database ground
+truth — the agent writes its own questions and SQL, only counts a question
+as "learned" when it truly retrieved data, stores every learned recipe in a
+skill library, and reuses those recipes to answer you later. The memory
+lives in the skill library, not in the model weights.
+
+**Run it (5 minutes):**
+
+```bash
+pip install -r requirements.txt
+cp .env.example mve/.env        # set NEBIUS_API_KEY (studio.nebius.ai)
+python scripts/check_llm.py     # must print: gateway OK on Nebius + NVIDIA model
+python mve/dashboard.py         # http://127.0.0.1:8777
+python -m voyager_vlml.loop --rounds 5   # practice loop; skills start accumulating
+```
+
+**How to test the core claim** (the dashboard's "Human Import" panel):
+ask *"On the 'Split' map, after G2 Esports wins the first blood, what
+fraction of rounds do they win on average? Include the sample size."*
+Expected answer, verified against the vendored rib.gg database: **100%,
+sample size 7**, with an independent referee re-query and coverage 1.0.
+Before the "vacuum success" fix (README ch. 21), this same question was
+answered with a fake **0% / sample size 0** that passed every row-count
+check — that bug, and its fix, are the heart of this submission.
+
+**Key files:** `voyager_vlml/loop.py` (practice loop) ·
+`voyager_vlml/consume.py` (consumption loop) ·
+`voyager_vlml/agents/critic.py` (criterion: vacuum detection) ·
+`voyager_vlml/llm.py` (the single LLM egress — Nebius Token Factory) ·
+`mve/skill_store.py` (skill library) · `mve/dashboard.py` (nine panels) ·
+`vlml/` (data layer: 21 tables, 46 insight SQL, 10 MCP tools) ·
+`test_vacuum.py` (22 criterion unit tests) · `audit_skills.py` (skill audit).
+
+*The remainder of this README is the project's deep documentation in
+Chinese; HACKATHON.md covers everything needed for evaluation in English.*
+
+---
 
 一个跑得起来的原型，回答一个问题：**当"学习者"不是人而是 agent 时，
 一套给人用的学习机制还剩下哪些是能直接搬的？**

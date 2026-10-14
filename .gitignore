@@ -32,7 +32,8 @@ mve/runtime_topics.json
 .venv/
 .workbuddy/
 /study_companion/
-/vlml/
+# 黑客松支线：VLML 数据层代码 + 默认 rib 库随仓库分发（评委 clone 即可跑）；
+# 只排除可重算的 ingest 原料与两个历史库（换数据源时 ingest 可再生）
 /voyager-fork/
 __pycache__/
 _backup_*/
@@ -57,4 +58,7 @@ venv/
 mve/entity_catalog.json
 mve/subjects.json
 vlml/data/raw_events/
+vlml/data/raw_events_rib/
 vlml/data/vlml_vlr.duckdb
+vlml/data/vlml_events.duckdb
+_parsed/

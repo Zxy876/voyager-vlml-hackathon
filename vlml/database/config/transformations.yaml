@@ -1,0 +1,187 @@
+# Transformation Pipeline Configuration
+# Defines the incremental transformation models that aggregate raw events
+
+database:
+  path: "data/vlml_events.duckdb"
+
+# Transformation models (executed in dependency order)
+# File names now match target table names for clarity
+models:
+  - name: "agg_player_round_stats"
+    description: "Aggregate player performance per round"
+    file: "database/transformations/01_agg_player_round_stats.sql"
+    depends_on:
+      - "base_events"
+      - "rounds"
+      - "agent_roles"
+      - "weapon_types"
+    target_table: "agg_player_round_stats"
+
+  - name: "agg_player_game_stats"
+    description: "Aggregate player performance per game"
+    file: "database/transformations/02_agg_player_game_stats.sql"
+    depends_on:
+      - "agg_player_round_stats"
+      - "games"
+    target_table: "agg_player_game_stats"
+
+  - name: "agg_player_series_stats"
+    description: "Aggregate player performance per series"
+    file: "database/transformations/03_agg_player_series_stats.sql"
+    depends_on:
+      - "agg_player_game_stats"
+      - "series"
+    target_table: "agg_player_series_stats"
+
+  - name: "agg_team_round_stats"
+    description: "Aggregate team performance per round"
+    file: "database/transformations/04_agg_team_round_stats.sql"
+    depends_on:
+      - "base_events"
+      - "rounds"
+    target_table: "agg_team_round_stats"
+
+  - name: "agg_team_game_stats"
+    description: "Aggregate team performance per game"
+    file: "database/transformations/05_agg_team_game_stats.sql"
+    depends_on:
+      - "agg_team_round_stats"
+      - "agg_player_round_stats"
+      - "games"
+      - "rounds"
+    target_table: "agg_team_game_stats"
+
+  - name: "agg_player_daily_stats"
+    description: "Aggregate player performance per day"
+    file: "database/transformations/06_agg_player_daily_stats.sql"
+    depends_on:
+      - "agg_player_game_stats"
+      - "games"
+      - "series"
+    target_table: "agg_player_daily_stats"
+
+  - name: "agg_tournament_stats"
+    description: "Aggregate tournament-level stats for players and teams"
+    file: "database/transformations/07_agg_tournament_stats.sql"
+    depends_on:
+      - "agg_player_series_stats"
+      - "agg_team_game_stats"
+      - "agg_player_game_stats"
+      - "games"
+      - "series"
+    target_table: "agg_tournament_stats"
+
+  - name: "agg_first_blood_stats"
+    description: "Pre-join first blood events with round outcomes"
+    file: "database/transformations/08_agg_first_blood_stats.sql"
+    depends_on:
+      - "base_events"
+      - "rounds"
+    target_table: "agg_first_blood_stats"
+
+  - name: "agg_post_plant_stats"
+    description: "Pre-join plant events with round outcomes"
+    file: "database/transformations/09_agg_post_plant_stats.sql"
+    depends_on:
+      - "base_events"
+      - "rounds"
+    target_table: "agg_post_plant_stats"
+
+  - name: "agg_team_round_summary"
+    description: "Aggregate player round stats to team level"
+    file: "database/transformations/10_agg_team_round_summary.sql"
+    depends_on:
+      - "agg_player_round_stats"
+    target_table: "agg_team_round_summary"
+
+  - name: "agg_team_map_stats"
+    description: "Team performance aggregated by map"
+    file: "database/transformations/11_agg_team_map_stats.sql"
+    depends_on:
+      - "agg_player_game_stats"
+    target_table: "agg_team_map_stats"
+
+  - name: "agg_team_series_stats"
+    description: "Team head-to-head records at series level"
+    file: "database/transformations/12_agg_team_series_stats.sql"
+    depends_on:
+      - "series"
+      - "games"
+    target_table: "agg_team_series_stats"
+
+  - name: "agg_player_win_shares"
+    description: "Pre-calculated win shares per player per game"
+    file: "database/transformations/13_agg_player_win_shares.sql"
+    depends_on:
+      - "agg_player_round_stats"
+    target_table: "agg_player_win_shares"
+
+# Validation queries after transformations
+validation:
+  queries:
+    - name: "Check row counts"
+      query: |
+        SELECT
+          'agg_player_round_stats' AS table_name,
+          COUNT(*) AS row_count
+        FROM agg_player_round_stats
+        UNION ALL
+        SELECT
+          'agg_player_game_stats' AS table_name,
+          COUNT(*) AS row_count
+        FROM agg_player_game_stats
+        UNION ALL
+        SELECT
+          'agg_player_series_stats' AS table_name,
+          COUNT(*) AS row_count
+        FROM agg_player_series_stats
+        UNION ALL
+        SELECT
+          'agg_team_round_stats' AS table_name,
+          COUNT(*) AS row_count
+        FROM agg_team_round_stats
+        UNION ALL
+        SELECT
+          'agg_team_game_stats' AS table_name,
+          COUNT(*) AS row_count
+        FROM agg_team_game_stats
+        UNION ALL
+        SELECT
+          'agg_player_daily_stats' AS table_name,
+          COUNT(*) AS row_count
+        FROM agg_player_daily_stats
+        UNION ALL
+        SELECT
+          'agg_tournament_stats' AS table_name,
+          COUNT(*) AS row_count
+        FROM agg_tournament_stats
+        UNION ALL
+        SELECT
+          'agg_first_blood_stats' AS table_name,
+          COUNT(*) AS row_count
+        FROM agg_first_blood_stats
+        UNION ALL
+        SELECT
+          'agg_post_plant_stats' AS table_name,
+          COUNT(*) AS row_count
+        FROM agg_post_plant_stats
+        UNION ALL
+        SELECT
+          'agg_team_round_summary' AS table_name,
+          COUNT(*) AS row_count
+        FROM agg_team_round_summary
+        UNION ALL
+        SELECT
+          'agg_team_map_stats' AS table_name,
+          COUNT(*) AS row_count
+        FROM agg_team_map_stats
+        UNION ALL
+        SELECT
+          'agg_team_series_stats' AS table_name,
+          COUNT(*) AS row_count
+        FROM agg_team_series_stats
+        UNION ALL
+        SELECT
+          'agg_player_win_shares' AS table_name,
+          COUNT(*) AS row_count
+        FROM agg_player_win_shares
