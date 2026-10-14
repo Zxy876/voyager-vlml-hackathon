@@ -7,7 +7,8 @@
 > **提交叙事与 Setup 见 [HACKATHON.md](HACKATHON.md)（英文）**；主仓库（开发主线）在
 > <https://github.com/Zxy876/voyager-vlml-mve>。
 >
-> **线上面板（黑客松演示，Nebius 后端）**：`<DEMO_URL — 提交前部署填写>`
+> **线上面板（黑客松演示，Nebius 后端）**：https://43.161.203.50:8443/mve-hackathon/
+> （自签名证书，浏览器弹一次「不安全」警告，选「继续访问」即可；无需登录）
 > **最后更新**：2026-10-14（黑客松支线：Nebius 后端 + 真空判据修复 + 英文物料）
 
 ---

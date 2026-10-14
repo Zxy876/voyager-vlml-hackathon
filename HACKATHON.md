@@ -169,10 +169,11 @@ python -m voyager_vlml.loop --rounds 5   # practice loop: self-quiz + SQL; the s
 ```
 
 **Live demo (online instance on the Nebius backend)**:
-`<DEMO_URL — filled in before submission>` — the dashboard has nine panels;
-suggested tour: data-source check → Start Voyager → running → trajectory →
-skills & causal timeline (watch the skill library grow from 0) → Human Import
-same-task re-test.
+https://43.161.203.50:8443/mve-hackathon/ — the dashboard has nine panels
+(the host uses a self-signed certificate, so accept the browser warning
+once); suggested tour: data-source check → Start Voyager → running →
+trajectory → skills & causal timeline (watch the skill library grow from
+0) → Human Import same-task re-test.
 
 ## Tech stack & Nebius/NVIDIA usage
 
