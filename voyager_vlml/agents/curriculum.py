@@ -316,17 +316,17 @@ class VLMLCurriculumAgent:
                         f"次仍未跑通 → 放弃换题：{info.get('reason') or ''}",
                     )
         except Exception as e:  # pragma: no cover
-            print(f"（课程 Agent 改写图谱失败：{type(e).__name__}: {e}）")
+            print(f"(Course Agent failed to rewrite graph): {type(e).__name__}: {e})")
 
 
 def _main() -> int:
     """冒烟：打印 VLML 同构的出生地观察 + 第一个任务（应 = 种子里程碑）。"""
     agent = VLMLCurriculumAgent()
     print("=== progress:", agent.progress, "===")
-    print("=== 出生地观察（VLML 同构）===")
+    print("=== Birthplace observation (VLML isomorphic) ===")
     print(agent.render_human_message()[:1600])
     nxt = agent.propose_next_task()
-    print("=== 下一个任务 ===")
+    print("=== Next task ===")
     print("task     :", nxt["task"])
     print("topic_id :", nxt["topic_id"])
     print("reason   :", nxt["reason"], "| exhausted:", nxt["exhausted"])

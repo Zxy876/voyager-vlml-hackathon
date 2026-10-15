@@ -1,38 +1,39 @@
 #!/usr/bin/env python3
-"""题目锚点：当前库里"代表那一场/那一队/那张图"是谁 —— **从库实查，不写死**。
+"""Question anchors: which series/team/map in the current database "represents" it — **looked up live from the database, never hard-coded**.
 
-为什么必须有它
---------------
-`tasks.py` / `question_gen.py` / `voyager.py` 里原本写死：
+Why it must exist
+-----------------
+`tasks.py` / `question_gen.py` / `voyager.py` used to hard-code:
 
-    SERIES = "2843069"      # GRID 切片里那场
+    SERIES = "2843069"      # that series in the GRID slice
     C9     = "Cloud9"
 
-换库（GRID → vlr.gg → rib.gg）之后这两个值在库里**根本不存在**，于是：
+After switching databases (GRID → vlr.gg → rib.gg), these two values **do not exist at all** in the database, so:
 
-    种子题 17 个评分点，在 rib 库上**0 个能跑出数**
+    of the seed questions' 17 scoring points, **0 can produce data** on the rib database
 
-实测（2026-10-08）：`series_totals / map_rounds_split / fb_conversion_analysis /
-corrode_collapse / lotus_win_rate / max_losing_streak_map` 全部 value=None 或 0，
-其中 3 个直接报"SQL 返回 0 行 —— 这道题在本场数据里无解"。
+Observed (2026-10-08): `series_totals / map_rounds_split / fb_conversion_analysis /
+corrode_collapse / lotus_win_rate / max_losing_streak_map` were all value=None or 0,
+and 3 of them directly reported "SQL returned 0 rows — this question has no solution in this series' data".
 
-`db_switch.probe()` 早就给出过这条警告（"原题依赖的 series 2843069 不在这个
-库里…所有题都查不到数据"），但只是**提示**，没有自动重配 —— 本模块就是把那
-一步补上。
+`db_switch.probe()` gave this warning long ago ("the series 2843069 the original questions depend on is not in this
+database… none of the questions can find data"), but it was only a **hint**, with no automatic reconfiguration —
+this module fills in that step.
 
-怎么挑（不能随便挑，否则题还是跑不出数）
-----------------------------------------
-- series：**回合数最多**的那场（数据最全，题最可能有解）
-- team：那场里**回合数最多**的队
-- map：那场里**回合数最多**的图
+How anchors are picked (can't be picked arbitrarily, or questions still won't produce data)
+------------------------------------------------------------------------------------------
+- series: the one with the **most rounds** (most complete data, questions most likely solvable)
+- team: the team with the **most rounds** in that series
+- map: the map with the **most rounds** in that series
 
-落盘与失效
-----------
-结果写进 `db_config.json` 的 `anchor` 字段（和 db_path 一起），换库时由
-`db_switch.write()` 重算。读不到就现场连库实查一次。
+Persistence and invalidation
+----------------------------
+The result is written into the `anchor` field of `db_config.json` (alongside db_path), recomputed by
+`db_switch.write()` when the database is switched. If it can't be read, connect and look it up live.
 
-⚠️ 进程内换库不会自动生效（模块 import 时就把值解析好了）—— 面板换库会重启
-服务，够用。想强制刷新就跑 `python mve/anchor.py --refresh`。
+⚠️ Switching databases in-process doesn't take effect automatically (values are resolved at module import) —
+the dashboard restarts the service when switching databases, which is enough. To force a refresh, run
+`python mve/anchor.py --refresh`.
 """
 
 from __future__ import annotations
@@ -55,25 +56,27 @@ def _cfg() -> dict[str, Any]:
 
 
 def _db_path() -> Path:
-    """当前库路径。**相对路径一律按仓库根解析**。
+    """Current database path. **Relative paths always resolve against the repo root**.
 
-    ⚠️ 为什么不能原样返回（2026-10-13 服务器实测）：
-      `vlml_env` 启动时会 `os.chdir(vlml/)`（VLML 内部查询依赖那个 cwd）。
-      于是一条相对路径 `vlml/data/vlml_rib.duckdb` 到了 DuckDB 手里会被拼成
-      `<repo>/vlml/vlml/data/vlml_rib.duckdb` —— **拼两遍**，报
-      `IO Error: database does not exist`。循环侧看到的是"连续三轮一次工具
-      都没调成功"，分诊归到 `linkage`，看着像学不会，其实是路径。
-      配置是人写的，人写相对路径时想的是仓库根，所以按仓库根解析。
+    ⚠️ Why it can't be returned as-is (observed on the server on 2026-10-13):
+      `vlml_env` does `os.chdir(vlml/)` at startup (VLML internal queries depend on that cwd).
+      So a relative path `vlml/data/vlml_rib.duckdb` gets joined by DuckDB into
+      `<repo>/vlml/vlml/data/vlml_rib.duckdb` — **joined twice** — reporting
+      `IO Error: database does not exist`. On the loop side what's seen is "three consecutive rounds
+      with zero successful tool calls", triage files it under `linkage`, which looks like an inability
+      to learn but is actually the path. Configs are written by humans, and when humans write relative
+      paths they mean the repo root, so resolve against the repo root.
 
-    ⚠️ 兜底必须是 `db_switch.DEFAULT_DB`（当前是 rib.gg，用户 2026-10-13 定），
-      不能再写一份 `vlml_events.duckdb` 字面量 —— 各模块各写一份默认库，
-      正是"db_path 一空就悄悄换库"的土壤。唯一定义在 db_switch，这里只 import。
+    ⚠️ The fallback must be `db_switch.DEFAULT_DB` (currently rib.gg, decided by the user on 2026-10-13),
+      not another `vlml_events.duckdb` literal — each module writing its own copy of the default database
+      is exactly the soil for "the database silently switches the moment db_path is empty". The single
+      definition lives in db_switch; here we only import.
     """
     try:
         from db_switch import DEFAULT_DB
     except Exception as _e:                                  # pragma: no cover
         raise RuntimeError(
-            f"读不到 db_switch.DEFAULT_DB（默认库唯一定义处）：{_e}") from _e
+            f"cannot read db_switch.DEFAULT_DB (the single definition of the default database): {_e}") from _e
     p = str(_cfg().get("db_path") or "").strip()
     if p:
         q = Path(p).expanduser()
@@ -83,10 +86,12 @@ def _db_path() -> Path:
 
 def pick(db_path: Path | str | None = None,
          prefer: dict[str, str] | None = None) -> dict[str, str]:
-    """从库里实查锚点。挑**回合数最多**的那场/队/图，保证题跑得出数。
+    """Look up anchors live from the database. Pick the series/team/map with the **most rounds**,
+    so questions are guaranteed to produce data.
 
-    `prefer` 是上一轮的锚点：若它在库里**仍然存在**就沿用，避免换库后
-    题面无谓地全变（比如重跑管线时）。
+    `prefer` is the previous round's anchors: if they **still exist** in the database, keep them,
+    to avoid all question texts changing pointlessly after a database switch (e.g. when re-running
+    the pipeline).
     """
     path = Path(db_path) if db_path else _db_path()
     out = dict(FALLBACK)
@@ -97,14 +102,14 @@ def pick(db_path: Path | str | None = None,
     except Exception:
         return out
     try:
-        # ── series：回合数最多的那场 ──
+        # ── series: the one with the most rounds ──
         try:
             row = con.execute(
                 "SELECT CAST(series_id AS VARCHAR) FROM rounds "
                 "GROUP BY 1 ORDER BY COUNT(*) DESC LIMIT 1").fetchone()
         except Exception:
             row = None
-        if not row:                       # 库里没有 rounds：退回 series 表随便挑一个
+        if not row:                       # no rounds in the database: fall back to picking any from the series table
             try:
                 row = con.execute(
                     "SELECT CAST(series_id AS VARCHAR) FROM series LIMIT 1").fetchone()
@@ -116,17 +121,20 @@ def pick(db_path: Path | str | None = None,
                 sid = str(prefer["series"])
             out["series"] = sid
 
-        # ── team / map：都限定在这场比赛里 ──
+        # ── team / map: both restricted to this series ──
         sid = out["series"]
-        # ⚠️ team 那条 SQL 里有**两个** `?`（winning / losing 各一次），
-        # 只传一个参数会抛错并静默退回兜底值（实测挑出 Cloud9 —— rib 库里
-        # 根本没这个队）。按占位符个数配参数。
-        # ⚠️ `ORDER BY` 必须有第二排序键（2026-10-14 实测，同一输入两次跑出两个结果）：
-        #   只按 `COUNT(*) DESC` 排时，并列的两队 / 两图谁在前由 DuckDB 决定 ——
-        #   同一个"切到 rib.gg"跑两遍，team 一次给 **Karmine Corp**、一次给
-        #   **Nongshim RedForce**；"切回 GRID"则一次 NRG、一次 Cloud9。
-        #   锚点摇摆的代价：重启之间题面会自己变（今天问这两队，明天问那两队），
-        #   排查时还以为是别的地方改了。加 `, t` / `, map_name` 让它可复现。
+        # ⚠️ The team SQL contains **two** `?` placeholders (one each for winning / losing);
+        # passing a single parameter throws and silently falls back to the fallback value
+        # (observed picking Cloud9 — a team that doesn't exist in the rib database at all).
+        # Match the number of parameters to the number of placeholders.
+        # ⚠️ `ORDER BY` must have a second sort key (observed 2026-10-14: two runs of the same input
+        #   produced two different results): ordering only by `COUNT(*) DESC` leaves ties between
+        #   two teams / two maps up to DuckDB — the same "switch to rib.gg" run twice gave
+        #   **Karmine Corp** once and **Nongshim RedForce** once; "switch back to GRID" gave
+        #   NRG once and Cloud9 once. The cost of anchor wobble: question texts change on their
+        #   own between restarts (asking about these two teams today, those two tomorrow), and
+        #   during debugging you think something else changed. Add `, t` / `, map_name` to make it
+        #   reproducible.
         for key, sql, args in (
             ("team",
              "SELECT t FROM (SELECT winning_team_name AS t FROM rounds "
@@ -167,7 +175,7 @@ def _series_ids(con) -> set[str]:
 
 
 def refresh(db_path: Path | str | None = None) -> dict[str, str]:
-    """重算锚点并写回 db_config.json（保留 db_path 等其他字段）。"""
+    """Recompute anchors and write them back to db_config.json (keeping other fields like db_path)."""
     cfg = _cfg()
     path = Path(db_path) if db_path else _db_path()
     anchor = pick(path, prefer=cfg.get("anchor") or {})
@@ -180,7 +188,7 @@ def refresh(db_path: Path | str | None = None) -> dict[str, str]:
 
 
 def get() -> dict[str, str]:
-    """当前锚点。优先读配置（快、不连库），读不到就现场实查。"""
+    """Current anchors. Prefer reading the config (fast, no database connection); if unreadable, look it up live."""
     a = _cfg().get("anchor")
     if isinstance(a, dict) and a.get("series") and a.get("team"):
         return {"series": str(a["series"]), "team": str(a["team"]),
@@ -202,12 +210,12 @@ def map_name() -> str:
 
 if __name__ == "__main__":
     import argparse
-    ap = argparse.ArgumentParser(description="题目锚点（跟着库走）")
-    ap.add_argument("--refresh", action="store_true", help="重算并写回 db_config.json")
-    ap.add_argument("--db", default="", help="对哪个库算（默认当前库）")
+    ap = argparse.ArgumentParser(description="question anchors (follows the database)")
+    ap.add_argument("--refresh", action="store_true", help="recompute and write back to db_config.json")
+    ap.add_argument("--db", default="", help="which database to compute against (defaults to the current database)")
     a = ap.parse_args()
     if a.refresh:
         r = refresh(a.db or None)
-        print(f"锚点已重算并写入 db_config.json：{json.dumps(r, ensure_ascii=False)}")
+        print(f"anchors recomputed and written to db_config.json: {json.dumps(r, ensure_ascii=False)}")
     else:
         print(json.dumps(get(), ensure_ascii=False))

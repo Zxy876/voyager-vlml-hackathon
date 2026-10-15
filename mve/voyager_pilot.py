@@ -1,24 +1,27 @@
 #!/usr/bin/env python3
-"""Voyager 驾驶舱：让 MVE 面板能一键启动 / 停止**真实 MC 里的学习**。
+"""Voyager cockpit: lets the MVE dashboard start / stop **real learning in MC** with one click.
 
-为什么单独开一个文件（同 mve/pilot.py 的论证）：面板是 HTTP 服务，进程句柄挂在请求里
-面板一重启就丢了 —— 人点过「启动」却查不到在不在跑，比不给按钮更糟。所以驾驶舱自己
-是一个**独立子进程**，状态写在文件里，面板只读文件。
+Why a separate file (same argument as mve/pilot.py): the dashboard is an HTTP service, and process handles
+hang off requests, so they're lost the moment the dashboard restarts — a user clicking "start" yet unable
+to find out whether it's running is worse than not having the button. So the cockpit itself is an
+**independent subprocess**, state is written to a file, and the dashboard only reads the file.
 
-   面板 ──Popen──> voyager_pilot.py _run ──Popen──> run_voyager_learn.py（venv）
+   Dashboard ──Popen──> voyager_pilot.py _run ──Popen──> run_voyager_learn.py (venv)
     │                   ↑                              │
-    └── 读 voyager_pilot_state.json ───────────────────┘
+    └── reads voyager_pilot_state.json ─────────────────┘
 
-停止语义（镜像 MVE 面板「停止」键）：
-  SIGTERM 给驾驶舱进程 → 转发给 run_voyager_learn.py（它有 SIGTERM 处理器，会在
-  当前任务结束后调 voyager.request_stop() 优雅退出 learn 循环）→ 驾驶舱等子进程退出后
-  写最终状态。技能已按任务落盘，不会被硬杀丢半个技能。
+Stop semantics (mirroring the MVE dashboard's "stop" button):
+  SIGTERM to the cockpit process → forwarded to run_voyager_learn.py (it has a SIGTERM handler that, after
+  the current task ends, calls voyager.request_stop() to gracefully exit the learn loop) → the cockpit
+  writes the final state after the child process exits. Skills are persisted per task, so a hard kill
+  can't lose half a skill.
 
-两类清除（对应 MVE 的清库 / 清记忆，且都由 voyager_learn_reset 实现，先备份再删）：
-  清库   —— 删 ckpt/skill/（已学的 JS 技能库）
-  清记忆 —— 删 ckpt/curriculum/ + ckpt/events/（课程进度 / QA 缓存 / 事件历史）
+Two kinds of clearing (matching MVE's clear-library / clear-memory, both implemented by
+voyager_learn_reset, backup first then delete):
+  Clear library  — delete ckpt/skill/ (the learned JS skill library)
+  Clear memory — delete ckpt/curriculum/ + ckpt/events/ (curriculum progress / QA cache / event history)
 
-用法（被面板调用，不直接跑）：
+Usage (called by the dashboard, not run directly):
     python mve/voyager_pilot.py status | stop
 """
 from __future__ import annotations
@@ -37,14 +40,14 @@ ROOT = Path(__file__).resolve().parent
 STATE = ROOT / "voyager_pilot_state.json"
 LOG = ROOT / "voyager_pilot.log"
 
-# ---- Voyager 安装位置（VPS 上 /root/voyager，本地可调环境变量覆盖）----
+# ---- Voyager install location (/root/voyager on the VPS; locally overridable via env vars) ----
 from voyager_paths import (  # noqa: E402
     VOYAGER_DIR, VOYAGER_PY, SECRET_FILE, CKPT_DIR, DEFAULT_MAX_ITER, PROGRESS,
 )
 
-_JOB_LABEL = "真实 MC 思路学习（自动课程）"
-# 子进程（run_voyager_learn.py 的 learn 循环）单个任务可能跑很久；
-# 停止时给 120s 宽限让当前任务收尾，超时才硬杀。
+_JOB_LABEL = "real MC learning (auto-curriculum)"
+# The child process (run_voyager_learn.py's learn loop) can take a long time on a single task;
+# on stop, give a 120s grace period for the current task to wrap up, hard-kill only past that.
 STOP_GRACE = 120
 
 _CHILDREN: list[subprocess.Popen] = []
@@ -59,7 +62,7 @@ def _write(state: dict[str, Any]) -> None:
 
 
 def _alive(pid: int) -> bool:
-    """进程是否还活着（先用 waitpid 回收僵尸，再 kill 探测）。"""
+    """Is the process still alive (first reap zombies with waitpid, then probe with kill)."""
     try:
         wpid, _status = os.waitpid(pid, os.WNOHANG)
         if wpid == pid:
@@ -76,7 +79,7 @@ def _alive(pid: int) -> bool:
 
 
 def _secret_key() -> str:
-    """从密钥文件读出 DEEPSEEK_API_KEY / ZHIPU_API_KEY（支持 `KEY=val` 或纯 key 两种写法）。"""
+    """Read DEEPSEEK_API_KEY / ZHIPU_API_KEY from the secret file (supports both `KEY=val` and bare-key formats)."""
     if not SECRET_FILE.exists():
         return ""
     txt = SECRET_FILE.read_text(encoding="utf-8", errors="replace").strip()
@@ -93,10 +96,10 @@ def _secret_key() -> str:
 
 
 def _secret_env() -> dict[str, str]:
-    """从密钥文件读出所有 `KEY=val` 行（忽略注释/空行），注入子进程环境。
+    """Read all `KEY=val` lines from the secret file (ignoring comments/blank lines) and inject them into the child process environment.
 
-    这样密钥文件里写 ZHIPU_API_KEY / ZHIPU_BASE_URL / ZHIPU_MODEL（或 DEEPSEEK_*）
-    都会被原样转发给 run_voyager_learn，neko_model 按命名决定走哪条 LLM 后端。
+    This way ZHIPU_API_KEY / ZHIPU_BASE_URL / ZHIPU_MODEL (or DEEPSEEK_*) written in the secret file
+    are all forwarded as-is to run_voyager_learn, and neko_model decides which LLM backend to use by name.
     """
     out: dict[str, str] = {}
     if not SECRET_FILE.exists():
@@ -112,7 +115,7 @@ def _secret_env() -> dict[str, str]:
 
 
 def _progress() -> dict[str, Any]:
-    """读 run_voyager_learn.py 写的进度（completed/failed/iteration）。"""
+    """Read the progress (completed/failed/iteration) written by run_voyager_learn.py."""
     if not PROGRESS.exists():
         return {}
     try:
@@ -122,11 +125,11 @@ def _progress() -> dict[str, Any]:
 
 
 def read() -> dict[str, Any]:
-    """当前状态。进程不在了就自动判定为已停 —— 不信任文件里的 running 位。"""
+    """Current state. If the process is gone, automatically judge it stopped — don't trust the running bit in the file."""
     base: dict[str, Any] = {
         "running": False, "pid": None, "started_at": "", "stopped_at": "",
         "iterations": 0, "max_iterations": DEFAULT_MAX_ITER,
-        "last_exit": None, "why": "从未启动过", "completed_count": 0,
+        "last_exit": None, "why": "never started", "completed_count": 0,
         "failed_count": 0, "completed": [], "failed": [], "mc_port": 25565,
     }
     if not STATE.exists():
@@ -134,14 +137,14 @@ def read() -> dict[str, Any]:
     try:
         st = json.loads(STATE.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
-        return {**base, "why": "状态文件损坏"}
+        return {**base, "why": "state file corrupted"}
     pid = st.get("pid")
     if st.get("running") and pid and not _alive(int(pid)):
         st["running"] = False
-        st["why"] = "进程已退出（崩溃或被强杀）"
+        st["why"] = "process exited (crashed or force-killed)"
     if not st.get("running") and not st.get("why"):
-        st["why"] = "已停止"
-    # 合并实时进度（即使进程已退，也把最后进度带出来）
+        st["why"] = "stopped"
+    # Merge in live progress (even if the process has exited, surface the final progress)
     prog = _progress()
     if prog:
         st["completed_count"] = prog.get("completed_count", 0)
@@ -169,14 +172,14 @@ def _log(text: str) -> None:
 def start(*, mc_port: int = 25565, max_iterations: int = DEFAULT_MAX_ITER) -> dict[str, Any]:
     cur = read()
     if cur.get("running"):
-        return {"ok": False, "error": f"已经在跑了（pid {cur.get('pid')}）"}
+        return {"ok": False, "error": f"already running (pid {cur.get('pid')})"}
 
     cmd = [
         str(VOYAGER_PY), str(VOYAGER_DIR / "run_voyager_learn.py"),
         "--mc-port", str(mc_port), "--ckpt-dir", CKPT_DIR,
         "--max-iterations", str(max_iterations),
     ]
-    # 启动时把密钥文件里的 LLM 凭据（ZHIPU_* / DEEPSEEK_*）注入子进程环境
+    # At startup, inject the LLM credentials (ZHIPU_* / DEEPSEEK_*) from the secret file into the child process environment
     env = dict(os.environ)
     env.update(_secret_env())
     env["PYTHONUNBUFFERED"] = "1"
@@ -188,18 +191,18 @@ def start(*, mc_port: int = 25565, max_iterations: int = DEFAULT_MAX_ITER) -> di
     st = {
         "running": True, "pid": proc.pid, "started_at": _now(),
         "stopped_at": "", "iterations": 0, "max_iterations": max_iterations,
-        "mc_port": mc_port, "last_exit": None, "why": "学习中",
+        "mc_port": mc_port, "last_exit": None, "why": "learning",
         "completed_count": 0, "failed_count": 0, "completed": [], "failed": [],
         "stop_requested": False,
     }
     _write(st)
     sec = _secret_env()
     has_llm = any(k in sec for k in ("ZHIPU_API_KEY", "DEEPSEEK_API_KEY"))
-    _log(f"\n===== 启动 Voyager 学习 {_now()} · mc_port {mc_port} · "
-         f"上限 {max_iterations} 轮 · pid {proc.pid} · LLM凭据 {'有' if has_llm else '无'} =====\n")
+    _log(f"\n===== starting Voyager learning {_now()} · mc_port {mc_port} · "
+         f"limit {max_iterations} rounds · pid {proc.pid} · LLM credentials {'present' if has_llm else 'absent'} =====\n")
     if not has_llm:
-        _log("[驾驶舱] 警告：/root/.voyager_secret 里没有 ZHIPU_API_KEY/DEEPSEEK_API_KEY，"
-             "LLM 调用会失败。\n")
+        _log("[cockpit] warning: /root/.voyager_secret has no ZHIPU_API_KEY/DEEPSEEK_API_KEY, "
+             "LLM calls will fail.\n")
     return {"ok": True, **st}
 
 
@@ -207,11 +210,11 @@ def stop() -> dict[str, Any]:
     st = read()
     pid = st.get("pid")
     if not st.get("running") or not pid:
-        return {"ok": True, "stopped": True, "note": "本来就没在跑"}
+        return {"ok": True, "stopped": True, "note": "wasn't running in the first place"}
     try:
         os.kill(int(pid), signal.SIGTERM)
     except (ProcessLookupError, ValueError, PermissionError, OSError) as e:
-        return {"ok": True, "stopped": True, "note": f"进程已不在（{e}）"}
+        return {"ok": True, "stopped": True, "note": f"process already gone ({e})"}
 
     deadline = time.time() + 5
     while time.time() < deadline:
@@ -226,11 +229,11 @@ def stop() -> dict[str, Any]:
         try:
             cur = json.loads(STATE.read_text(encoding="utf-8"))
             cur.update({"running": False, "stopped_at": _now(),
-                        "why": "已停止（强杀）", "child_pid": None})
+                        "why": "stopped (force-killed)", "child_pid": None})
             _write(cur)
         except Exception:
             pass
-    _log(f"\n===== 停止 {_now()} · 已学 {st.get('completed_count', 0)} 个技能 =====\n")
+    _log(f"\n===== stopped {_now()} · {st.get('completed_count', 0)} skills learned =====\n")
     return {"ok": True, "stopped": True, "completed_count": st.get("completed_count", 0)}
 
 
@@ -240,24 +243,25 @@ def clear_log() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 驾驶舱子进程本体
+# The cockpit subprocess itself
 # ---------------------------------------------------------------------------
 
 def _install_signal_handlers() -> None:
-    """收到 SIGTERM 时，转发给在跑的 run_voyager_learn（它自己会优雅退出 learn 循环），
-    并标记停止。不要直接 sys.exit：要让主循环等子进程退出后写最终状态，否则若在这里
-    退出，子进程（start_new_session 起的，不在本组）会成为孤儿继续跑。"""
+    """On receiving SIGTERM, forward it to the running run_voyager_learn (which itself gracefully exits
+    the learn loop), and mark the stop. Don't sys.exit directly: let the main loop write the final state
+    after the child exits, for otherwise, exiting here would leave the child (started with
+    start_new_session, not in this group) orphaned and still running."""
 
     def handler(signum, _frame):
         for p in _CHILDREN:
             try:
-                p.terminate()  # SIGTERM → run_voyager_learn 的 handler 调 request_stop()
+                p.terminate()  # SIGTERM → run_voyager_learn's handler calls request_stop()
             except Exception:
                 pass
         try:
             cur = json.loads(STATE.read_text(encoding="utf-8"))
             cur.update({"running": False, "stop_requested": True,
-                        "stopped_at": _now(), "why": "已停止（请求中）",
+                        "stopped_at": _now(), "why": "stopped (requested)",
                         "child_pid": None})
             _write(cur)
         except Exception:
@@ -290,7 +294,7 @@ def _loop(mc_port: int, max_iterations: int, logf) -> int:
     _write({
         "running": True, "pid": pid, "started_at": _now(), "stopped_at": "",
         "iterations": 0, "max_iterations": max_iterations, "mc_port": mc_port,
-        "last_exit": None, "why": "学习中", "completed_count": 0,
+        "last_exit": None, "why": "learning", "completed_count": 0,
         "failed_count": 0, "completed": [], "failed": [], "stop_requested": False,
     })
 
@@ -303,7 +307,7 @@ def _loop(mc_port: int, max_iterations: int, logf) -> int:
         "--mc-port", str(mc_port), "--ckpt-dir", CKPT_DIR,
         "--max-iterations", str(max_iterations),
     ]
-    what = f"真实 MC 思路学习（自动课程）· mc_port {mc_port} · 上限 {max_iterations} 轮 · {_now()}"
+    what = f"real MC learning (auto-curriculum) · mc_port {mc_port} · limit {max_iterations} rounds · {_now()}"
     mark(f"\n----- {what} -----\n")
 
     fd = os.open(str(LOG), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
@@ -319,15 +323,15 @@ def _loop(mc_port: int, max_iterations: int, logf) -> int:
             _write(cur)
         except Exception:
             pass
-        # 正常等子进程退出（learn 循环跑完或超过 max_iterations）。
-        # 若收到停止信号，handler 已转发 SIGTERM 给子进程，子进程会在任务边界退出；
-        # 这里给 STOP_GRACE 宽限，超时才硬杀，避免卡死。
+        # Normally wait for the child to exit (learn loop finishes or exceeds max_iterations).
+        # If a stop signal arrives, the handler has already forwarded SIGTERM to the child, and the child
+        # exits at the task boundary; give STOP_GRACE grace here, hard-killing only past it, to avoid deadlock.
         try:
             code = proc.wait(timeout=STOP_GRACE)
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait()
-            mark(f"\n[驾驶舱] 子进程 {STOP_GRACE}s 内未退出，已强杀\n")
+            mark(f"\n[cockpit] child did not exit within {STOP_GRACE}s, force-killed\n")
             code = 124
         _CHILDREN.remove(proc)
     finally:
@@ -348,11 +352,11 @@ def _loop(mc_port: int, max_iterations: int, logf) -> int:
                            if prog else cur.get("completed_count", 0)),
         "failed_count": (prog.get("failed_count", 0)
                          if prog else cur.get("failed_count", 0)),
-        "why": "已停止" if code == 0 else f"已停止（退出码 {code}）",
+        "why": "stopped" if code == 0 else f"stopped (exit code {code})",
     })
     _write(cur)
-    mark(f"\n===== 驾驶舱结束 {_now()} · 退出码 {code} · "
-         f"已学 {cur.get('completed_count', 0)} 个技能 =====\n")
+    mark(f"\n===== cockpit finished {_now()} · exit code {code} · "
+         f"{cur.get('completed_count', 0)} skills learned =====\n")
     return code
 
 
@@ -377,4 +381,4 @@ if __name__ == "__main__":
         sys.exit(0)
 
     print(__doc__)
-    print("用法：python mve/voyager_pilot.py status | stop")
+    print("usage: python mve/voyager_pilot.py status | stop")

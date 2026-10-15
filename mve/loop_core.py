@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""MVE 核心：事实集 → 覆盖率评分 → 掌握度。
+"""MVE core: fact set → coverage scoring → mastery.
 
-三块全部照抄纸面设计与猫娘伴学的阈值，行号依据见各函数 docstring。
+All three sections copy the paper design and the study companion's thresholds verbatim; line-number evidence is in each function's docstring.
 """
 
 from __future__ import annotations
@@ -13,14 +13,14 @@ from typing import Any, Iterable
 
 
 # --------------------------------------------------------------------------
-# 1. 事实（fact）
+# 1. Facts
 # --------------------------------------------------------------------------
-# 纸面设计：fact = {subject, dimension, value, unit, base, scope, source}
-# diff 单元 = (subject, dimension) 对
+# Paper design: fact = {subject, dimension, value, unit, base, scope, source}
+# diff unit = (subject, dimension) pair
 
 
 def fact_key(f: dict[str, Any]) -> tuple[str, str]:
-    """事实的比对键：subject 规范化 + dimension。"""
+    """A fact's comparison key: normalized subject + dimension."""
     s = f.get("subject") or {}
     if isinstance(s, dict):
         subj = "|".join(f"{k}={s[k]}" for k in sorted(s) if s[k] is not None)
@@ -30,17 +30,17 @@ def fact_key(f: dict[str, Any]) -> tuple[str, str]:
 
 
 def _key_match(a: tuple[str, str], b: tuple[str, str]) -> bool:
-    """两个 fact_key 是否指同一条事实 —— **'?' 是通配符**。
+    """Do two fact_keys refer to the same fact — **'?' is a wildcard**.
 
-    为什么必须通配：subject 里 `map: '?'` 的语义是"这一维不指定"
-    （出题器用它表示"你查到哪张图就是哪张图"）。但裁判跑配方拿到的 fact
-    把 '?' 原样带了出来（`series=2843069/team=Cloud9/map=?`），而评分点声明的
-    subject 写的是真值 `map=Lotus` —— 键永远对不上。
+    Why the wildcard is necessary: the semantics of `map: '?'` in subject is "this dimension is unspecified"
+    (the question generator uses it to mean "whichever map you find"). But facts obtained by the referee running recipes
+    carry '?' through verbatim (`series=2843069/team=Cloud9/map=?`), while the rubric point declares
+    subject with the true value `map=Lotus` — the keys never match.
 
-    实测后果：`max_losing_streak_map` 连跑 5 轮，裁判每次都记
-    `unjudgeable`（"裁判自己也没答出来"），coverage=0、missing=[] 、
-    rejected=[] —— 模型**做什么都拿不到分**，critique 五轮一字不变。
-    这不是学不会，是比对层把它判成了"不可判"。
+    Observed consequence: `max_losing_streak_map` ran 5 rounds in a row, with the referee recording
+    `unjudgeable` every time ("the referee itself could not answer either"), coverage=0, missing=[],
+    rejected=[] — the model **scored nothing no matter what it did**, and critique stayed word-for-word identical for five rounds.
+    This is not "cannot learn"; the comparison layer judged it "unjudgeable".
     """
     if a == b:
         return True
@@ -59,14 +59,14 @@ def _key_match(a: tuple[str, str], b: tuple[str, str]) -> bool:
         yk, _, yv = y.partition("=")
         if xk != yk:
             return False
-        if xv == "?" or yv == "?":     # 一方未指定 → 视为同一条
+        if xv == "?" or yv == "?":     # One side unspecified → treated as the same
             continue
         return False
     return True
 
 
 def _lookup(index: dict, key: tuple[str, str]) -> Any | None:
-    """先精确查，查不到再按 '?' 通配查。"""
+    """Exact lookup first, then a '?' wildcard lookup if not found."""
     hit = index.get(key)
     if hit is not None:
         return hit
@@ -77,10 +77,10 @@ def _lookup(index: dict, key: tuple[str, str]) -> Any | None:
 
 
 def norm_subject(value: Any) -> dict[str, Any]:
-    """把模型返回的 subject 归一化成交叉键字典。
+    """Normalize the subject returned by the model into a cross-key dictionary.
 
-    实测模型会返回字符串（如 "series=2843069/map=Corrode"）而不是对象，
-    直接进 fact_key 虽然不崩，但后续面板渲染和比对都会走样。
+    Observed: the model returns a string (e.g. "series=2843069/map=Corrode") instead of an object,
+    which does not crash on entry to fact_key, but subsequent dashboard rendering and comparison both go wrong.
     """
     if isinstance(value, dict):
         return value
@@ -88,7 +88,7 @@ def norm_subject(value: Any) -> dict[str, Any]:
         text = value.strip()
         if not text:
             return {}
-        # 尝试解析 "k=v/k=v" 形态；解析不出来就整个当一个标签
+        # Try parsing the "k=v/k=v" form; if unparseable, treat the whole thing as one label
         parts = [p for p in text.split("/") if "=" in p]
         if parts:
             out: dict[str, Any] = {}
@@ -133,9 +133,9 @@ def from_sql_result(
     sql: str = "",
     fixed_subject: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    """把 execute_custom_sql 的结果集展开成事实：一行一列 = 一个事实。
+    """Expand an execute_custom_sql result set into facts: one row × one column = one fact.
 
-    这是「任意 SQL 都能吃下」的关键——只记结果，不记这列属于哪张表。
+    This is the key to "any SQL can be swallowed" — only the result is recorded, not which table the column belongs to.
     """
     cols = list(rows.get("columns") or [])
     out: list[dict[str, Any]] = []
@@ -163,10 +163,10 @@ def from_key_metrics(
     tool: str = "",
     scope: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    """把 VLML 报告的 key_metrics 展开成事实。
+    """Expand key_metrics from a VLML report into facts.
 
-    关键：VLML 自己就用 {"num":..,"denom":..} 组织数值，
-    所以 fact.base 直接取 denom，不用自算。
+    Key point: VLML itself organizes values as {"num":..,"denom":..},
+    so fact.base takes denom directly, with no self-computation.
     """
     out: list[dict[str, Any]] = []
 
@@ -200,44 +200,44 @@ def from_key_metrics(
 
 
 # --------------------------------------------------------------------------
-# 2. 评分：覆盖率比对 + verdict
+# 2. Scoring: coverage comparison + verdict
 # --------------------------------------------------------------------------
 
 
 @dataclass
 class AnswerSpec:
-    """服务端私有的确定性答案配方。
+    """A server-private deterministic answer recipe.
 
-    照伴学 NumericToleranceEvaluator 的契约（deterministic_evaluators.py:158-167）：
-    expected 与 tolerance **只从服务端私有 answer_spec 读**，绝不从学习者答案读，
-    也绝不用模型生成的参考答案替换（tutor_llm_agent_answer_evaluate.py:82-84）。
+    Mirrors the study companion's NumericToleranceEvaluator contract (deterministic_evaluators.py:158-167):
+    expected and tolerance are **read only from the server-private answer_spec**, never from the learner's answer,
+    and never replaced with a model-generated reference answer (tutor_llm_agent_answer_evaluate.py:82-84).
 
-    为什么必须有它：最初我把标准答案写成 rubric 里的常量（25.0 / 8 / 7），
-    那是我自己手写的 = 我在当裁判。后来改成让 LLM 裁判跑一遍，结果它读报告
-    数错了（说连败 5、起始 R2，真值是 8、R7）——LLM 会编。
-    所以能用 SQL 算的必须 SQL 算，这块是确定性的，不经过任何模型。
+    Why it must exist: initially I wrote the standard answers as constants in the rubric (25.0 / 8 / 7),
+    which I hand-wrote = me being the referee. Later I switched to having the LLM referee run once, and it read the report
+    wrong (said losing streak 5, starting R2; the true values are 8, R7) — LLMs fabricate.
+    So anything computable with SQL must be computed with SQL; this part is deterministic and passes through no model.
     """
 
-    sql: str = ""                     # 确定性 SQL，必须以 SELECT 开头（不支持 CTE）
+    sql: str = ""                     # Deterministic SQL, must start with SELECT (CTE not supported)
     value_column: int = 0
     base_column: int | None = None
     numeric_tolerance: float = 0.0
     closed_world: bool = True
 
-    # ---- 工具路径：与 sql 二选一 ----
-    # 有些指标是 VLML 工具**内部聚合**出来的（pistol / eco / confidence 标签），
-    # 没有对应的单条 SQL。硬要用 SQL 复现，等于我照着工具逻辑手写一遍 ——
-    # 那又变成「我在当裁判」。所以这里直接调工具、按路径取值：
-    # 标准答案仍然由服务端（原版 VLML）独立产出，不经模型、不经人手。
+    # ---- Tool path: either this or sql ----
+    # Some metrics are produced by **internal aggregation** in VLML tools (pistol / eco / confidence labels),
+    # with no corresponding single SQL statement. Forcing SQL reproduction means hand-writing the tool logic once myself —
+    # which becomes "me being the referee" again. So here we call the tool directly and read values by path:
+    # the standard answer is still produced independently by the server (the original VLML), passing through neither model nor human.
     tool: str = ""
     tool_args: dict[str, Any] = field(default_factory=dict)
-    value_path: str = ""              # 点分路径，如 key_metrics.economy.pistol.num
-    base_path: str = ""               # 分母的路径
+    value_path: str = ""              # dotted path, e.g. key_metrics.economy.pistol.num
+    base_path: str = ""               # path to the denominator
     percent: bool = False             # True → value = round(num/denom*100, 1)
 
 
 def dig(obj: Any, path: str) -> Any:
-    """按点分路径从工具返回里取值。取不到返回 None（绝不猜、绝不兜底）。"""
+    """Read a value from a tool response by dotted path. Returns None when not found (never guess, never fall back)."""
     cur = obj
     for part in (path or "").split("."):
         if not part:
@@ -258,16 +258,16 @@ def dig(obj: Any, path: str) -> Any:
 
 @dataclass
 class RubricPoint:
-    """rubric 的一个评分点。期望一个 (subject, dimension) 被覆盖。"""
+    """One rubric point. Expects one (subject, dimension) to be covered."""
 
     point: str
     subject: dict[str, Any]
     dimension: str
     weight: float
-    min_base: int = 20          # 题目自声明的样本门槛（纸面设计：写进 rubric 而非全局写死）
+    min_base: int = 20          # The question's self-declared sample threshold (paper design: written into the rubric, not globally hard-coded)
     expected_value: float | None = None
     tolerance: float = 0.05
-    # 服务端私有：Voyager 看不到，只有裁判（VLML0）用它算标准答案
+    # Server-private: Voyager cannot see it; only the referee (VLML0) uses it to compute the standard answer
     answer_spec: AnswerSpec | None = None
 
 
@@ -281,14 +281,14 @@ class Evaluation:
     rejected_low_base: list[str]
     evidence_status: str         # collected / below_threshold / none
     facts_count: int
-    judge: str = "referee"       # referee（VLML0 裁判）| rubric（旧的自带答案，已弃用）
-    unjudgeable: list[str] = field(default_factory=list)   # 裁判也没答案的评分点
-    no_tool_calls: bool = False  # True = 本轮没调成功任何工具，事实无来源
-    # **Voyager 判据层的布尔 self-verification**（照原版 critic.check_task_success）：
-    #   任务（=一道题）目标达成 ⇔ 全部评分点都被裁判确认覆盖、值正确。
-    #   与 verdict 的分工：verdict 是伴学判分四档（correct 由 coverage≥0.95 推出，
-    #   95% 在原版眼里就是"没全达成 = 不 success"）；success 才是「存技能 /
-    #   停止同题 / 推进换题 / 迁移考核」唯一认的判据。两者不再混用。
+    judge: str = "referee"       # referee (VLML0 referee) | rubric (old built-in answers, deprecated)
+    unjudgeable: list[str] = field(default_factory=list)   # Rubric points the referee has no answer for either
+    no_tool_calls: bool = False  # True = no tool call succeeded this round, so facts have no source
+    # **Voyager criterion-layer boolean self-verification** (mirrors the original critic.check_task_success):
+    #   A task (=one question) goal achieved ⇔ all rubric points confirmed covered by the referee, with correct values.
+    #   Division of labor with verdict: verdict is the study companion's four-band score (correct derived from coverage≥0.95,
+    #   and 95% in the original's eyes means "not fully achieved = not success"); success is the only criterion recognized by "store skill /
+    #   stop same topic / advance to next topic / transfer exam". The two are no longer conflated.
     success: bool = False
 
 
@@ -299,20 +299,20 @@ def evaluate_vs_referee(
     *,
     tool_calls: int = -1,
 ) -> Evaluation:
-    """Voyager 的事实集 vs VLML0 裁判的事实集。
+    """Voyager's fact set vs VLML0 referee's fact set.
 
-    这才是「掌握程度」的算法：标准答案由原版 VLML 独立跑出来，
-    不是出题人手写、也不是模型生成的参考答案。
+    This is the algorithm for "degree of mastery": the standard answer is run independently by the original VLML,
+    neither hand-written by the question author nor a model-generated reference answer.
 
-    确定性层先跑（照伴学 AssessmentEngine.try_assess 的次序）：
-      0. **工具调用闸**：一次工具都没调成功 → 判无证据，不计入掌握度。
-         实测踩过：模型在工具全失败时会凭空编出 5 条"事实"，
-         维度还对得上（因为题干里写了），值全是编的。不设这道闸，
-         "编造"会拿到 partial 分。
-      1. base 过闸 —— 分母不够，数值对也不算数
-      2. (subject, dimension) 命中
-      3. 值容差比对（容差来自服务端 answer_spec）
-    判不了的点进 unjudgeable，不静默算对也不静默算错。
+    The deterministic layer runs first (mirroring the order of the study companion's AssessmentEngine.try_assess):
+      0. **Tool-call gate**: not a single tool call succeeded → judge as no evidence, not counted in mastery.
+         Observed pitfall: when all tools fail, the model fabricates 5 "facts" out of thin air,
+         with dimensions that even match (because the question text said them), but all values fabricated. Without this gate,
+         "fabrication" earns partial credit.
+      1. base gate — insufficient denominator means a correct value does not count
+      2. (subject, dimension) hit
+      3. Value tolerance comparison (tolerance comes from the server-side answer_spec)
+    Points that cannot be judged go to unjudgeable, silently counted neither right nor wrong.
     """
     voyager_index: dict[tuple[str, str], dict[str, Any]] = {}
     for f in facts:
@@ -334,7 +334,7 @@ def evaluate_vs_referee(
         key = fact_key({"subject": p.subject, "dimension": p.dimension})
         ref = _lookup(ref_index, key)
         if ref is None:
-            # 裁判自己也没答出来 —— 这题出得有问题，不能算 Voyager 错
+            # The referee itself could not answer either — this question is flawed, and it cannot count as Voyager's mistake
             unjudgeable.append(p.point)
             continue
         got_fact = _lookup(voyager_index, key)
@@ -348,35 +348,35 @@ def evaluate_vs_referee(
             missing.append(p.point)
             continue
 
-        # 值比对：与裁判的值比，容差取评分点声明或 answer_spec
+        # Value comparison: against the referee's value, tolerance from the rubric point's declaration or answer_spec
         ref_value = ref.get("value")
         got_value = got_fact.get("value")
-        # **交白卷 ≠ 答错**。实测这一条占大头：模型没看到这个数就填 null，
-        # 之前会被当成一条"答案"去比对，记成"值不可比"或"值不符 0≠59" ——
-        # 那等于把"没取到"粉饰成"取到了但取错"，掩盖了真正的病（取证不全）。
+        # **A blank submission ≠ a wrong answer**. Observation shows this case dominates: the model fills null when it has not seen the number,
+        # and it used to be compared as an "answer", recorded as "value incomparable" or "value mismatch 0≠59" —
+        # that whitewashes "not retrieved" as "retrieved but wrong", masking the real disease (incomplete evidence gathering).
         if got_value is None:
-            missing.append(f"{p.point}(未取到值：模型交了 null)")
+            missing.append(f"{p.point}(value not retrieved: model submitted null)")
             continue
         tol = p.tolerance if p.answer_spec is None else p.answer_spec.numeric_tolerance
         try:
             if abs(float(got_value) - float(ref_value)) > tol:
-                missing.append(f"{p.point}(值不符: {got_value}≠{ref_value})")
+                missing.append(f"{p.point}(value mismatch: {got_value}≠{ref_value})")
                 continue
         except (TypeError, ValueError):
             if str(got_value) != str(ref_value):
-                # **类型相同 ≠ 形态问题**。实测 `confidence`：got="insufficient"、
-                # ref="moderate"，两边都是 str，float() 转不动才落到这个分支，
-                # 于是被记成"值不可比" —— 但那是**值不对**（挑错了枚举），
-                # 不是"形态对不上"。两者补救动作不同：
-                #   形态不对 → 对齐答案形态；值不对 → 重新判断/换口径。
-                # 所以这里必须分开写，否则反馈里 next_action 会指错方向。
+                # **Same type ≠ a form problem**. Observed with `confidence`: got="insufficient",
+                # ref="moderate", both str, falling into this branch only because float() cannot convert,
+                # so it got recorded as "value incomparable" — but that is a **wrong value** (picked the wrong enum),
+                # not "form mismatch". The two need different remedies:
+                #   form wrong → align the answer's form; value wrong → re-judge / change the metric.
+                # So they must be written separately here, otherwise next_action in the feedback points the wrong way.
                 if type(got_value) is type(ref_value):
-                    missing.append(f"{p.point}(值不符: {got_value}≠{ref_value})")
+                    missing.append(f"{p.point}(value mismatch: {got_value}≠{ref_value})")
                 else:
-                    # 把两边的**类型与原型**写进日志：只写"值不可比"等于什么都没说，
-                    # 人没法判断是模型抄错了形态、还是裁判的值本来就不是数字。
+                    # Write both sides' **types and prototypes** into the log: writing only "value incomparable" says nothing,
+                    # and the human cannot tell whether the model copied the form wrong or the referee's value was never numeric.
                     missing.append(
-                        f"{p.point}(值不可比: got={got_value!r}<{type(got_value).__name__}>"
+                        f"{p.point}(value incomparable: got={got_value!r}<{type(got_value).__name__}>"
                         f"≠ref={ref_value!r}<{type(ref_value).__name__}>)"
                     )
                 continue
@@ -386,8 +386,8 @@ def evaluate_vs_referee(
 
     coverage = got / total
 
-    # 一次工具都没调成功 → 手里的事实没有来源，整轮判无证据。
-    # 照伴学 ui_api.py:41："没有证据 = unassessed + None，不是 0%"。
+    # Not a single tool call succeeded → the facts in hand have no source, so the whole round is judged no-evidence.
+    # Mirroring the study companion's ui_api.py:41: "no evidence = unassessed + None, not 0%".
     if no_evidence:
         return Evaluation(
             verdict="dont_know", score=0, coverage=0.0,
@@ -416,12 +416,12 @@ def evaluate_vs_referee(
     else:
         verdict = "wrong"
 
-    # ---- Voyager 判据层的 success（self-verification）----
-    # 与 verdict 解耦：coverage≥0.95 可判 correct，但只要还有评分点 missing /
-    # rejected / unjudgeable，任务就没「全达成」，success 必须为 False。
-    # 照原版：success = critic 确认环境里的任务目标真的达成（布尔），
-    # 95% 达成 = 没达成。unjudgeable（裁判自己没答出来）同样不算达成 ——
-    # 那道题的目标无法被验证，不能让「题目有问题」变成「Voyager 成功」。
+    # ---- Voyager criterion-layer success (self-verification) ----
+    # Decoupled from verdict: coverage≥0.95 can be judged correct, but as long as any rubric point is missing /
+    # rejected / unjudgeable, the task is not "fully achieved", and success must be False.
+    # Per the original: success = the critic confirms the task goal in the environment was truly achieved (boolean),
+    # 95% achieved = not achieved. unjudgeable (the referee itself could not answer) likewise does not count as achieved —
+    # that question's goal cannot be verified, and "the question is flawed" must not become "Voyager succeeded".
     success = (
         evidence == "collected"
         and not missing
@@ -450,13 +450,13 @@ def task_done(
     tool_calls: int = 0,
     errors: list[str] | None = None,
 ) -> bool:
-    """Voyager 尺子：任务完成（=一道题的目标达成）。
+    """Voyager's ruler: task done (=one question's goal achieved).
 
-    照原版 critic.check_task_success（critic.py:116）：判的是「环境里可观测的
-    目标达成」，不是「覆盖了多少评分点」。MVE 里任务=回答问题，目标达成 =
-    跑通编排（有成功工具调用）+ 拿到数（facts 非空）+ 没翻车（无工具错误）。
-    **不算覆盖点** —— 覆盖点是 VLML 的尺子，只用于考核（exam transfer/final）
-    与掌握度证据；学习阶段（存技能 / 停止同题 / 推进换题）只认这个布尔。
+    Mirroring the original critic.check_task_success (critic.py:116): it judges "observable
+    goal achievement in the environment", not "how many rubric points were covered". In MVE task = answering a question, and goal achieved =
+    orchestration ran (successful tool calls) + data retrieved (non-empty facts) + no crash (no tool errors).
+    **Coverage points not counted** — coverage points are VLML's ruler, used only for exams (exam transfer/final)
+    and mastery evidence; the learning stage (store skill / stop same topic / advance to next topic) recognizes only this boolean.
     """
     if tool_calls <= 0:
         return False
@@ -471,10 +471,10 @@ def evaluate(
     facts: list[dict[str, Any]],
     rubric: list[RubricPoint],
 ) -> Evaluation:
-    """旧路径：拿 rubric 自带的 expected_value 比。
+    """Legacy path: compare against the rubric's built-in expected_value.
 
-    ⚠️ 已弃用。expected_value 是出题人手写/模型生成的，不是服务端独立跑出来的，
-    用它算掌握度是假阳性来源。保留仅为对照实验；正式链路走 evaluate_vs_referee。
+    ⚠️ Deprecated. expected_value is hand-written by the question author / model-generated, not run independently by the server,
+    and using it to compute mastery is a source of false positives. Kept only for comparison experiments; the formal path is evaluate_vs_referee.
     """
     index: dict[tuple[str, str], dict[str, Any]] = {}
     for f in facts:
@@ -500,10 +500,10 @@ def evaluate(
         if p.expected_value is not None:
             try:
                 if abs(float(f["value"]) - p.expected_value) > p.tolerance:
-                    missing.append(f"{p.point}(值不符)")
+                    missing.append(f"{p.point}(value mismatch)")
                     continue
             except (TypeError, ValueError):
-                missing.append(f"{p.point}(值不可比)")
+                missing.append(f"{p.point}(value incomparable)")
                 continue
         covered.append(p.point)
         got += p.weight
@@ -542,16 +542,16 @@ def evaluate(
 
 
 # --------------------------------------------------------------------------
-# 3. 掌握度 —— V2 模型（mve/mastery_model.py，照伴学 mastery_v2.py）
+# 3. Mastery — the V2 model (mve/mastery_model.py, mirroring the study companion's mastery_v2.py)
 # --------------------------------------------------------------------------
 #
-# 旧版这里照的是伴学 **V1**（knowledge_tracker.py:252-286）。V1 有两处硬伤，
-# 伴学自己在 V2 里修掉了，我们跟着换：
-#   1. `confidence = 1-exp(-attempts/5)` 只数作答次数 → V2 改成按证据权重之和算
-#   2. `recency = 1.0` 写死（V1:266）→ V2 引入半衰期 60 天的时间衰减
-# V2 另外带来：每条证据有权重（评价可信度 × 作答可靠性 × 时间衰减）、
-# 加权平均代替简单平均、有具体分数就用分数（不再退化成 verdict 三档）。
-# 旧 V1 公式已删除，需要对照见 `掌握度调研-猫娘伴学对照.md`。
+# The old version here mirrored the study companion's **V1** (knowledge_tracker.py:252-286). V1 has two hard flaws,
+# which the study companion itself fixed in V2, and we followed:
+#   1. `confidence = 1-exp(-attempts/5)` only counts attempts → V2 computes from the sum of evidence weights
+#   2. `recency = 1.0` hard-coded (V1:266) → V2 introduces time decay with a 60-day half-life
+# V2 also brings: each evidence has a weight (evaluator confidence × response reliability × time decay),
+# weighted average instead of simple average, and using the concrete score when available (no longer degenerating into three verdict bands).
+# The old V1 formula has been deleted; for comparison see `掌握度调研-猫娘伴学对照.md`.
 
 import mastery_model  # noqa: E402
 from datetime import datetime  # noqa: E402
@@ -581,10 +581,10 @@ def update_mastery(
     as_of: datetime | str | None = None,
     policy: MasteryPolicy | None = None,
 ) -> MasterySnapshot:
-    """掌握度投影（薄封装，本体在 mastery_model.calculate_mastery）。
+    """Mastery projection (a thin wrapper; the body is mastery_model.calculate_mastery).
 
-    `evidence` 是这道题的**全部**历史证据（跨进程从 run_log 重建），
-    不是"本轮一条" —— V2 的加权与时间衰减必须看到完整序列才算得对。
+    `evidence` is this topic's **entire** history of evidence (rebuilt cross-process from run_log),
+    not "this round's single entry" — V2's weighting and time decay must see the full sequence to be correct.
     """
     return calculate_mastery(
         topic_id,
@@ -598,22 +598,22 @@ def update_mastery(
 
 
 # --------------------------------------------------------------------------
-# 4. 出题器
+# 4. Question generator
 # --------------------------------------------------------------------------
 
 
 @dataclass
 class Task:
-    """一个 blocking 任务（= 伴学的一道练习题）。"""
+    """A blocking task (= one practice question in the study companion)."""
 
     topic_id: str
     question: str
     rubric: list[RubricPoint]
     difficulty: int = 2
-    validated_target: bool = True      # 人工导入的题为 False → 不计掌握度
+    validated_target: bool = True      # False for human-imported questions → not counted in mastery
     min_base: int = 20
-    # 这道题要用到哪些 MCP 工具。出题器据此做**工具覆盖**：
-    # 某个工具一直没被用过 → 优先出需要它的题，否则覆盖性永远只是纸面论证。
+    # Which MCP tools this question needs. The question generator does **tool coverage** accordingly:
+    # a tool never used → prioritize questions needing it, or coverage stays a paper argument forever.
     requires_tools: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:

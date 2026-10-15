@@ -1,26 +1,26 @@
 #!/usr/bin/env python3
-"""把 MVE 的学习过程导出成一份 md 产物（照猫娘伴学的 doc_exporter.py）。
+"""Export MVE's learning process into an md artifact (mirroring the study companion's doc_exporter.py).
 
-伴学的 md 结构（doc_exporter.py:134 build_markdown）：
-    # 标题 + 元信息（Exported at / Style / Range）
-    ## Overview            —— 统计
-    ## Recent Interactions —— Input/Output 对（**排第一，人的操作轨迹**）
+The study companion's md structure (doc_exporter.py:134 build_markdown):
+    # Title + metadata (Exported at / Style / Range)
+    ## Overview            — statistics
+    ## Recent Interactions — Input/Output pairs (**placed first, the human's action trajectory**)
     ## Knowledge Map
     ## Mastery
     ## Wrong Questions
 
-原样搬过来的三件事：
-  1. **Recent Interactions 排在最前** —— 伴学把它放在 Overview 之后的第一节，
-     因为"人做了什么"是复现一次实验的起点。用户的要求也是这个：
-     「md 一定要具体到界面交互（按了什么键，然后选了什么难度）」。
-  2. `escape_markdown` 转义（doc_exporter.py:17 的 _MARKDOWN_ESCAPE_RE）——
-     不转义的话，题目里的 `*` `_` `#` 会把表格和标题弄坏。
-  3. 长度截断保护（_MAX_MARKDOWN_CHARS = 120_000），超出标注 [export truncated]。
+Three things copied verbatim:
+  1. **Recent Interactions first** — the study companion places it as the first section after Overview,
+     because "what the human did" is the starting point for reproducing an experiment. The user's requirement is the same:
+     "the md must be concrete about UI interactions (which key was pressed, then which difficulty was chosen)".
+  2. `escape_markdown` escaping (doc_exporter.py:17's _MARKDOWN_ESCAPE_RE) —
+     without escaping, `*` `_` `#` in question text break tables and headings.
+  3. Length truncation protection (_MAX_MARKDOWN_CHARS = 120_000), marked [export truncated] when exceeded.
 
-跑法：
-    python mve/export_md.py                # 写到 mve/exports/
-    python mve/export_md.py --stdout       # 直接打印
-    python mve/export_md.py -o /tmp/a.md   # 指定路径
+Usage:
+    python mve/export_md.py                # writes to mve/exports/
+    python mve/export_md.py --stdout       # print directly
+    python mve/export_md.py -o /tmp/a.md   # specify a path
 """
 
 from __future__ import annotations
@@ -36,17 +36,17 @@ ROOT = Path(__file__).resolve().parent
 import panel_data  # noqa: E402
 import ui_events  # noqa: E402
 
-# 照伴学 doc_exporter.py:17，但收窄了两处：
-#   a) 去掉 `-` 和 `.` —— 伴学原样转义会把「0-100」「50.0」写成 `0\-100` `50\.0`，
-#      行内的连字符和句点并不会破坏 md 结构，纯噪音。
-#   b) 反引号内的片段不转义 —— `pistol_eco_pattern` 被写成 `pistol\_eco\_pattern` 没法读。
+# Mirroring the study companion's doc_exporter.py:17, but narrowed in two places:
+#   a) `-` and `.` removed — the study companion escapes them verbatim, turning "0-100" "50.0" into `0\-100` `50\.0`,
+#      while inline hyphens and periods do not break md structure; pure noise.
+#   b) Fragments inside backticks are not escaped — `pistol_eco_pattern` written as `pistol\_eco\_pattern` is unreadable.
 _MARKDOWN_ESCAPE_RE = re.compile(r"([\\`*_{}\[\]()#+!|])")
 _CODE_SPAN_RE = re.compile(r"`[^`]*`")
 _MAX_TEXT_CHARS = 2000
 _MAX_MARKDOWN_CHARS = 120_000
-# 考核类型后缀：重考与迁移对照在表里长一样，不标就读不出迁移
-KIND_SUFFIX = {"placement": "·摸底", "practice_exam": "·重考",
-               "transfer": "·迁移", "final": "·结业"}
+# Exam-type suffixes: re-exams and transfer controls look identical in the table; unmarked, transfer is unreadable
+KIND_SUFFIX = {"placement": "·placement", "practice_exam": "·re-exam",
+               "transfer": "·transfer", "final": "·final"}
 
 
 def _escape_segment(text: str) -> str:
@@ -54,7 +54,7 @@ def _escape_segment(text: str) -> str:
 
 
 def escape_markdown(value: Any, limit: int = _MAX_TEXT_CHARS) -> str:
-    """照伴学：转义会把 md 结构弄坏的字符，并限长。反引号内原样保留。"""
+    """Mirroring the study companion: escape characters that break md structure, and cap length. Inside backticks, keep verbatim."""
     text = "" if value is None else str(value)
     text = text.replace("\n", " ").strip()
     if len(text) > limit:
@@ -70,11 +70,11 @@ def escape_markdown(value: Any, limit: int = _MAX_TEXT_CHARS) -> str:
 
 
 def code(value: Any, limit: int = _MAX_TEXT_CHARS) -> str:
-    r"""行内代码：反引号包裹，**不转义**。
+    r"""Inline code: wrapped in backticks, **not escaped**.
 
-    题名 / 工具名 / 难度这类字段本来就带下划线（`pistol_eco_pattern`、
-    `match_summary_report`），套了反引号再转义就变成 `pistol\_eco\_pattern`，
-    渲染出来是对的但源码里没法读。反引号内 md 不再解析，转义纯属多余。
+    Fields like question names / tool names / difficulty naturally carry underscores (`pistol_eco_pattern`,
+    `match_summary_report`); wrapping them in backticks and then escaping turns them into `pistol\_eco\_pattern`,
+    which renders correctly but is unreadable in source. md is not parsed inside backticks, so escaping is pure redundancy.
     """
     text = "" if value is None else str(value)
     text = text.replace("`", "'").replace("\n", " ").strip()
@@ -99,30 +99,30 @@ def build_markdown(state: dict[str, Any] | None = None) -> str:
 
     if env.get("ok"):
         events_n = env.get("events")
-        env_note = f" · {env.get('tables')} 张表"
-        env_note += f" / {events_n} 条事件" if events_n else ""
+        env_note = f" · {env.get('tables')} tables"
+        env_note += f" / {events_n} events" if events_n else ""
     elif env.get("reason"):
         env_note = f" · {env.get('reason')}"
     else:
         env_note = ""
     lines: list[str] = [
-        "# MVE 学习记录导出",
+        "# MVE learning record export",
         "",
         f"- Exported at: `{now}`",
-        f"- 数据源: `{env.get('state', '—')}`{env_note}",
-        f"- 出题器当前推荐: `{rec.get('topic_id', '—')}`"
-        + (f"（难度 {rec.get('difficulty')}，{rec.get('reason_label', '')}）"
+        f"- Data source: `{env.get('state', '—')}`{env_note}",
+        f"- Question generator's current recommendation: `{rec.get('topic_id', '—')}`"
+        + (f" (difficulty {rec.get('difficulty')}, {rec.get('reason_label', '')})"
            if rec.get("difficulty") else ""),
-        f"- 驾驶舱: {'运行中' if pilot.get('running') else '未运行'}",
+        f"- Cockpit: {'running' if pilot.get('running') else 'not running'}",
         "",
     ]
 
-    # ---------------- 界面交互（用户明确要求：具体的按键与选择）----------------
-    lines.extend(["", "## 界面交互（按了什么、选了什么）", ""])
+    # ---------------- UI interactions (explicitly requested by the user: concrete key presses and choices) ----------------
+    lines.extend(["", "## UI interactions (what was pressed, what was selected)", ""])
     if events:
         for e in events:
-            # 旧事件落盘时可能还没有中文标签（action 里存的是 kind 原文），
-            # 导出的这一刻再按 kind 翻译一次，保证回看时始终是人话。
+            # Old events may have been persisted before labels existed (the action stores the kind's raw text);
+            # translate by kind again at export time, so reviews always read as plain language.
             action = ui_events.ACTION_LABEL.get(e.get("kind") or "", e.get("action"))
             lines.append(f"### #{e['seq']} · {e['ts'][11:19]} · {action}")
             d = e.get("detail") or {}
@@ -134,108 +134,108 @@ def build_markdown(state: dict[str, Any] | None = None) -> str:
             if bits:
                 lines.extend(bits)
             else:
-                lines.append("- _（无附加参数）_")
+                lines.append("- _(no additional parameters)_")
             if e.get("result"):
-                lines.append(f"- 结果: {code(e['result'], 400)}")
+                lines.append(f"- Result: {code(e['result'], 400)}")
             lines.append("")
     else:
-        lines.append("_还没有界面交互记录。面板上的启动 / 停止 / 导入 / 切分区都会记到这里。_")
+        lines.append("_No UI interaction records yet. Start / stop / import / scope switches on the dashboard are all recorded here._")
 
-    # ---------------- 概览 ----------------
+    # ---------------- Overview ----------------
     series = s.get("series") or []
     exam_view = s.get("exam_curve") or {}
     exam_tracks = exam_view.get("tracks") or []
     lines.extend([
-        "", "## 概览", "",
-        f"- 累计轮次: {s.get('total_rounds', 0)}（练习 · run_log）",
-        f"- 考核次数: {sum(int(t.get('exam_count') or 0) for t in exam_tracks)}"
-        f"（摸底/重考/迁移 · exam_log，**不进 run_log**）",
-        f"- 技能库: {stats.get('skills', 0)} 条"
-        f"（累计写入 {stats.get('writes', 0)} 次 · 覆盖 {stats.get('rewrites', 0)}"
-        f" · 丢弃 {stats.get('skipped', 0)} · 膨胀率 {stats.get('bloat', 1)}）",
-        f"- 人导入: {len(s.get('imports') or [])} 条",
-        f"- 行动因果: {len((s.get('causal') or {}).get('rows') or [])} 条",
+        "", "## Overview", "",
+        f"- Cumulative rounds: {s.get('total_rounds', 0)} (practice · run_log)",
+        f"- Exam count: {sum(int(t.get('exam_count') or 0) for t in exam_tracks)}"
+        f" (placement/re-exam/transfer · exam_log, **not written to run_log**)",
+        f"- Skill library: {stats.get('skills', 0)} entries"
+        f" (cumulative writes {stats.get('writes', 0)} · overwritten {stats.get('rewrites', 0)}"
+        f" · discarded {stats.get('skipped', 0)} · bloat rate {stats.get('bloat', 1)})",
+        f"- Human imports: {len(s.get('imports') or [])} entries",
+        f"- Action causal facts: {len((s.get('causal') or {}).get('rows') or [])} entries",
     ])
-    # 下面两行**条件输出**：mastery / hallucination_count 只由已冻结的旧后端
-    # （mve/run_mve.py）写入。新后端 voyager_vlml/loop.py 的练习线有意不判分，
-    # 这两项恒为 None / 0 —— 以前无条件打印，导出的概览里就永远挂着
-    # 「掌握度变化: 掌握度 None」和「累计拦下编造: 0 条」两行噪音，
-    # 看着像"它没学会 / 它一直在编造"，其实是无人在生产的字段。
+    # The next two lines are **conditionally output**: mastery / hallucination_count are only written by the frozen old backend
+    # (mve/run_mve.py). The new backend voyager_vlml/loop.py's practice line deliberately does not score,
+    # so these two are always None / 0 — previously printed unconditionally, the exported overview permanently hung
+    # two lines of noise: "Mastery change: Mastery None" and "Cumulative fabrications blocked: 0 entries",
+    # looking like "it did not learn / it keeps fabricating", when in fact nobody produces those fields.
     if s.get("mastery_delta"):
-        lines.append(f"- 掌握度变化: {escape_markdown(s['mastery_delta'])}")
+        lines.append(f"- Mastery change: {escape_markdown(s['mastery_delta'])}")
     if int(s.get("hallucination_total") or 0) > 0:
-        lines.append(f"- 累计拦下编造: {s['hallucination_total']} 条")
+        lines.append(f"- Cumulative fabrications blocked: {s['hallucination_total']} entries")
     if s.get("reading_text"):
-        lines.append(f"- 判读: {escape_markdown(s['reading_text'])}")
+        lines.append(f"- Reading: {escape_markdown(s['reading_text'])}")
 
-    # ---------------- 真实水平：撤支架考核 ----------------
+    # ---------------- True level: scaffold-removed exam ----------------
     #
-    # 这一节是补的：摸底 / 重考 / 迁移全写进 exam_log.jsonl，而导出器原先
-    # 只读 panel_data 里 run_log 派生出来的字段，**整条考核链在导出里是哑的**。
-    # 实测后果：12:10 那份导出里，界面交互明明记着「11:43:36 启动摸底」
-    # 「11:48/11:56 两次跑学习单元」，正文里却连一行摸底数据都没有，
-    # 「判读」还写着「首轮即满分：任务太简单」—— 跑了的证据全丢了。
-    lines.extend(["", "## 真实水平 · 撤支架考核（exam_log）", ""])
+    # This section was added: placement / re-exam / transfer all go into exam_log.jsonl, while the exporter previously
+    # only read fields derived from run_log in panel_data, so **the entire exam chain was mute in exports**.
+    # Observed consequence: in the 12:10 export, the UI interactions clearly recorded "11:43:36 start placement"
+    # "11:48/11:56 two learning-unit runs", yet the body contained not one line of placement data,
+    # and the "reading" still said "perfect score in the first round: task too easy" — all evidence of what ran was lost.
+    lines.extend(["", "## True level · scaffold-removed exam (exam_log)", ""])
     if not exam_view.get("has_data"):
-        lines.append("_还没有裸考记录。跑 `python mve/exam.py --all`（全库摸底），"
-                     "再跑 `python mve/learn.py --units 8`。_")
+        lines.append("_No bare-exam records yet. Run `python mve/exam.py --all` (whole-library placement),"
+                     "then `python mve/learn.py --units 8`._")
         lines.append("")
-        lines.append("练习（run_log）那 100% 是**带着知识图谱**跑出来的，量的是支架的高度，"
-                     "不是模型的水平。要判「学到了多少」必须撤掉图谱重考。")
+        lines.append("The 100% on the practice line (run_log) was run **with the knowledge graph**, measuring the height of the scaffold,"
+                     "not the model's level. To judge \"how much was learned\" the graph must be removed and re-examined.")
     else:
         tr = exam_view.get("transfer")
         lines.extend([
-            f"- 数据源: `exam_log.jsonl` —— 与上面的 run_log **两码事**："
-            f"练习给图谱（教），考核撤图谱（考）。",
-            f"- 摸底均值 {exam_view.get('avg_baseline')}% → "
-            f"最新均值 {exam_view.get('avg_latest')}%"
-            f"（Δ {exam_view.get('avg_delta_pp_all') or 0:+d} 个百分点）",
-            f"- 重考过 {exam_view.get('retested')} 道，其中 {exam_view.get('rose')} 道涨了"
-            + (f"，平均 {exam_view['avg_delta_pp']:+d}pp"
+            f"- Data source: `exam_log.jsonl` — **a different thing** from run_log above: "
+            f"practice gives the graph (teaching), exams remove the graph (testing).",
+            f"- Placement average {exam_view.get('avg_baseline')}% → "
+            f"latest average {exam_view.get('avg_latest')}%"
+            f" (Δ {exam_view.get('avg_delta_pp_all') or 0:+d} percentage points)",
+            f"- Re-examined {exam_view.get('retested')} questions, of which {exam_view.get('rose')} rose"
+            + (f", average {exam_view['avg_delta_pp']:+d}pp"
                if exam_view.get("avg_delta_pp") is not None else ""),
-            f"- 摸底掌握（≥80%）{exam_view.get('mastered')} 道 → "
-            f"现在 {exam_view.get('mastered_now')} 道",
+            f"- Mastered at placement (≥80%) {exam_view.get('mastered')} questions → "
+            f"now {exam_view.get('mastered_now')} questions",
         ])
         if tr:
-            verdict = ("涨了 → 有迁移" if tr.get("rose")
-                       else "没涨 → 上升的是「记住了这道题」，不是可迁移的能力")
-            lines.append(f"- 迁移对照（{tr.get('count')} 次**未练过**的题）："
-                         f"{' → '.join(tr.get('seq') or [])} —— {verdict}")
+            verdict = ("rose → transferable" if tr.get("rose")
+                       else "did not rise → what rose is \"memorized this question\", not transferable capability")
+            lines.append(f"- Transfer control ({tr.get('count')} **unpracticed** questions): "
+                         f"{' → '.join(tr.get('seq') or [])} — {verdict}")
         if exam_view.get("final"):
             fin = exam_view["final"]
-            lines.append(f"- 结业考（{fin.get('covered_all') and '全库' or '部分'} "
-                         f"{fin.get('count')} 道，**带技能库**）：摸底均值 "
-                         f"{fin.get('avg_baseline')}% → 结业均值 {fin.get('avg')}%"
-                         f"（{fin.get('delta_pp'):+d}pp）")
+            lines.append(f"- Final exam ({fin.get('covered_all') and 'whole library' or 'partial'} "
+                         f"{fin.get('count')} questions, **with skill library**): placement average "
+                         f"{fin.get('avg_baseline')}% → final average {fin.get('avg')}%"
+                         f" ({fin.get('delta_pp'):+d}pp)")
         lines.append("")
-        lines.append("| 题 | 摸底（裸考） | 摸底等级 | 练后重考 | 结业考 | 最新 | Δ | 考核次数 |")
+        lines.append("| Question | Placement (bare exam) | Placement level | Post-practice re-exam | Final exam | Latest | Δ | Exam count |")
         lines.append("|---|---|---|---|---|---|---|---|")
         for t in exam_tracks:
-            # 重考那一格要标类型：练后重考和迁移对照长得很像，混在一起读不出迁移
+            # The re-exam cell must be typed: post-practice re-exam and transfer control look alike; mixed together, transfer is unreadable
             after = " → ".join(
                 f"{a.get('pct') or '—'}{KIND_SUFFIX.get(str(a.get('kind') or ''), '')}"
                 for a in (t.get("after") or [])
-            ) or "（还没重考过）"
+            ) or "(not yet re-examined)"
             d = t.get("delta_pp")
-            dcell = "—" if d is None else (f"+{d}pp" if d > 0 else (f"{d}pp" if d < 0 else "持平"))
-            # 「已毕业让位」写在题名那一格：另起一行会打断表格
+            dcell = "—" if d is None else (f"+{d}pp" if d > 0 else (f"{d}pp" if d < 0 else "flat"))
+            # "Graduated and make way" is written in the question-name cell: a separate line would break the table
             lines.append(
                 f"| {code(t.get('topic_id'), 60)}"
-                f"{' · 已毕业让位' if t.get('exhausted') else ''} "
+                f"{' · graduated' if t.get('exhausted') else ''} "
                 f"| {t.get('baseline_pct')} "
                 f"| {escape_markdown(t.get('level'))} | {after} "
                 f"| {t.get('final_pct') or '—'} "
                 f"| {t.get('latest_pct')} | {dcell} | {t.get('exam_count')} |"
             )
 
-    # ---------------- 掌握度 ----------------
-    # 这一节以前叫「掌握度（按题 · run_log，带支架）」，主列读的是 coverage。
-    # 而 coverage / mastery 只由已冻结的旧后端（mve/run_mve.py）写入 ——
-    # 新后端 voyager_vlml/loop.py 的练习线**有意不判分**（判分进反馈环，
-    # 它学的就是讨好裁判而不是取到数）。结果整张表现在是「题目 / 轮次 / — / — / 0」。
-    # 按后端索引改成用**真在产**的那一列：判据层 done（跑通 + 拿到数 + 没翻车）。
-    # coverage 降级为**有才显示**：有旧后端日志就多两列，没有就不留空列。
-    lines.extend(["", "## 按题统计 · 练习线（判据层 done）", ""])
+    # ---------------- Mastery ----------------
+    # This section used to be called "Mastery (by question · run_log, with scaffold)", with the main column reading coverage.
+    # And coverage / mastery are only written by the frozen old backend (mve/run_mve.py) —
+    # the new backend voyager_vlml/loop.py's practice line **deliberately does not score** (scoring enters the feedback loop,
+    # and what it learns is pleasing the referee instead of retrieving data). As a result the whole table is now "question / rounds / — / — / 0".
+    # Indexed by backend, switch to the column that is **genuinely produced**: the criterion layer's done (ran + retrieved data + no crash).
+    # coverage is demoted to **shown only when present**: with old-backend logs it adds two columns; without them, no empty columns are left.
+    lines.extend(["", "## Per-question statistics · practice line (criterion-layer done)", ""])
     by_topic: dict[str, dict[str, Any]] = {}
     for p in series:
         t = p.get("topic_id")
@@ -255,11 +255,11 @@ def build_markdown(state: dict[str, Any] | None = None) -> str:
     has_cov = bool(by_topic) and any(r["last"] is not None for r in by_topic.values())
     if by_topic:
         if has_cov:
-            lines.append("| 题目 | 轮次 | 任务完成 done | VLML 全达成 success "
-                         "| 最近覆盖率 | 最好覆盖率 | 错/不知 |")
+            lines.append("| Question | Rounds | Task done | VLML fully achieved success "
+                         "| Latest coverage | Best coverage | Wrong/DontKnow |")
             lines.append("|---|---|---|---|---|---|---|")
         else:
-            lines.append("| 题目 | 轮次 | 任务完成 done | VLML 全达成 success | 错/不知 |")
+            lines.append("| Question | Rounds | Task done | VLML fully achieved success | Wrong/DontKnow |")
             lines.append("|---|---|---|---|---|")
         for t, r in sorted(by_topic.items(), key=lambda kv: -kv[1]["n"]):
             row = (f"| {code(t, 60)} | {r['n']} "
@@ -269,31 +269,31 @@ def build_markdown(state: dict[str, Any] | None = None) -> str:
             lines.append(row + f"| {r['wrongs']} |")
         if not has_cov:
             lines.append("")
-            lines.append("_⚠️ 练习线有意不判分：覆盖率 / 得分 / 掌握度在这条线上不生产_"
-                         "（它们是尺子，进了反馈环它学的就是讨好裁判，不是取到数）。"
-                         "判分看「真实水平」那节（撤支架考核）与消费线。")
+            lines.append("_⚠️ The practice line deliberately does not score: coverage / score / mastery are not produced on this line_"
+                         "(they are the ruler; let them into the feedback loop and what it learns is pleasing the referee, not retrieving data). "
+                         "For scoring, see the \"True level\" section (scaffold-removed exam) and the consumption line.")
     else:
-        lines.append("_还没有练习记录。_")
+        lines.append("_No practice records yet._")
 
-    # ---------------- 轮次明细 ----------------
+    # ---------------- Round details ----------------
     #
-    # 同样是「按后端索引」：覆盖率 / 得分 / 事实数 / 编排 这四列读的是
-    # coverage / score / facts_count / trajectory，四个都只由已冻结的旧后端写入。
-    # 新后端练习线一条都不产 → 这四列恒为「— / None / None / —」。
-    # 改成**整组有才画**：一条都没有就不留空列，别让人对着一排 None 去猜。
-    # 主列换成新后端真在产的：done（任务完成）与 success（VLML 全达成）。
-    lines.extend(["", "## 轮次明细", ""])
+    # Also "indexed by backend": the four columns coverage / score / fact count / orchestration read
+    # coverage / score / facts_count / trajectory, all four written only by the frozen old backend.
+    # The new backend's practice line produces none of them → these four columns are constant "— / None / None / —".
+    # Changed to **draw only when the group has data**: if there is not a single one, do not leave empty columns; do not make people guess at a row of None.
+    # The main columns switch to what the new backend genuinely produces: done (task done) and success (VLML fully achieved).
+    lines.extend(["", "## Round details", ""])
     if series:
         has_score = any(p.get("coverage") is not None or p.get("score") is not None
                         or p.get("facts") is not None for p in series)
         has_traj = any(p.get("trajectory") for p in series)
-        head = "| # | 时间 | 题目 | 轮 | done | success | verdict | 证据 | 判据 |"
+        head = "| # | Time | Question | Round | done | success | verdict | Evidence | Judge |"
         sep = "|---|---|---|---|---|---|---|---|---|"
         if has_score:
-            head += " 覆盖率 | 得分 | 事实数 |"
+            head += " Coverage | Score | Fact count |"
             sep += "---|---|---|"
         if has_traj:
-            head += " 编排 |"
+            head += " Orchestration |"
             sep += "---|"
         lines.append(head)
         lines.append(sep)
@@ -313,34 +313,34 @@ def build_markdown(state: dict[str, Any] | None = None) -> str:
             lines.append(row + "|")
         if not has_score:
             lines.append("")
-            lines.append("_⚠️ 覆盖率 / 得分 / 事实数三列已按后端索引下架："
-                         "练习线不判分，它们在新后端上无人在产。_")
+            lines.append("_⚠️ The coverage / score / fact-count columns are retired per backend indexing: "
+                         "the practice line does not score, and nobody produces them on the new backend._")
     else:
-        lines.append("_还没有轮次记录。_")
+        lines.append("_No round records yet._")
 
-    # ---------------- 技能库 ----------------
-    lines.extend(["", "## 技能库（Voyager 自己写的教训）", ""])
+    # ---------------- Skill library ----------------
+    lines.extend(["", "## Skill library (lessons Voyager wrote itself)", ""])
     detail = s.get("skill_detail") or []
     if detail:
         for x in detail:
-            # 有效率 = ok / hits。「命中 N · 有效 0」= 注入了 N 次，一次都没帮上。
+            # Effectiveness rate = ok / hits. "hits N · effective 0" = injected N times, never helped once.
             _h, _o = int(x.get("hits") or 0), int(x.get("ok") or 0)
             _rate = (
-                f" · 有效率 {round(100 * _o / _h)}%" if _h
-                else " · 还没被用过"
+                f" · effectiveness rate {round(100 * _o / _h)}%" if _h
+                else " · never used yet"
             )
             lines.append(
                 f"- {escape_markdown(x.get('text'))} "
-                f"（题: {code(x.get('topic'), 40)} · "
-                f"命中 {_h} · 有效 {_o}{_rate}"
-                + (f" · 已覆盖 {x.get('versions')} 版" if (x.get("versions") or 1) > 1 else "")
-                + "）"
+                f"(question: {code(x.get('topic'), 40)} · "
+                f"hits {_h} · effective {_o}{_rate}"
+                + (f" · overwritten {x.get('versions')} versions" if (x.get("versions") or 1) > 1 else "")
+                + ")"
             )
     else:
-        lines.append("_技能库为空。_")
+        lines.append("_Skill library is empty._")
 
-    # ---------------- 人导入 ----------------
-    lines.extend(["", "## 人导入历史", ""])
+    # ---------------- Human imports ----------------
+    lines.extend(["", "## Human import history", ""])
     imports = s.get("imports") or []
     if imports:
         for im in imports:
@@ -349,19 +349,19 @@ def build_markdown(state: dict[str, Any] | None = None) -> str:
                 f"· {escape_markdown(im.get('question'), 300)}"
             )
             lines.append(
-                f"  - 归入: `{im.get('topic_id') or '未归入任何题'}`"
-                + (f"（命中 {code(im.get('topic_hit'), 60)}）" if im.get("topic_hit") else "")
-                + f" · 编排: {code(' → '.join(im.get('trajectory') or []) or '—', 120)}"
-                + f" · {im.get('facts_count')} 条事实 · validated_target={im.get('validated_target')}"
+                f"  - Routed to: `{im.get('topic_id') or 'not routed to any question'}`"
+                + (f" (hit {code(im.get('topic_hit'), 60)})" if im.get("topic_hit") else "")
+                + f" · Orchestration: {code(' → '.join(im.get('trajectory') or []) or '—', 120)}"
+                + f" · {im.get('facts_count')} facts · validated_target={im.get('validated_target')}"
             )
     else:
-        lines.append("_还没有人导入。_")
+        lines.append("_No human imports yet._")
 
-    # ---------------- 行动因果时间线 ----------------
-    lines.extend(["", "## 行动因果时间线", ""])
+    # ---------------- Action causal timeline ----------------
+    lines.extend(["", "## Action causal timeline", ""])
     crows = (s.get("causal") or {}).get("rows") or []
     if crows:
-        lines.append("| seq | 时间 | 类型 | 题目 | 摘要 |")
+        lines.append("| seq | Time | Kind | Question | Summary |")
         lines.append("|---|---|---|---|---|")
         for r in crows:
             lines.append(
@@ -370,22 +370,22 @@ def build_markdown(state: dict[str, Any] | None = None) -> str:
                 f"| {escape_markdown(r.get('summary'), 200)} |"
             )
     else:
-        lines.append("_时间线为空。_")
+        lines.append("_Timeline is empty._")
 
-    # ---------------- 判读说明（照伴学对 mastery 的态度：它不能当证据）----------------
+    # ---------------- How to read this export (mirroring the study companion's attitude toward mastery: it cannot serve as evidence) ----------------
     lines.extend([
-        "", "## 怎么读这份导出", "",
-        "- **两条线别混**：`run_log.jsonl` 是练习（**带着知识图谱**跑，实测首轮就 100%，"
-        "量的是支架不是水平）；`exam_log.jsonl` 是撤支架考核（只剩题干 + 工具 + 自己的技能库）。"
-        "说「学会了多少」只能看后者。",
-        "- **基线不能被顶掉**：考核画像必须「摸底 / 最新」两列一起看。`profile()` 只保留最后一次记录，"
-        "练后重考的 100% 会把摸底的 19% 覆盖掉 —— 只剩最新那一列，学习曲线就没了。",
-        "- **判据是覆盖率，不是掌握度**：mastery 的 confidence 项随「证据权重之和」"
-        "上升（V2 模型），反复作答就会把它推高，用它说「学会了」是假阳性。",
-        "- **掌握度是会忘的**：另有保持度模型 `baseline × 2^(-天数/半衰期)`，"
-        "半衰期随每次作答的反馈伸缩（答对拉长、答错缩短）。",
-        "- **叙事不参与比对**：comparable 恒为 false，指标由工具出、洞察由 LLM 出（VLML README:97）。",
-        "- **人导入不进掌握度**：validated_target=false，只进因果时间线。",
+        "", "## How to read this export", "",
+        "- **Do not mix the two lines**: `run_log.jsonl` is practice (**run with the knowledge graph**, observed 100% in the first round, "
+        "measuring the scaffold, not the level); `exam_log.jsonl` is the scaffold-removed exam (only question text + tools + one's own skill library). "
+        "\"How much was learned\" can only be read from the latter.",
+        "- **The baseline cannot be displaced**: the exam profile must read the \"placement / latest\" columns together. `profile()` keeps only the last record, "
+        "so a post-practice re-exam's 100% overwrites the placement's 19% — with only the latest column, the learning curve is gone.",
+        "- **The criterion is coverage, not mastery**: mastery's confidence term rises with the \"sum of evidence weights\" "
+        "(V2 model), which repeated answering pushes up, and using it to say \"learned\" is a false positive.",
+        "- **Mastery is forgetful**: there is also a retention model `baseline × 2^(-days/half-life)`, "
+        "whose half-life flexes with each answer's feedback (correct lengthens it, wrong shortens it).",
+        "- **Narrative is not compared**: comparable is always false; metrics come from tools, insights from the LLM (VLML README:97).",
+        "- **Human imports do not enter mastery**: validated_target=false, only entering the causal timeline.",
     ])
     if s.get("mastery_warning"):
         lines.append(f"- {escape_markdown(s['mastery_warning'])}")
@@ -398,22 +398,22 @@ def build_markdown(state: dict[str, Any] | None = None) -> str:
 
 def main() -> int:
     argv = sys.argv[1:]
-    # 用错了 python（没装 duckdb）也能导出，但「数据源」会写成 unavailable，
-    # 人拿到手会以为库坏了。出声提醒一次。
+    # Even with the wrong python (no duckdb installed) the export still works, but "data source" is written as unavailable,
+    # and the human receiving it will think the database is broken. Warn once, out loud.
     try:
         import duckdb  # noqa: F401
     except Exception:
-        print("警告：当前解释器没有 duckdb，导出里「数据源」会显示 unavailable。\n"
-              "      请用项目环境跑："
+        print("Warning: the current interpreter has no duckdb, so \"data source\" in the export will show unavailable.\n"
+              "      Please run with the project environment: "
               "/Users/zxydediannao/.workbuddy/binaries/python/envs/default/bin/python3 "
               "mve/export_md.py", file=sys.stderr)
     md = build_markdown()
-    # 命令行导出也算一次「人按了键」，同样记进交互流 —— 否则回看时会以为
-    # 这段时间的轮次是自己冒出来的。
+    # A command-line export also counts as a "human pressed a key", recorded in the interaction stream too — otherwise reviews
+    # will assume this period's rounds appeared out of nowhere.
     try:
         ui_events.append(ui_events.EXPORT,
-                         detail={"方式": "命令行 export_md.py",
-                                 "字符数": len(md)},
+                         detail={"Method": "command-line export_md.py",
+                                 "Character count": len(md)},
                          result="ok")
     except Exception:
         pass
@@ -428,7 +428,7 @@ def main() -> int:
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         path = out / f"mve_export_{stamp}.md"
     path.write_text(md, encoding="utf-8")
-    print(f"已导出：{path}（{len(md):,} 字符）")
+    print(f"Exported: {path} ({len(md):,} characters)")
     return 0
 
 

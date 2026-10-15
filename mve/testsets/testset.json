@@ -15,7 +15,7 @@
         "Haven": "Split"
       }
     },
-    "question": "Cloud9 输掉这个 series，首血转换上出了什么问题？",
+    "question": "Cloud9 lost this series — what went wrong with their first blood conversion?",
     "validated": {
       "ok": true,
       "facts": 4,
@@ -31,7 +31,7 @@
     },
     "task": {
       "topic_id": "fb_conversion_analysis__1067",
-      "question": "Cloud9 输掉这个 series，首血转换上出了什么问题？",
+      "question": "Cloud9 lost this series — what went wrong with their first blood conversion?",
       "difficulty": 3,
       "validated_target": true,
       "requires_tools": [
@@ -39,16 +39,16 @@
         "query_sql"
       ],
       "key_points": [
-        "整体首血次数",
-        "整体首血转换率",
-        "Sunset 图首血转换率",
-        "Split 图首血转换率"
+        "overall first blood count",
+        "overall first blood conversion rate",
+        "first blood conversion rate on Sunset",
+        "first blood conversion rate on Split"
       ],
       "rubric": {
-        "整体首血次数": 25,
-        "整体首血转换率": 25,
-        "Sunset 图首血转换率": 30,
-        "Split 图首血转换率": 20
+        "overall first blood count": 25,
+        "overall first blood conversion rate": 25,
+        "first blood conversion rate on Sunset": 30,
+        "first blood conversion rate on Split": 20
       }
     }
   }

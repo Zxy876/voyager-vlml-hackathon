@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
-"""练习范围：把知识图谱上的一个维度钉成「接下来练什么」。
+"""Practice scope: pin one dimension on the knowledge graph as "what to practice next".
 
-为什么要有它：
-    面板上原本让人在驾驶舱里挑「模式 / 轮数 / 选题」，这些键钮本质是让人替出题器做
-    决定。伴学的做法（onboarding.md:82）是相反的——**人在知识图谱上点一个知识点，
-    把它设成练习范围，出题器只在范围里出题**。于是界面上只剩下开始 / 停止。
+Why it exists:
+    The dashboard used to make the human pick "mode / rounds / topic" in the cockpit; those buttons essentially let the human decide for the question generator.
+    The study companion's approach (onboarding.md:82) is the opposite — **the human clicks one topic on the knowledge graph,
+    sets it as the practice scope, and the question generator only generates questions within that scope**. The UI then only has start / stop.
 
-形态照伴学 `study_set_practice_scope`（entry_practice_scope_entries.py:117-173）：
-  · 存的是 canonical `scope_key`，**读的时候重新校验**——图谱重建后旧维度可能已经
-    不存在了，这时返回 invalidated + 原因，而不是拿旧值继续出题
-    （伴学对应的错误码就是 PRACTICE_SCOPE_INVALIDATED）
-  · `scope_revision` 单调递增：范围每改一次加一，用来判断"出题器有没有跟上最新范围"
-  · 校验失败不抛穿：面板只读视图，一个失效的范围不该让 /api/state 整个 500
+The shape mirrors the study companion's `study_set_practice_scope` (entry_practice_scope_entries.py:117-173):
+  · Stores the canonical `scope_key`, **re-validated on read** — after a graph rebuild the old dimension may no longer
+    exist, in which case return invalidated + reason instead of continuing to generate questions from the stale value
+    (the study companion's corresponding error code is PRACTICE_SCOPE_INVALIDATED)
+  · `scope_revision` increments monotonically: +1 on every scope change, used to tell "has the question generator caught up with the latest scope"
+  · Validation failures never propagate: the dashboard is a read-only view; one invalidated scope should not make /api/state return a 500
 
-范围 → 题的映射以**题目注册表**为准，不以图谱节点为准：
-    维度节点的 detail.topic_id 是图谱构建时"先到先得"记下的第一个题，
-    而 map_fb_conv 这类维度跨两道题（fb_conversion_analysis 和 corrode_collapse 都要它）。
-    所以真正的 topic 列表从 tasks 的 rubric 对账得来，图谱只负责**校验维度存在**。
+The scope → topic mapping is based on the **task registry**, not on graph nodes:
+    A dimension node's detail.topic_id is the first topic recorded "first-come-first-served" when the graph was built,
+    while dimensions like map_fb_conv span two topics (both fb_conversion_analysis and corrode_collapse need it).
+    So the real topic list is reconciled from tasks' rubric; the graph only **validates that the dimension exists**.
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ GRAPH_FILE = ROOT / "knowledge_graph.json"
 
 
 class PracticeScopeError(Exception):
-    """范围不可用。code 照伴学：PRACTICE_SCOPE_INVALIDATED。"""
+    """Scope unavailable. code mirrors the study companion: PRACTICE_SCOPE_INVALIDATED."""
 
     def __init__(self, message: str, code: str = "PRACTICE_SCOPE_INVALIDATED"):
         super().__init__(message)
@@ -40,11 +40,11 @@ class PracticeScopeError(Exception):
 
 
 # ---------------------------------------------------------------------------
-# 只读来源（都不 import vlml_env —— 面板秒开，离线也能查）
+# Read-only sources (none import vlml_env — the dashboard opens instantly, and queries work offline)
 # ---------------------------------------------------------------------------
 
 def graph_dims() -> dict[str, dict[str, Any]]:
-    """图谱里的维度 -> {topic_id, point, weight}。图没建过就返回空。"""
+    """Dimensions in the graph -> {topic_id, point, weight}. Returns empty if the graph was never built."""
     if not GRAPH_FILE.exists():
         return {}
     try:
@@ -65,9 +65,9 @@ def graph_dims() -> dict[str, dict[str, Any]]:
 
 
 def topics_for_dim(dim: str) -> list[str]:
-    """覆盖这个维度的题（按题目注册表的 rubric 对账）。
+    """Topics covering this dimension (reconciled against the task registry's rubric).
 
-    为什么不用图谱节点的 topic_id：见模块头 —— 那是"第一个题"，不是"所有题"。
+    Why not use the graph node's topic_id: see the module header — that is the "first topic", not "all topics".
     """
     try:
         import tasks
@@ -80,7 +80,7 @@ def topics_for_dim(dim: str) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# 存 / 读 / 清
+# Store / read / clear
 # ---------------------------------------------------------------------------
 
 def _read() -> dict[str, Any]:
@@ -99,22 +99,22 @@ def _write(state: dict[str, Any]) -> None:
 
 
 def set_scope(dim: str) -> dict[str, Any]:
-    """把一个维度设成练习范围。维度必须在当前图谱里（canonical 校验）。"""
+    """Set one dimension as the practice scope. The dimension must exist in the current graph (canonical validation)."""
     dim = str(dim or "").strip()
     if not dim:
-        raise PracticeScopeError("维度是空的", code="INVALID_PRACTICE_SCOPE")
+        raise PracticeScopeError("Dimension is empty", code="INVALID_PRACTICE_SCOPE")
 
     dims = graph_dims()
     if dim not in dims:
         raise PracticeScopeError(
-            f"维度「{dim}」不在当前知识图谱里（图谱有 {len(dims)} 个维度）"
-            + ("；先跑 python mve/knowledge_graph.py --build" if not dims else ""),
+            f"Dimension \"{dim}\" is not in the current knowledge graph (the graph has {len(dims)} dimensions)"
+            + ("; run python mve/knowledge_graph.py --build first" if not dims else ""),
         )
 
     topics = topics_for_dim(dim)
     if not topics:
         raise PracticeScopeError(
-            f"维度「{dim}」在图谱里，但没有任何题的 rubric 用到它——练不了",
+            f"Dimension \"{dim}\" is in the graph, but no task's rubric uses it — cannot practice",
         )
 
     prev = _read()
@@ -136,7 +136,7 @@ def set_scope(dim: str) -> dict[str, Any]:
 
 
 def clear_scope() -> dict[str, Any]:
-    """清除范围（伴学 onboarding.md:84：范围已掌握就清掉，回到出题器自选）。"""
+    """Clear the scope (study companion onboarding.md:84: once the scope is mastered, clear it and return to question-generator auto-select)."""
     prev = _read()
     state = {
         "active": False,
@@ -153,7 +153,7 @@ def clear_scope() -> dict[str, Any]:
 
 
 def get_scope() -> dict[str, Any]:
-    """当前范围。存过的维度若已不在图谱里 → active=False + invalidated 原因。"""
+    """Current scope. If the stored dimension is no longer in the graph → active=False + invalidated reason."""
     st = _read()
     if not st or not st.get("active"):
         return {"active": False, "label": str(st.get("label") or ""),
@@ -165,11 +165,11 @@ def get_scope() -> dict[str, Any]:
         return {
             "active": False, "invalidated": True, "label": dim,
             "scope_key": str(st.get("scope_key") or ""),
-            "reason": f"维度「{dim}」已不在当前知识图谱里（图谱重建过？）",
+            "reason": f"Dimension \"{dim}\" is no longer in the current knowledge graph (was the graph rebuilt?)",
             "scope_revision": int(st.get("scope_revision") or 0),
         }
 
-    # topics 每次重算：题目注册表可能改过，不信任落盘时那份
+    # topics recomputed every time: the task registry may have changed; do not trust the persisted copy
     topics = topics_for_dim(dim) or list(st.get("topics") or [])
     info = dims[dim]
     return {
@@ -188,10 +188,10 @@ def get_scope() -> dict[str, Any]:
 
 def resolve_topic(*, attempted: dict[str, int] | None = None,
                   failed: dict[str, int] | None = None) -> str:
-    """范围内的下一题。没设范围就返回空串（出题器自选）。
+    """The next topic within the scope. Returns an empty string if no scope is set (question generator auto-select).
 
-    排序完全复用 tasks.next_topic（错题优先 → 没做过优先 → 难度升序），
-    只是把候选集从"全部题"收窄成"范围内的题"。
+    Sorting fully reuses tasks.next_topic (wrong answers first → never-attempted first → difficulty ascending),
+    just narrowing the candidate set from "all topics" to "topics within the scope".
     """
     sc = get_scope()
     if not sc.get("active") or not sc.get("topics"):

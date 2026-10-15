@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
-"""数据源里**实际有哪些实体**（赛事 / 团队 / 地图 / 选手）—— 实查，不手写。
+"""Which entities **actually exist** in the data source (series / teams / maps / players) — probed live, never hand-written.
 
-为什么要有这个模块
+Why this module exists
 ------------------
-「学科」层要绑具体实体（赛事号 / 团队名 / 选手名），那就必须知道库里到底
-有哪些值可填。手写一张清单是最容易腐坏的东西：换一次库就全错。所以这里是
-**连库实查**，查不到就返回空并说明原因，绝不猜。
+The "entry" layer must bind concrete entities (series ids / team names / player names), so we must know which
+values are actually fillable in the database. A hand-written list is the thing that rots most easily: one database swap and it is all wrong. So this is a
+**live database probe**; when nothing is found it returns empty with a reason, and never guesses.
 
-为什么不在 `knowledge_graph.py` 里做
+Why this is not done inside `knowledge_graph.py`
 ------------------------------------
-图谱必须保持"只 import 标准库、不连库"的轻量性质（面板要秒开）。连库的活
-放这里，落盘成 `entity_catalog.json`，图谱和其它模块只读缓存。
+The graph must stay lightweight — "only stdlib imports, no database connection" (the dashboard must open instantly). The
+database work lives here, persisted as `entity_catalog.json`; the graph and other modules only read the cache.
 
-跑法
+Usage
 ----
-    python mve/entity_catalog.py            # 刷新并打印
-    python mve/entity_catalog.py --json     # 只输出 JSON
+    python mve/entity_catalog.py            # refresh and print
+    python mve/entity_catalog.py --json     # JSON output only
 """
 
 from __future__ import annotations
@@ -29,19 +29,19 @@ ROOT = HERE.parent
 DB_CONFIG = HERE / "db_config.json"
 CATALOG = HERE / "entity_catalog.json"
 
-# 每张表怎么取 (实体类别, 取值列, 附带展示列)
+# How each table is probed (entity kind, value column, extra display columns)
 #
-# ⚠️ `player` 有**两个候选表**，按顺序试到有值为止：
-#   `agg_player_series_stats` 是 VLML 从**逐事件**派生的（GRID 源有）；
-#   `ext_player_game_stats` 是 vlr.gg / rib.gg 给的**聚合级**统计。
-#   接了公开源之后没有 kill 事件，前者就是空的 —— 这时要退到后者，
-#   否则"选手"这一栏会显示 0 个，而实际上选手数据是有的（只是粒度不同）。
+# ⚠️ `player` has **two candidate tables**, tried in order until one has values:
+#   `agg_player_series_stats` is derived by VLML from **per-event** data (present in the GRID source);
+#   `ext_player_game_stats` is the **aggregate-level** stats provided by vlr.gg / rib.gg.
+#   After connecting a public source there are no kill events, so the former is empty — then fall back to the latter,
+#   otherwise the "player" column would show 0 while player data does exist (just at a different grain).
 #
-# rib.gg 那两张（`ext_player_round_stats` / `ext_player_side_stats`）只在
-# `vlml_rib.duckdb` 里存在，放在最后当兜底：库里没有这张表会记 warning，
-# 不影响前面命中。同一类别**先到先得**，所以顺序不能乱。
+# rib.gg's two tables (`ext_player_round_stats` / `ext_player_side_stats`) exist only in
+# `vlml_rib.duckdb`, so they go last as a fallback: a missing table records a warning,
+# without affecting earlier hits. The same kind is **first-come-first-served**, so the order must not be shuffled.
 PROBES: list[tuple[str, str, str, list[str]]] = [
-    # 类别       表名                         取值列          附带
+    # kind       table                        value column      extra
     ("series", "series", "series_id", ["tournament_name"]),
     ("team", "agg_team_series_stats", "team_name", []),
     ("team", "ext_game_economy", "team_name", []),
@@ -51,19 +51,19 @@ PROBES: list[tuple[str, str, str, list[str]]] = [
     ("map", "games", "map_name", []),
 ]
 
-KIND_LABEL = {"series": "赛事", "team": "团队", "map": "地图",
-              "player": "选手"}
+KIND_LABEL = {"series": "Series", "team": "Team", "map": "Map",
+              "player": "Player"}
 
 
 def _db_path() -> Path:
-    """当前连的是哪个库 —— `db_config.json` 可切换（见 vlml_env.py:52）。
+    """Which database is currently connected — switchable via `db_config.json` (see vlml_env.py:52).
 
-    ⚠️ 相对路径按**仓库根**解析，不按当前 cwd：`vlml_env` 会把 cwd 切到
-       `vlml/`，原样返回相对路径会让 DuckDB 把 `vlml/data/x.duckdb` 拼成
-       `<repo>/vlml/vlml/data/x.duckdb`（2026-10-13 服务器实测踩到）。
+    ⚠️ Relative paths are resolved against the **repo root**, not the current cwd: `vlml_env` switches cwd to
+       `vlml/`, and returning a relative path as-is makes DuckDB resolve `vlml/data/x.duckdb` into
+       `<repo>/vlml/vlml/data/x.duckdb` (hit on the server on 2026-10-13).
 
-    ⚠️ 兜底走 `db_switch.DEFAULT_DB`（当前是 rib.gg）—— 默认库唯一定义在
-       那儿，这里不再写自己的字面量（各写一份就是"悄悄换库"的土壤）。
+    ⚠️ The fallback goes through `db_switch.DEFAULT_DB` (currently rib.gg) — the default database is defined
+       there and only there; this module no longer writes its own literal (one copy per module is the breeding ground for "silent database swaps").
     """
     try:
         cfg = json.loads(DB_CONFIG.read_text(encoding="utf-8"))
@@ -78,26 +78,26 @@ def _db_path() -> Path:
 
 
 def refresh() -> dict:
-    """连库实查所有实体类别的可选值。失败就返回带 error 的空壳，不猜。"""
+    """Probe the database live for the selectable values of every entity kind. On failure return an empty shell with error, never guess."""
     path = _db_path()
     out: dict = {"db_path": str(path), "entities": {}, "counts": {}}
     try:
         import duckdb
     except Exception as exc:
-        out["error"] = f"duckdb 不可用：{type(exc).__name__}: {exc}"[:200]
+        out["error"] = f"duckdb unavailable: {type(exc).__name__}: {exc}"[:200]
         return out
     if not path.exists():
-        out["error"] = f"库文件不存在：{path}"
+        out["error"] = f"Database file does not exist: {path}"
         return out
     try:
         con = duckdb.connect(str(path), read_only=True)
     except Exception as exc:
-        out["error"] = f"连库失败：{type(exc).__name__}: {exc}"[:200]
+        out["error"] = f"Database connection failed: {type(exc).__name__}: {exc}"[:200]
         return out
     try:
         for kind, table, col, extra in PROBES:
-            # 同一类别有多个候选表时，**先到先得**：前一个表里查到了就不换
-            # （见 PROBES 里 player 的两档回退）。
+            # When a kind has multiple candidate tables, **first-come-first-served**: once an earlier table has values, do not switch
+            # (see the two-tier fallback for player in PROBES).
             if out["entities"].get(kind):
                 continue
             try:
@@ -107,14 +107,14 @@ def refresh() -> dict:
                     f'WHERE "{col}" IS NOT NULL ORDER BY 1').fetchall()
             except Exception as exc:
                 out.setdefault("warnings", []).append(
-                    f"{table}.{col} 查不到：{type(exc).__name__}: {str(exc)[:80]}")
+                    f"{table}.{col} not found: {type(exc).__name__}: {str(exc)[:80]}")
                 continue
             items = []
             seen: set[str] = set()
             for r in rows:
                 v = str(r[0])
-                # DISTINCT 带上附带列时同一个值会出现多次（实测：队伍 12 个
-                # 被查成 16 个、地图 21 张查成 7 张的重复）—— 按取值去重。
+                # With DISTINCT plus extra columns the same value can appear multiple times (observed: 12 teams
+                # probed as 16, 21 maps probed as 7 duplicates) — deduplicate by value.
                 if not v or v in seen:
                     continue
                 seen.add(v)
@@ -132,7 +132,7 @@ def refresh() -> dict:
 
 
 def catalog(*, force: bool = False) -> dict:
-    """读缓存；没有或 `force` 就先刷新。"""
+    """Read the cache; if absent or `force`, refresh first."""
     if not force and CATALOG.exists():
         try:
             cached = json.loads(CATALOG.read_text(encoding="utf-8"))
@@ -150,7 +150,7 @@ def catalog(*, force: bool = False) -> dict:
 
 
 def options(kind: str) -> list[str]:
-    """某个学科类别下**可填入的具体值**（给 UI 下拉 / 出题器用）。"""
+    """The concrete values that can be filled in for an entry kind (for UI dropdowns / the question generator)."""
     return [str(it.get("value") or "")
             for it in (catalog().get("entities") or {}).get(kind, [])
             if it.get("value")]
@@ -165,11 +165,11 @@ def _main() -> int:
     if data.get("error"):
         print(f"❌ {data['error']}")
         return 1
-    print(f"数据源：{data['db_path']}")
+    print(f"Data source: {data['db_path']}")
     for kind, items in (data.get("entities") or {}).items():
         vals = [str(it.get("value")) for it in items]
-        print(f"\n{KIND_LABEL.get(kind, kind)}（{kind}）· {len(vals)} 个")
-        print("  " + ("、".join(vals) if vals else "（无）"))
+        print(f"\n{KIND_LABEL.get(kind, kind)} ({kind}) · {len(vals)}")
+        print("  " + (", ".join(vals) if vals else "(none)"))
     for w in data.get("warnings") or []:
         print(f"⚠ {w}")
     return 0

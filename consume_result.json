@@ -1,7 +1,7 @@
 {
-  "question": "在 'Split' 地图上，G2 Esports 队在赢得首血之后，平均每回合能赢下多少比例的回合？请同时给出样本量。",
+  "question": "On the 'Split' map, what proportion of rounds does G2 Esports win on average after taking first blood? Please also give the sample size.",
   "topic_id": "fb_conversion_analysis",
-  "topic_hit": "首血之后（归到的题与这句话不是同一个问题：第一个问题是关于 G2 Esports 在 Split 地图上赢得首血后每回合获胜的平均比例及样本量；第二个问题是关于 Cloud9 在某系列赛中输掉比赛时首血转换出现的问题。涉及的队伍、地图、问题类型（定量比率 vs 定性问题）均不同，故不是同一个问题。）",
+  "topic_hit": "first blood (the question this was routed to is not the same as this sentence: the first question is about G2 Esports' average per-round win proportion after taking first blood on Split, together with the sample size; the second is about a first blood conversion problem Cloud9 had when losing a series. The teams, maps and question types involved (a quantitative ratio vs a qualitative question) all differ, so they are not the same question.)",
   "mode": "voyager_consume",
   "source": "human_import",
   "validated_target": false,
@@ -60,8 +60,8 @@
     }
   ],
   "facts_count": 2,
-  "answer": "\n\n在 Split 地图上，G2 Esports 首血后赢得的回合比例为 **1.0**（即全胜），样本量为 **7**。VLML 独立复核得出完全一致的结果（比例 1.0，样本 7），两种方法结论完全一致，无任何硬伤。",
-  "answer_note": "（叙事洞察：LLM 基于取到的原始数据产出，并照实说了与 VLML 做法比对的结论）",
+  "answer": "\n\nOn Split, G2 Esports' post-first-blood round win proportion is **1.0** (i.e. a clean sweep), with a sample size of **7**. VLML's independent re-check produced exactly the same result (proportion 1.0, sample 7); the two methods agree completely, with no hard flaws.",
+  "answer_note": "(narrative insight: produced by the LLM from the raw data it retrieved, and it faithfully reported the conclusion of its comparison against the VLML approach)",
   "referee_sql": "SELECT\n  SUM(CASE WHEN r.winning_team_name = 'G2 Esports' THEN 1 ELSE 0 END) * 1.0 / NULLIF(COUNT(*), 0) AS win_rate_after_first_blood,\n  COUNT(*) AS sample_size\nFROM ext_player_round_stats epr\nJOIN rounds r\n  ON epr.series_id = r.series_id\n AND epr.game_id = r.game_id\n AND epr.round_number = r.round_number\n AND epr.map_name = r.map_name\nWHERE epr.team_name = 'G2 Esports'\n  AND epr.map_name = 'Split'\n  AND epr.first_kill = true;",
   "referee_rows": 1,
   "referee_trajectory": [
@@ -71,34 +71,34 @@
     "agreement": 1.0,
     "same_metric": true,
     "voyager_sound": true,
-    "reason": "两种方法均计算 G2 Esports 在 Split 地图首血后获胜的回合比例，结果均为 1.0，样本量均为 7，无任何硬伤。",
+    "reason": "Both methods compute G2 Esports' post-first-blood round win proportion on Split; both return 1.0 with a sample size of 7, with no hard flaws.",
     "diff": ""
   },
-  "method_reason": "两种方法均计算 G2 Esports 在 Split 地图首血后获胜的回合比例，结果均为 1.0，样本量均为 7，无任何硬伤。",
+  "method_reason": "Both methods compute G2 Esports' post-first-blood round win proportion on Split; both return 1.0 with a sample size of 7, with no hard flaws.",
   "method_diff": "",
   "same_metric": true,
   "voyager_sound": true,
   "judged": true,
   "coverage": 1.0,
   "score": 100,
-  "verdict": "两边口径一致",
+  "verdict": "both sides use the same definition",
   "covered_points": [
-    "在 Split 地图上，G2 Esports 在赢得首血后赢得回合的比例",
-    "在 Split 地图上，G2 Esports 赢得首血的回合数（样本量）"
+    "G2 Esports' proportion of rounds won after taking first blood on Split",
+    "the number of rounds G2 Esports took first blood on Split (sample size)"
   ],
   "missing_points": [],
   "unjudgeable": [],
   "coverage_referee": null,
   "verdict_referee": "",
   "mastered": true,
-  "skill_action": "已有配方，标记为用过且有效",
+  "skill_action": "a recipe already exists; marked as used and effective",
   "mastered_total": 1,
   "ability_total": 31,
   "mastery": 0.0323,
   "judge": "method_compare",
   "skipped": "",
   "derived_points": [
-    "在 Split 地图上，G2 Esports 在赢得首血后赢得回合的比例",
-    "在 Split 地图上，G2 Esports 赢得首血的回合数（样本量）"
+    "G2 Esports' proportion of rounds won after taking first blood on Split",
+    "the number of rounds G2 Esports took first blood on Split (sample size)"
   ]
 }

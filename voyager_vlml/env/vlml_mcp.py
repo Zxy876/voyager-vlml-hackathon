@@ -1,18 +1,20 @@
-"""VLML MCP 环境：把 VLML 的 MCP 工具装进 Voyager 的执行环境。
+"""VLML MCP environment: mounts VLML's MCP tools into Voyager's execution environment.
 
-用户指令③：「在 voyager 环境里安装 VLMLMCP 依赖，（DB，RIB，VLGG）」
+User instruction ③: "install the VLMLMCP dependency in the voyager environment (DB, RIB, VLGG)"
 
-做什么：
-  · 引导 VLML 运行环境（mve/vlml_env.py：cwd + mkdir 补丁 + 可切换 db_path）
-  · 把 VLML 的 MCP 工具暴露成环境可调用的 action space：
-      - SQL 原语：execute_custom_sql（query_sql）、get_database_info
-      - 报告工具：match_summary / match_rounds / match_players / match_economy /
+What it does:
+  · Bootstraps the VLML runtime (mve/vlml_env.py: cwd + mkdir patch + swappable db_path)
+  · Exposes VLML's MCP tools as the environment's callable action space:
+      - SQL primitives: execute_custom_sql (query_sql), get_database_info
+      - Report tools: match_summary / match_rounds / match_players / match_economy /
                  match_analysis / scouting / player_profile / pattern_detection
-  · 执行后回一份**可枚举的观察**：{ok, tool, rows, error, data}
-    这正是设计里「回给 Voyager 的环境反馈」：工具调用成功还是失败、这次取到几行。
+  · Returns an **enumerable observation** after each call: {ok, tool, rows, error, data}
+    This is exactly the "environment feedback returned to Voyager" in the design:
+    whether the tool call succeeded or failed, and how many rows were fetched this time.
 
-⚠️ 这里**不产 VLML 判决、不给标准答案**：环境只负责「你去取数，取到什么我如实回报」。
-   判分（VLML 跑一遍的结果）只在面板，不进这个环境反馈。
+⚠️ This module **produces no VLML verdict and no reference answer**: the environment only handles
+   "you go fetch the data, and I report back honestly whatever you got".
+   Scoring (the result of VLML running a pass) lives only in the dashboard, not in this environment feedback.
 """
 
 from __future__ import annotations
@@ -29,23 +31,24 @@ if str(_MVE_DIR) not in sys.path:
 
 
 def _bootstrap_vlml() -> None:
-    """引导 VLML 运行环境（cwd / 沙箱 mkdir 补丁 / 可切换数据库）。"""
-    import vlml_env  # noqa: F401  # 副作用即引导
+    """Bootstrap the VLML runtime (cwd / sandbox mkdir patch / swappable database)."""
+    import vlml_env  # noqa: F401  # the side effect is the bootstrap
 
 
 class VLMLMCPEnv:
-    """VLML MCP 环境。接口刻意做小：call(name, args) / run_sql(sql)。"""
+    """VLML MCP environment. The interface is deliberately small: call(name, args) / run_sql(sql)."""
 
     def __init__(self) -> None:
         _bootstrap_vlml()
         self._tools: dict[str, Any] = {}
         self._load_tools()
 
-    # ---------- 工具装载 ----------
+    # ---------- tool loading ----------
     def _load_tools(self) -> None:
-        """装载 VLML MCP 工具（SQL 原语 + 报告工具）。失败的工具记为不可用，不拖垮环境。"""
+        """Load the VLML MCP tools (SQL primitives + report tools). A tool that fails to load is
+        marked unavailable, so it does not drag the environment down."""
         specs = [
-            # (对外名字, 模块, 函数)
+            # (external name, module, function)
             ("query_sql", "vlml.tools.db_query_tools", "execute_custom_sql"),
             ("get_database_info", "vlml.tools.db_query_tools", "get_database_info"),
             ("match_summary_report", "vlml.tools.reports.match_analysis", "match_summary_report"),
@@ -63,7 +66,7 @@ class VLMLMCPEnv:
             try:
                 self._tools[name] = getattr(importlib.import_module(mod), fn)
             except Exception as e:  # pragma: no cover
-                print(f"（VLML MCP 工具 {name} 装载失败：{type(e).__name__}: {e}）")
+                print(f"(VLML MCP tool {name} failed to load: {type(e).__name__}: {e})")
 
     @property
     def tool_names(self) -> list[str]:
@@ -72,10 +75,10 @@ class VLMLMCPEnv:
     def has(self, name: str) -> bool:
         return name in self._tools
 
-    # ---------- 数据源（DB / RIB / VLGG） ----------
+    # ---------- data source (DB / RIB / VLGG) ----------
     def data_source(self) -> str:
-        """当前库对应的数据源。按库文件名判（mve 既有约定：vlml_vlr→vlr.gg /
-        vlml_rib→rib.gg，其余→GRID/DB）。"""
+        """The data source corresponding to the current database. Decided by the database file name
+        (existing mve convention: vlml_vlr→vlr.gg / vlml_rib→rib.gg, otherwise→GRID/DB)."""
         try:
             import vlml_env
 
@@ -89,19 +92,19 @@ class VLMLMCPEnv:
             return "vlr.gg"
         return "GRID/DB"
 
-    # ---------- 执行 ----------
+    # ---------- execution ----------
     @staticmethod
     def _nested_error(res: Any) -> str:
-        """从工具返回里挖出**嵌套的 error**。
+        """Dig out the **nested error** from a tool response.
 
-        ⚠️ 实测踩过：VLML 工具失败时**不抛异常**，而是返回
-        `{"error": "Query execution failed: Binder Error: ..."}`（顶层直接带
-        error 键）。这里原来只用 try/except，于是错误响应被判成
-        `ok=True, rows=1` —— SQL 明明炸了，闭环却当成"取到了 1 行"：
-          · 练习侧：假成功 → 错误的 SQL 被当技能存进库；
-          · 消费侧：取到的是错误对象，事实整理器看到的是 error 不是数据
-            （它返回空数组是对的 —— "不许错配"的约束生效了），
-            于是"工具调通了、取到 1 行"，人却得不到任何回答。
+        ⚠️ Hit this in practice: when a VLML tool fails it **does not raise**, it returns
+        `{"error": "Query execution failed: Binder Error: ..."}` (with the error key at the top level).
+        This module originally used only try/except, so the error response was judged as
+        `ok=True, rows=1` —— the SQL clearly blew up, yet the loop treated it as "fetched 1 row":
+          · practice side: false success → the wrong SQL gets stored as a skill in the library;
+          · consumption side: what was fetched is an error object, and the fact assembler sees an
+            error, not data (returning an empty array is correct — the "no mismatching" constraint
+            took effect), so "the tool succeeded, 1 row fetched" but the human gets no answer at all.
         """
         if not isinstance(res, dict):
             return ""
@@ -113,16 +116,16 @@ class VLMLMCPEnv:
         return str(err or "")
 
     async def call(self, name: str, **args: Any) -> dict[str, Any]:
-        """调一个 VLML MCP 工具，回一份可枚举的观察。
+        """Call one VLML MCP tool and return an enumerable observation.
 
-        返回 {ok, tool, rows, error, data}：
-          ok    —— 工具调用成功还是失败（设计里的反馈项①）
-          rows  —— 这次取到几行（设计里的反馈项②）
+        Returns {ok, tool, rows, error, data}:
+          ok    —— whether the tool call succeeded or failed (feedback item ① in the design)
+          rows  —— how many rows were fetched this time (feedback item ② in the design)
         """
         fn = self._tools.get(name)
         if fn is None:
             return {"ok": False, "tool": name, "rows": 0,
-                    "error": f"未装载的工具 {name}", "data": None}
+                    "error": f"unloaded tool {name}", "data": None}
         try:
             res = await fn(**args)
         except Exception as e:
@@ -136,18 +139,21 @@ class VLMLMCPEnv:
                 "error": "", "data": res}
 
     async def run_sql(self, sql: str) -> dict[str, Any]:
-        """执行一条 SQL（模型写的取数代码在这里跑）。"""
+        """Execute one SQL statement (the data-retrieval code written by the model runs here)."""
         return await self.call("query_sql", sql_query=sql)
 
     async def schema_block(self, max_cols: int = 20, max_tables: int = 24) -> str:
-        """实查当前库的表与列，渲染成给模型看的 schema 文本块。
+        """Query the current database's tables and columns live and render them into a schema text
+        block for the model.
 
-        照伴学 entity_catalog 的「实查不写死」原则：出题与写 SQL 都只能引用
-        这里真实存在的表名/列名，避免模型编造。
+        Following the companion's entity_catalog "live-query, don't hardcode" principle: question
+        generation and SQL writing may only reference table/column names that actually exist here,
+        to stop the model from inventing them.
 
-        ⚠️ max_cols=20 是 2026-10-14 实测调过的：14 列时
-        `ext_player_round_stats` 的 `first_kill`（第 16 列）**正好被截掉**——
-        模型看不到首血列，首血题就永远写不对。列预算必须盖住最宽的表。
+        ⚠️ max_cols=20 was tuned in practice on 2026-10-14: at 14 columns,
+        `ext_player_round_stats`'s `first_kill` (the 16th column) **got truncated exactly** ——
+        the model can't see the first-blood column, so first-blood questions are never written correctly.
+        The column budget must cover the widest table.
         """
         obs = await self.run_sql(
             "SELECT table_name, column_name, data_type FROM information_schema.columns "
@@ -166,12 +172,12 @@ class VLMLMCPEnv:
                 if len(r) >= 3:
                     types.setdefault(t, {})[str(r[1])] = _short_type(str(r[2]))
 
-        # ⚠️ 必须把**每张表有多少行**一起给模型（2026-10-13 实测踩的坑）：
-        #   当前库（rib）`agg_player_round_stats` 是 **0 行**，真实数据全在
-        #   `ext_player_round_stats`（2850 行）。只给表名列名的话，模型看着
-        #   agg_* 表名更"正规"就去查它 → 取回 0 行 → 报「没取到数」→
-        #   人看到的是「Voyager 回答不出来」，而数据明明在隔壁表里。
-        #   所以空表要**明写**出来：查它只会得 0 行，别去。
+        # ⚠️ Must also give the model **how many rows each table has** (a pitfall hit in practice on 2026-10-13):
+        #   in the current database (rib), `agg_player_round_stats` has **0 rows**, while the real data
+        #   is all in `ext_player_round_stats` (2850 rows). If we only give table and column names, the model
+        #   sees the agg_* table name as more "official" and queries it → gets 0 rows → reports "no data fetched" →
+        #   the human sees "Voyager can't answer", even though the data is right there in the adjacent table.
+        #   So empty tables must be **stated explicitly**: querying them only yields 0 rows, don't go there.
         counts: dict[str, int] = {}
         names = [t for t, _ in list(cols.items())[:max_tables]]
         if names:
@@ -188,13 +194,15 @@ class VLMLMCPEnv:
             except Exception:
                 counts = {}
 
-        # ⚠️ 必须给**一行真实数据**（2026-10-13 第 4 个坑）：
-        #   只给列名，模型就会猜列里装的是什么值 —— 实测写出
-        #   `WHERE round_won = 'win'`、`= 'team'`（把布尔列当成字符串比）；
-        #   `side` 究竟是 attack/defense 还是 T/CT，光看列名也只能猜。
-        #   VLML 自带的列级口径（`column_definitions.yaml`）**只覆盖 3 张表**，
-        #   指望不上。给一行样例 = 让值自己说话，比写一百句口径说明管用。
-        #   只取行数最多的 8 张（schema 有长度上限，宁可少而准，别把样例挤没了）。
+        # ⚠️ Must also give **one row of real data** (the 4th pitfall on 2026-10-13):
+        #   with only column names, the model guesses what values the columns hold —— in practice it wrote
+        #   `WHERE round_won = 'win'`, `= 'team'` (comparing a boolean column as a string);
+        #   whether `side` is attack/defense or T/CT can only be guessed from the column name.
+        #   VLML's own column-level definitions (`column_definitions.yaml`) **cover only 3 tables**,
+        #   so they can't be relied on. Giving one sample row = letting the values speak for themselves,
+        #   which beats a hundred lines of definition notes.
+        #   Take only the 8 tables with the most rows (the schema has a length cap; better fewer-but-accurate
+        #   than squeezing the samples out).
         samples: dict[str, str] = {}
         for t in sorted([x for x in names if counts.get(x)],
                         key=lambda x: -counts.get(x, 0))[:8]:
@@ -214,35 +222,36 @@ class VLMLMCPEnv:
                     sv = "" if v is None else str(v)
                     pairs.append(f"{name}={sv[:16] or 'NULL'}")
                 if pairs:
-                    samples[t] = "，".join(pairs[:8])
+                    samples[t] = ", ".join(pairs[:8])
             except Exception:
                 continue
 
         def _line(t: str, c: list[str]) -> str:
             ty = types.get(t) or {}
-            head = "，".join(
+            head = ", ".join(
                 f"{n}" + (f"::{ty[n]}" if n in ty else "") for n in c[:max_cols])
             n = counts.get(t)
             if n is None:
                 base = f"- {t}: {head}"
             elif n == 0:
-                base = f"- {t}（**0 行 · 空表，查它只会得 0 行，别查**）: {head}"
+                base = f"- {t} (**0 rows · empty table, querying it only yields 0 rows, do not query**): {head}"
             else:
-                base = f"- {t}（{n} 行）: {head}"
+                base = f"- {t} ({n} rows): {head}"
             smp = samples.get(t)
-            return base + (f"\n    样例：{smp}" if smp else "")
+            return base + (f"\n    sample: {smp}" if smp else "")
 
-        # 有数据的表排前面、空表沉到最后：schema 文本有长度上限（max_tables），
-        # 真被截断时宁可丢空表，也不能把唯一有数据的 ext_* 表截没了
-        # （它们字母序靠后，不排序就会被先截掉）。
+        # Tables with data go first, empty tables sink to the end: the schema text has a length cap (max_tables),
+        # so if it really gets truncated, we'd rather drop empty tables than lose the only data-bearing ext_* tables
+        # (they sort later alphabetically and would be truncated first without sorting).
         #
-        # ⚠️ 2026-10-14 结构性修法（Nemotron 实测）：光在 prompt 里警告
-        # 「空表别查」不够 —— 模型看到名字「对」的表（agg_first_blood_stats
-        # 就是为首血而生的表）就选它，哪怕旁边标着 0 行，实测 3 轮迭代都
-        # 改不了口。所以把空表**移出可选列表**、单独列成禁用名单：
-        # 选错表在结构上不可能，而不是靠模型自觉。
-        #   原版 Voyager 不需要这一条——MineDojo 的 env  API 是固定的，
-        #   没有「哪张表有数据」这个问题；MVE 直面 DuckDB，必须自己管。
+        # ⚠️ Structural fix on 2026-10-14 (Nemotron, in practice): warning "don't query empty tables" in the
+        # prompt alone is not enough —— the model picks the table whose name looks "right" (agg_first_blood_stats
+        # is the table born for first blood) even with a 0-row mark next to it; in practice it wouldn't switch
+        # across 3 iterations of revision. So we **remove empty tables from the selectable list** and list them
+        # separately as a banned list: choosing the wrong table becomes structurally impossible rather than
+        # relying on the model's self-discipline.
+        #   The original Voyager doesn't need this — MineDojo's env API is fixed,
+        #   with no "which table has data" problem; MVE faces DuckDB directly and must manage it itself.
         if counts:
             live = [(t, c) for t, c in cols.items() if (counts.get(t) or 0) > 0]
             dead = sorted(t for t in cols if not (counts.get(t) or 0))
@@ -250,21 +259,23 @@ class VLMLMCPEnv:
             lines = [_line(t, c) for t, c in live[:max_tables]]
             if dead:
                 lines.append(
-                    "\n⚠️ 以下表是 **0 行空表**——禁止在 SQL 里引用（查它们只会得到 "
-                    "(NULL, 0) 这种看似有结果的真空值，行数判据会被它骗过）：\n"
-                    + "、".join(dead))
+                    "\n⚠️ The following tables are **0-row empty tables** — referencing them in SQL is forbidden "
+                    "(querying them only yields (NULL, 0), a vacuum value that looks like a result and fools the "
+                    "row-count criterion):\n"
+                    + ", ".join(dead))
             return "\n".join(lines)
         ordered = sorted(cols.items(), key=lambda kv: -(counts.get(kv[0]) or 0))
         return "\n".join(_line(t, c) for t, c in ordered[:max_tables])
 
 
 def _short_type(t: str) -> str:
-    """把 DuckDB 的类型名压短，省 schema 的字符预算。
+    """Shorten DuckDB type names to save the schema's character budget.
 
-    为什么必须带类型（2026-10-13 实测）：只给列名，模型就猜列里装什么值
-    —— 写出 `WHERE round_won = 'win'`、`= 'team'`，把布尔列当字符串比。
-    带上 `::bool` 之后这类猜测当场消失。压短是为了在同样的字数里多塞
-    几张表：schema 文本块有长度上限，类型名写全了就会挤掉后面的表。
+    Why types are mandatory (verified in practice on 2026-10-13): with only column names, the model
+    guesses what values the columns hold —— it writes `WHERE round_won = 'win'`, `= 'team'`,
+    comparing a boolean column as a string. Adding `::bool` makes such guesses disappear on the spot.
+    Shortening is to fit more tables into the same character count: the schema text block has a length
+    cap, and writing full type names would squeeze out the tables that follow.
     """
     s = (t or "").strip().upper()
     if not s:
@@ -275,7 +286,7 @@ def _short_type(t: str) -> str:
         return "bool"
     if any(s.startswith(p) for p in ("DECIMAL", "NUMERIC", "DOUBLE", "FLOAT", "REAL")):
         return "float"
-    if s.endswith("INT"):  # BIGINT / SMALLINT / UTINYINT / HUGEINT … 整数族兜底
+    if s.endswith("INT"):  # BIGINT / SMALLINT / UTINYINT / HUGEINT … integer-family fallback
         return "int"
     if s.startswith("TIMESTAMP"):
         return "ts"
@@ -289,7 +300,7 @@ def _short_type(t: str) -> str:
 
 
 def _rows_of(res: Any) -> int:
-    """从工具返回里数「取到几行」，尽量兼容几种返回形态。"""
+    """Count "how many rows were fetched" from a tool response, tolerating several response shapes."""
     if res is None:
         return 0
     if isinstance(res, dict):
@@ -297,7 +308,7 @@ def _rows_of(res: Any) -> int:
             v = res.get(key)
             if isinstance(v, list):
                 return len(v)
-        # 有些报告工具把结果放在嵌套里
+        # some report tools nest the result
         for v in res.values():
             if isinstance(v, list):
                 return len(v)
@@ -308,18 +319,18 @@ def _rows_of(res: Any) -> int:
 
 
 def _main() -> int:
-    """冒烟：列出装载的工具 + 数据源 + 跑一条 SQL 看观察。"""
+    """Smoke test: list loaded tools + data source + run one SQL to inspect the observation."""
     import asyncio
 
     env = VLMLMCPEnv()
-    print("数据源 :", env.data_source())
-    print("已装载 :", env.tool_names)
+    print("data source :", env.data_source())
+    print("loaded      :", env.tool_names)
 
     async def go() -> None:
         obs = await env.run_sql("SELECT COUNT(*) AS n FROM rounds")
-        print("SQL 观察:", {k: obs[k] for k in ("ok", "tool", "rows", "error")})
+        print("SQL obs     :", {k: obs[k] for k in ("ok", "tool", "rows", "error")})
         if obs["ok"]:
-            print("返回片段:", str(obs["data"])[:200])
+            print("return frag :", str(obs["data"])[:200])
 
     asyncio.run(go())
     return 0

@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-"""掌握度的**保持度**（会忘）—— 照猫娘伴学 `adaptive_learning/mastery_retention.py`。
+"""**Retention** of mastery (you forget) — modeled on the study-companion plugin's `adaptive_learning/mastery_retention.py`.
 
-V2 的投影回答的是"现在掌握到什么程度"，这一层回答的是"**过一阵还剩多少**"。
-伴学原文（:1-5）：这是试验性启发式，不是 FSRS、也不是训练出来的 HLR 模型。
+V2's projection answers "how well is it mastered right now"; this layer answers "**how much is left after a while**".
+The plugin's original text (:1-5): this is an experimental heuristic, not FSRS and not a trained HLR model.
 
-两条式子（伴学 :27-54）：
+Two formulas (plugin :27-54):
     current_mastery = baseline × 2^(-days / half_life)
-    half_life' = half_life × (1 ± confidence × weight)   # 答对拉长、答错缩短
+    half_life' = half_life × (1 ± confidence × weight)   # correct lengthens, wrong shortens
 
-MVE 适配一处（`used_hint`）：伴学用它判断"这次做对是靠自己还是靠提示"，
-没有它半衰期就永远不动（伴学 :42-43 直接原样返回）。Voyager 不吃提示，
-但**吃技能库** —— 本轮注入了技能经验 ≈ 靠提示做对，这就是同构项：
-`used_hint ≡ 本轮注入过技能库经验`。
+One MVE adaptation (`used_hint`): the plugin uses it to judge "was this correct answer earned alone or with a hint";
+without it the half-life never moves (plugin :42-43 returns as-is). Voyager doesn't take hints,
+but it **does take the skill library** — injecting skill experience this round ≈ answering correctly with a hint,
+which is the isomorphic term: `used_hint ≡ skill-library experience injected this round`.
 """
 
 from __future__ import annotations
@@ -26,9 +26,9 @@ ROOT = Path(__file__).resolve().parent
 LOG = ROOT / "mastery_retention.jsonl"
 
 MODEL_VERSION = "mve-retention-1"
-# 伴学是 7.0 **天**（人的复习周期是"隔天"）。MVE 的时间单位按**会话**走
-# —— 与 mastery_model.MasteryPolicy.time_decay_half_life_sessions 保持同一套单位，
-# 否则一边按会话衰减、一边按天遗忘，两边对不上账。
+# The plugin uses 7.0 **days** (a human's review cycle is "every other day"). MVE's time unit goes by **sessions**
+# — the same unit as mastery_model.MasteryPolicy.time_decay_half_life_sessions,
+# otherwise one side decays per session and the other forgets per day, and the two don't reconcile.
 INITIAL_HALF_LIFE = 3.0
 SESSION_GAP_HOURS = 2.0
 ZERO_THRESHOLD = 0.001
@@ -45,18 +45,18 @@ def finite_fraction(value: Any) -> float:
 
 
 def current_mastery(baseline: float, half_life: float, elapsed_sessions: float) -> float:
-    """伴学 mastery_retention.py:27-34（把"天数"换成"会话数"）。"""
+    """Plugin mastery_retention.py:27-34 (with "days" swapped for "sessions")."""
     baseline = finite_fraction(baseline)
     if not math.isfinite(half_life) or half_life <= 0:
         raise ValueError("invalid half life")
     if not math.isfinite(elapsed_sessions) or elapsed_sessions < 0:
         raise ValueError("invalid elapsed sessions")
-    # 用 `2.0 ** x` 而不是 `math.exp2`：后者是 Python 3.11 才加的，
-    # 在 3.10 的解释器上直接 AttributeError。而 AttributeError 不在
-    # 调用方 (`ValueError, TypeError`) 的捕获范围内 —— 实测每一轮都在
-    # apply_attempt 处抛出并保持度**从未更新过**（日志里那句
-    # 「保持度未更新：module 'math' has no attribute 'exp2'」）。
-    # 同 mastery_model._decay 的修法保持一致。
+    # Use `2.0 ** x` rather than `math.exp2`: the latter was only added in Python 3.11,
+    # and on a 3.10 interpreter it raises AttributeError outright. AttributeError is not
+    # within the caller's (`ValueError, TypeError`) catch scope — observed: every round threw
+    # at apply_attempt and the retention had **never been updated** (that line in the log:
+    # "retention not updated: module 'math' has no attribute 'exp2'").
+    # Keep the same fix as mastery_model._decay.
     value = baseline * 2.0 ** (-elapsed_sessions / half_life)
     return 0.0 if value < ZERO_THRESHOLD else value
 
@@ -68,10 +68,11 @@ def feedback_half_life(
     confidence: float | None,
     used_hint: bool | None,
 ) -> float:
-    """伴学 mastery_retention.py:37-54：答对（且没靠提示）拉长，答错缩短。
+    """Plugin mastery_retention.py:37-54: correct (without a hint) lengthens, wrong shortens.
 
-    `elapsed_sessions` = 距上次作答跨了几个会话。同一会话内再答一次 → 0，
-    半衰期不变（一次练习里的连续尝试不构成"又复习了一遍"）。
+    `elapsed_sessions` = how many sessions have passed since the last answer. Answering again within
+    the same session → 0, half-life unchanged (consecutive attempts within one practice session don't
+    count as "another review").
     """
     current_mastery(1.0, half_life, elapsed_sessions)
     if confidence is None or used_hint is None:
@@ -90,10 +91,10 @@ def feedback_half_life(
 
 
 def evidence_baseline(scores: list[float]) -> float:
-    """伴学 :57-70 —— V1 风格的一致性估计，用来当保持度的 baseline。
+    """Plugin :57-70 — a V1-style consistency estimate, used as the baseline for retention.
 
-    原文注释：这里不做日历加权，因为"时间只在保持度层施加一次"；
-    提示折扣由证据收集方处理，不是这个函数的职责。
+    Original comment: no calendar weighting here, because "time is applied exactly once, in the retention layer";
+    hint discounts are handled by the evidence collector, not this function's responsibility.
     """
     values = [finite_fraction(s) for s in scores[-10:]]
     if not values:
@@ -123,7 +124,7 @@ def _coerce(value: Any, default: datetime | None = None) -> datetime:
 
 
 class RetentionStore:
-    """每道题一行：baseline（学会时的水平）+ half_life（能撑多久）。"""
+    """One row per question: baseline (level when learned) + half_life (how long it lasts)."""
 
     def __init__(self, path: Path | None = None) -> None:
         self.path = Path(path or LOG)
@@ -163,7 +164,7 @@ class RetentionStore:
             "baseline": round(float(baseline), 6),
             "half_life": round(float(half_life), 6),
             "updated_at": _coerce(updated_at or _now()).isoformat().replace("+00:00", "Z"),
-            # 会话序号：只用于算"跨了几个会话"，本身不参与掌握度计算
+            # Session index: only used to count "how many sessions have passed", not part of the mastery computation itself
             "session_index": int(prev.get("session_index") or 0)
             if session_index is None else int(session_index),
         }
@@ -184,11 +185,12 @@ class RetentionStore:
         used_hint: bool | None,
         as_of: datetime | str | None = None,
     ) -> dict[str, Any]:
-        """一轮结束后更新这道题的保持度参数。"""
+        """Update this question's retention parameters after a round ends."""
         now = _coerce(as_of) if as_of is not None else _now()
         prev = self.get(topic_id)
-        # 跨了几个会话：只按"与上次作答的间隔"判断。
-        # 局限：中间没有活动就没法知道中间隔了几段，一律记 1 —— 保守估计。
+        # How many sessions have passed: judged only by "the gap since the last answer".
+        # Limitation: with no activity in between there's no way to know how many segments elapsed;
+        # always count 1 — a conservative estimate.
         elapsed_sessions = 0.0
         session_index = int(prev.get("session_index") or 0)
         if prev.get("updated_at"):
@@ -211,7 +213,7 @@ class RetentionStore:
                            updated_at=now, session_index=session_index)
 
     def current(self, topic_id: str, *, as_of: datetime | str | None = None) -> dict[str, Any]:
-        """这道题**此刻**还剩多少（含已经忘掉的部分）。"""
+        """How much is **left right now** for this question (including the forgotten part)."""
         now = _coerce(as_of) if as_of is not None else _now()
         row = self.get(topic_id)
         baseline = float(row.get("baseline") or 0.0)
@@ -247,7 +249,7 @@ if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "show":
         for topic, row in STORE.load().items():
             cur = STORE.current(topic)
-            print(f"{topic}: baseline={cur['baseline']} 半衰期={cur['half_life_sessions']}个会话 "
-                  f"已过={cur['elapsed_sessions']}个 → 剩余 {cur['retained']}")
+            print(f"{topic}: baseline={cur['baseline']} half-life={cur['half_life_sessions']} sessions "
+                  f"elapsed={cur['elapsed_sessions']} → retained {cur['retained']}")
     else:
         print(json.dumps({"rows": list(STORE.load().values())}, ensure_ascii=False, indent=2))

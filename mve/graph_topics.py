@@ -1,28 +1,28 @@
 #!/usr/bin/env python3
-"""图谱的「种子层」——**独立于题目**的指标全集 + 文本匹配 + 语义桶压缩。
+"""The graph's "seed layer" — a **question-independent** full set of metrics + text matching + semantic-bucket compression.
 
-照猫娘伴学 `knowledge_graph_guidance.py` / `knowledge_graph_index.py` 移植。
-为什么要移植：伴学的图谱是**先于题目存在的知识结构**（82 个知识点种子），
-题目只是用 `match_topics(query=题干)` 去匹配焦点，所以任何题都能用；
-而 MVE 之前的图谱是**题目 rubric 的投影**——维度节点从 `TASKS[].rubric`
-派生，只有出过的那 5 道题有维度（实测 13 个）。新题进来匹配不到任何东西，
-图谱就退化成"这 5 道题的备忘"。
+Ported from the study companion's `knowledge_graph_guidance.py` / `knowledge_graph_index.py`.
+Why port it: the study companion's graph is a **knowledge structure that exists before the questions** (82 topic seeds),
+and questions merely use `match_topics(query=question text)` to match a focus, so any question works;
+whereas MVE's earlier graph was a **projection of the question rubrics** — dimension nodes were derived from `TASKS[].rubric`,
+so only the 5 questions ever asked had dimensions (13 observed). New questions matched nothing,
+and the graph degenerated into "a memo for those 5 questions".
 
-伴学的三段式，这里是同构实现：
-    topics（全量种子）  →  match_topics(query)  →  SubgraphBudget 裁剪
-    →  _build_focused_model_context（压成语义桶）
-    fact（全量指标）    →  match_facts(query)   →  GraphBudget+relation_limits
-    →  focused_context（压成语义桶）
+The study companion's three-stage pipeline, implemented isomorphically here:
+    topics (full seeds)  →  match_topics(query)  →  SubgraphBudget pruning
+    →  _build_focused_model_context (compressed into semantic buckets)
+    fact (full metrics)  →  match_facts(query)  →  GraphBudget+relation_limits
+    →  focused_context (compressed into semantic buckets)
 
-几个必须照搬的约束（都是从伴学源码里读出来的，不是我编的）：
-1. `raw_seed_included: False`（knowledge_graph_guidance.py:999）——
-   绝不把 18 字段原始种子整包喂给模型，只给 label 列表。
-   MVE 的同构物：绝不把 answer_spec 的 SQL 原文喂进去（已经是脱敏骨架）。
-2. 只认**一跳直接边**，且认方向（:1162-1169）；丢弃要计数
-   （diagnostics: self_relation / nonincident / direction_mismatch）。
-3. `relation_limits` 逐关系限流（knowledge_graph_index.py:121-134）——
-   防止稠密的某一种关系把其它关系饿死。
-4. `response_mode` 分流（:1302-1310）——不同环节取不同的关系子集。
+Several constraints that must be copied verbatim (all read from the study companion source, not invented):
+1. `raw_seed_included: False` (knowledge_graph_guidance.py:999) —
+   never feed the model the whole 18-field raw seed; only the label list.
+   MVE's isomorphic counterpart: never feed the answer_spec's raw SQL in (it is already a desensitized skeleton).
+2. Only **one-hop direct edges** count, and direction matters (:1162-1169); drops must be counted
+   (diagnostics: self_relation / nonincident / direction_mismatch).
+3. `relation_limits` throttles per relation (knowledge_graph_index.py:121-134) —
+   preventing one dense relation from starving the others.
+4. `response_mode` routing (:1302-1310) — different stages take different relation subsets.
 """
 
 from __future__ import annotations
@@ -32,13 +32,13 @@ from dataclasses import dataclass, field
 from typing import Any
 
 # --------------------------------------------------------------------------
-# 边关系 → 语义桶（照伴学 _build_focused_model_context 的 9 个桶）
+# Edge relation → semantic bucket (mirrors the 9 buckets in the study companion's _build_focused_model_context)
 # --------------------------------------------------------------------------
-PRODUCED_BY = "produced_by"      # 维度/事实 ← 工具
-DERIVED_FROM = "derived_from"    # 维度/表 ← 表
-READS = "reads"                  # 洞察 ← 表
-COMPOSES = "composes"            # 工具 ← 洞察
-FROM_SECTION = "from_section"    # 维度 ← 工具的某一段
+PRODUCED_BY = "produced_by"      # dimension/fact ← tool
+DERIVED_FROM = "derived_from"    # dimension/table ← table
+READS = "reads"                  # insight ← table
+COMPOSES = "composes"            # tool ← insight
+FROM_SECTION = "from_section"    # dimension ← a section of the tool
 CONFUSABLE = "confusable"
 CO_OCCURS = "co_occurs"
 
@@ -52,9 +52,9 @@ BUCKET_OF = {
     CO_OCCURS: "review_with",
 }
 
-# 边的**规范方向**：src→dst，焦点节点在该关系的哪一端。
-# 照伴学 `_FOCUSED_RELATION_DIRECTION` 的思路——"prerequisite 是 incoming"，
-# 这里"事实被工具产出"也是 incoming（边从 tool 指向 fact）。
+# The **canonical direction** of edges: src→dst, and which end the focus node sits on for that relation.
+# Following the study companion's `_FOCUSED_RELATION_DIRECTION` idea — "prerequisite is incoming",
+# and here "facts are produced by tools" is also incoming (the edge points from tool to fact).
 FOCUSED_RELATION_DIRECTION = {
     PRODUCED_BY: "incoming",
     DERIVED_FROM: "incoming",
@@ -64,7 +64,7 @@ FOCUSED_RELATION_DIRECTION = {
 }
 SYMMETRIC_RELATIONS = frozenset({CONFUSABLE, CO_OCCURS})
 
-# 逐关系限流（照伴学 SubgraphBudget.relation_limits 的 10 种形态）
+# Per-relation throttling (mirrors the 10 shapes of the study companion's SubgraphBudget.relation_limits)
 RELATION_LIMITS: dict[str, int] = {
     PRODUCED_BY: 4,
     FROM_SECTION: 4,
@@ -75,7 +75,7 @@ RELATION_LIMITS: dict[str, int] = {
     CO_OCCURS: 3,
 }
 
-# 关系优先级（照伴学 RELATION_PRIORITY：越小越先说）
+# Relation priority (mirrors the study companion's RELATION_PRIORITY: smaller is mentioned first)
 RELATION_PRIORITY = {
     PRODUCED_BY: 0,
     FROM_SECTION: 1,
@@ -89,15 +89,15 @@ RELATION_PRIORITY = {
 PRIORITY_SCORE = {"core": 0, "useful": 1, "optional": 2}
 
 # --------------------------------------------------------------------------
-# response_mode 分流（照伴学 :1302-1310）
+# response_mode routing (mirrors the study companion :1302-1310)
 # --------------------------------------------------------------------------
-# 伴学按"用户在干什么"分流：problem_solving / general_explanation /
-# general_discussion / unknown，各取不同关系子集。
-# MVE 的同构物是**当前环节**：
-#   plan    —— 让模型写取数计划：口径 + 工具 + 段 + 易混（全量）
-#   explain —— 讲解/求助（bypass_learn）：只要结构与上游，不要易混（会诱导）
-#   judge   —— 判分：只要取值路径与口径
-#   minimal —— 兜底
+# The study companion routes by "what the user is doing": problem_solving / general_explanation /
+# general_discussion / unknown, each taking a different relation subset.
+# MVE's isomorphic counterpart is the **current stage**:
+#   plan    — have the model write a data-retrieval plan: metrics + tools + sections + confusables (full set)
+#   explain — explanation/help (bypass_learn): structure and upstream only, no confusables (they induce)
+#   judge   — scoring: value paths and metrics only
+#   minimal — fallback
 MODE_ALLOWED: dict[str, set[str]] = {
     "plan": {PRODUCED_BY, FROM_SECTION, COMPOSES, READS, DERIVED_FROM,
              CONFUSABLE, CO_OCCURS},
@@ -108,57 +108,55 @@ MODE_ALLOWED: dict[str, set[str]] = {
 DEFAULT_MODE = "plan"
 
 # --------------------------------------------------------------------------
-# 通用词（照伴学 GENERIC_QUERY_TERMS）
+# Generic terms (mirrors the study companion's GENERIC_QUERY_TERMS)
 # --------------------------------------------------------------------------
-# 题干里"帮我算一下""是多少""分析"这类词到处都是，不去掉会让所有 fact 都得分。
+# Question text is full of words like "help me compute", "how many", "analyze"; not removing them lets every fact score.
 GENERIC_TERMS = {
-    # 英文
+    # English
     "what", "how", "many", "much", "the", "this", "that", "team", "match",
     "series", "game", "games", "round", "rounds", "map", "maps", "player",
     "players", "report", "analysis", "analyze", "analyse", "compute",
     "calculate", "get", "find", "show", "give", "tell", "please", "help",
     "question", "problem", "value", "number", "count", "total", "rate",
     "percent", "percentage", "average", "avg", "mean",
-    # 中文
-    "多少", "几个", "什么", "怎么", "如何", "为什么", "哪些", "这个", "那个",
-    "比赛", "数据", "分析", "计算", "查询", "统计", "一下", "请问", "帮我",
-    "问题", "情况", "表现", "结果", "数值", "比例", "胜率",
+    "several", "which", "why", "data", "query", "stats", "situation",
+    "performance", "result", "ratio",
 }
 
-# 中文术语 → 英文指标词。
-# 来源标注 seed：伴学的 aliases 也是种子里手写的（知识点的别名本来就是人给的），
-# 这里同理。它只做**别名**，不碰任何取值，所以不构成"我当裁判"。
-# 注意：只放"术语→指标"的映射，绝不放数值。
+# Term → English metric words.
+# Source: labeled seeds; the study companion's aliases are also hand-written in seeds (topic aliases are human-given by nature),
+# and the same applies here. It only acts as **aliases** and touches no values, so it does not constitute "me being the referee".
+# Note: only "term → metric" mappings go here, never values.
 TERM_SEED: dict[str, list[str]] = {
-    "手枪局": ["pistol", "team_economy_pistol"],
-    "手枪": ["pistol", "team_economy_pistol"],
-    "eco局": ["eco", "team_economy_eco"],
-    "经济": ["economy", "team_economy_pistol", "team_economy_eco"],
-    "首血": ["fb", "first_blood", "opening_duels", "agg_first_blood_stats"],
-    "首杀": ["fb", "first_blood", "opening_duels"],
-    "首死": ["fd", "opening_duels"],
-    "转换率": ["conv", "conversion", "fb_conv"],
-    "转化": ["conv", "conversion"],
-    "连败": ["streak", "max_losing_streak"],
-    "连胜": ["streak"],
-    "回合": ["rounds", "round"],
-    "残局": ["clutch", "clutches", "team_impact_metrics"],
-    "多杀": ["multikills", "team_impact_metrics"],
+    "pistol round": ["pistol", "team_economy_pistol"],
+    "pistol": ["pistol", "team_economy_pistol"],
+    "eco round": ["eco", "team_economy_eco"],
+    "economy": ["economy", "team_economy_pistol", "team_economy_eco"],
+    "first blood": ["fb", "first_blood", "opening_duels", "agg_first_blood_stats"],
+    "opening kill": ["fb", "first_blood", "opening_duels"],
+    "opening death": ["fd", "opening_duels"],
+    "conversion rate": ["conv", "conversion", "fb_conv"],
+    "conversion": ["conv", "conversion"],
+    "losing streak": ["streak", "max_losing_streak"],
+    "winning streak": ["streak"],
+    "round": ["rounds", "round"],
+    "clutch": ["clutch", "clutches", "team_impact_metrics"],
+    "multikill": ["multikills", "team_impact_metrics"],
     "kast": ["kast", "team_consistency_metrics"],
     "adr": ["adr", "team_consistency_metrics"],
-    "评分": ["rating", "impact"],
-    "下半场": ["half_breakdown"],
-    "加时": ["half_breakdown"],
-    "经济曲线": ["economy_context"],
-    "进攻": ["attack_patterns"],
-    "战术": ["attack_patterns"],
-    "时间线": ["round_timeline"],
-    "地图": ["map", "map_zones", "agg_team_map_stats"],
-    "选手": ["player", "player_performance", "agg_player_round_stats"],
-    "队伍对比": ["team_comparison"],
-    "关键指标": ["key_metrics"],
-    "亮点": ["highlight_rounds"],
-    "回合情境": ["round_situations"],
+    "rating": ["rating", "impact"],
+    "second half": ["half_breakdown"],
+    "overtime": ["half_breakdown"],
+    "economy curve": ["economy_context"],
+    "attack": ["attack_patterns"],
+    "tactics": ["attack_patterns"],
+    "timeline": ["round_timeline"],
+    "map": ["map", "map_zones", "agg_team_map_stats"],
+    "player": ["player", "player_performance", "agg_player_round_stats"],
+    "team comparison": ["team_comparison"],
+    "key metrics": ["key_metrics"],
+    "highlights": ["highlight_rounds"],
+    "round situations": ["round_situations"],
 }
 
 
@@ -167,12 +165,12 @@ def _text(v: Any) -> str:
 
 
 def _snake_parts(name: str) -> list[str]:
-    """`team_economy_pistol` → ['team', 'economy', 'pistol']。"""
+    """`team_economy_pistol` → ['team', 'economy', 'pistol']."""
     return [p for p in re.split(r"[^a-z0-9]+", _text(name).lower()) if p]
 
 
 def _tokens(query: str, *, strip_generic: bool = True) -> list[str]:
-    """题干分词：英文按 [a-z0-9]+，中文按 2-4 字 N-gram，并做术语映射。"""
+    """Question-text tokenization: English by [a-z0-9]+, Chinese by 2-4 character N-grams, with term mapping."""
     raw = _text(query).lower()
     if not raw:
         return []
@@ -181,7 +179,7 @@ def _tokens(query: str, *, strip_generic: bool = True) -> list[str]:
         for part in _snake_parts(tok):
             if len(part) >= 2:
                 out.add(part)
-    # 中文：先替换术语，再对剩余片段取 2-4 gram
+    # Chinese: replace terms first, then take 2-4 grams of the remaining fragments
     cjk = "".join(ch if "\u4e00" <= ch <= "\u9fff" else " " for ch in raw)
     for term, mapped in TERM_SEED.items():
         if term in cjk:
@@ -228,19 +226,19 @@ def _search_text(fact: dict[str, Any]) -> str:
 
 
 # --------------------------------------------------------------------------
-# 焦点匹配（照伴学 match_topics）
+# Focus matching (mirrors the study companion's match_topics)
 # --------------------------------------------------------------------------
 def match_facts(facts: list[dict[str, Any]], *, topic_id: str = "",
                 query: str = "", limit: int = 5) -> list[dict[str, Any]]:
-    """题干 → 焦点指标。
+    """Question text → focus metrics.
 
-    照伴学 `match_topics`（knowledge_graph_guidance.py:481）的评分形态：
-      - topic_id 精确命中 → score 100（:491-500）
-      - 完整 label/alias 被题干覆盖 → +100（:534-544）
-      - label 出现在 terms → +40；alias → +36；前缀 → +18；包含 → +10；
+    Scoring shape mirrors the study companion's `match_topics` (knowledge_graph_guidance.py:481):
+      - topic_id exact hit → score 100 (:491-500)
+      - full label/alias covered by the question text → +100 (:534-544)
+      - label appears in terms → +40; alias → +36; prefix → +18; contains → +10;
         haystack → +3
-    存在理由：题目**不需要预先声明**它考哪些指标。伴学靠这个给任意新题配图，
-    MVE 之前没有它，所以图谱只对出过的题有效。
+    Why it exists: questions **do not need to declare in advance** which metrics they test. The study companion uses this to attach a graph to any new question,
+    and MVE lacked it before, so the graph only worked for questions already asked.
     """
     limit = max(1, int(limit or 5))
     by_id = {_text(f.get("id")): f for f in facts if _text(f.get("id"))}
@@ -253,8 +251,8 @@ def match_facts(facts: list[dict[str, Any]], *, topic_id: str = "",
     terms = _tokens(text)
     if not terms:
         return []
-    # 题干里出现**完整表名**（"agg_team_game_stats"）是最强的一种证据：
-    # 实测问"这张表的粒度"时，引用该表的洞察会凭零散 token 得分压过表本身。
+    # A **full table name** in the question text ("agg_team_game_stats") is the strongest kind of evidence:
+    # observed when asking "what is this table's grain", insights citing that table outscore the table itself on scattered tokens.
     compact_q = re.sub(r"[^a-z0-9]+", "", text.lower())
     scored: list[dict[str, Any]] = []
     for fact in facts:
@@ -271,7 +269,7 @@ def match_facts(facts: list[dict[str, Any]], *, topic_id: str = "",
             if ct and len(ct) >= 6 and ct in compact_q:
                 score += 150
                 matched.append(_text(tname))
-        # 完整标签被覆盖：最强的证据
+        # Full label covered: the strongest evidence
         label_parts = _snake_parts(label) or ([label] if label else [])
         if label_parts and set(label_parts).issubset(set(terms)):
             score += 100
@@ -309,7 +307,7 @@ def match_facts(facts: list[dict[str, Any]], *, topic_id: str = "",
 
 
 # --------------------------------------------------------------------------
-# 边排序（照伴学 _edge_sort_key）
+# Edge sorting (mirrors the study companion's _edge_sort_key)
 # --------------------------------------------------------------------------
 def edge_sort_key(query: str, edge: Any) -> tuple:
     relation = _text(getattr(edge, "relation", ""))
@@ -326,11 +324,11 @@ def edge_sort_key(query: str, edge: Any) -> tuple:
 
 
 # --------------------------------------------------------------------------
-# 语义桶压缩（照伴学 _build_focused_model_context）
+# Semantic bucket compression (mirrors the study companion's _build_focused_model_context)
 # --------------------------------------------------------------------------
 @dataclass
 class FocusBudget:
-    """照伴学 SubgraphBudget；这里只留 MVE 真的用得上的字段。"""
+    """Mirrors the study companion's SubgraphBudget; only the fields MVE actually uses are kept here."""
     max_focus: int = 3
     max_nodes: int = 20
     max_edges: int = 30
@@ -341,14 +339,14 @@ class FocusBudget:
 def focused_context(graph: Any, selected_id: str, *, query: str = "",
                     mode: str = DEFAULT_MODE,
                     budget: FocusBudget | None = None) -> dict[str, Any]:
-    """只取焦点的**一跳直接边**，认方向，按关系归桶，丢弃要计数。
+    """Take only the focus's **one-hop direct edges**, respecting direction, bucket by relation, counting drops.
 
-    伴学的原话（:1073-1079）：「The graph UI may include a multi-hop retrieved
+    The study companion's exact words (:1073-1079): "The graph UI may include a multi-hop retrieved
     subgraph. Reusing its relation groups here previously made edges between
-    two neighbouring topics look like direct relations of selected_id.」
-    即：多跳子图里两个邻居之间的边，会被误当成焦点的直接关系。
-    MVE 同构风险一模一样（agg 表的上游上游不是事实的直接来源），所以这里
-    严格只读 incident 边。
+    two neighbouring topics look like direct relations of selected_id."
+    That is: an edge between two neighbors in a multi-hop subgraph gets mistaken for a direct relation of the focus.
+    MVE's isomorphic risk is identical (an agg table's upstream's upstream is not a fact's direct source), so here
+    we strictly read only incident edges.
     """
     b = budget or FocusBudget()
     allowed = MODE_ALLOWED.get(_text(mode).lower(), MODE_ALLOWED[DEFAULT_MODE])
@@ -435,13 +433,13 @@ def _rel_of_bucket(bucket: str) -> str:
 
 
 # --------------------------------------------------------------------------
-# 种子层：把 VLML 结构变成「指标全集」（不依赖题目）
+# Seed layer: turn VLML structure into a "full metric set" (question-independent)
 # --------------------------------------------------------------------------
 def build_seed_facts(schema: dict[str, Any]) -> list[dict[str, Any]]:
-    """从 VLML 发现的四层结构里，抽出所有**可以问出来的事实**。
+    """From the four-layer structure VLML discovers, extract every fact that **can be asked about**.
 
-    与题目的关系是零：不管有没有出过题，这些事实都在。伴学的 82 个知识点
-    种子也是这个性质（先于题目存在），题目只是引用它们。
+    The relationship to questions is zero: these facts exist whether or not questions were ever asked. The study companion's 82 topic
+    seeds have the same property (existing before questions); questions merely reference them.
     """
     out: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -455,7 +453,7 @@ def build_seed_facts(schema: dict[str, Any]) -> list[dict[str, Any]]:
 
     section_insights = schema.get("section_insights") or {}
 
-    # 1) 洞察级事实：46 个洞察各有 purpose（"Pistol round performance"）
+    # 1) Insight-level facts: each of the 46 insights has a purpose ("Pistol round performance")
     for name, info in sorted((schema.get("insights") or {}).items()):
         purpose = _text(info.get("purpose"))
         if not purpose:
@@ -480,7 +478,7 @@ def build_seed_facts(schema: dict[str, Any]) -> list[dict[str, Any]]:
             "origin": "vlml_source",
         })
 
-    # 2) 段级事实：工具 × section（答案真正落地的位置）
+    # 2) Section-level facts: tool × section (where answers actually land)
     for tool, sections in sorted((schema.get("tools") or {}).items()):
         for sec in (sections.get("sections") or []):
             ins = (section_insights.get(tool) or {}).get(sec) or []
@@ -496,7 +494,7 @@ def build_seed_facts(schema: dict[str, Any]) -> list[dict[str, Any]]:
                     aliases.append(term)
             add({
                 "id": f"fact:section:{tool}.{sec}",
-                "label": f"{sec}（{tool}）",
+                "label": f"{sec} ({tool})",
                 "subject": "valorant",
                 "stage": "tool",
                 "unit": tool,
@@ -509,7 +507,7 @@ def build_seed_facts(schema: dict[str, Any]) -> list[dict[str, Any]]:
                 "origin": "vlml_source",
             })
 
-    # 3) 表级事实：一张表本身也是可以问的东西（"这张表有多少行/什么粒度"）
+    # 3) Table-level facts: a table itself is askable ("how many rows / what grain does this table have")
     for name, info in sorted((schema.get("tables") or {}).items()):
         aliases = list(_snake_parts(name))
         for term, mapped in TERM_SEED.items():
@@ -517,7 +515,7 @@ def build_seed_facts(schema: dict[str, Any]) -> list[dict[str, Any]]:
                 aliases.append(term)
         add({
             "id": f"fact:table:{name}",
-            "label": f"{name}（{info.get('grain') or '表'}）",
+            "label": f"{name} ({info.get('grain') or 'table'})",
             "subject": "valorant",
             "stage": _text(info.get("stage")),
             "unit": "",
@@ -530,7 +528,7 @@ def build_seed_facts(schema: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def seed_facts_to_nodes(facts: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """把种子事实转成图谱节点（kind='fact'）。"""
+    """Convert seed facts into graph nodes (kind='fact')."""
     nodes = []
     for f in facts:
         nodes.append({

@@ -1,49 +1,49 @@
 #!/usr/bin/env python3
-"""自动出题（照伴学 `question_generate` + `question_validate` 的四段闭环）。
+"""Automatic question generation (mirrors the study companion's four-stage closed loop of `question_generate` + `question_validate`).
 
-伴学的四段（逐段取证）
-----------------------
-1. `question_type_mapping.resolve_target_question_type`（:131）
-   —— 题型由**服务端**定：种子里的 teaching style → `MACHINE_QUESTION_TYPES`。
-   注释写得很直白："a teaching style is pedagogical data, not an LLM-selected
-   output format"。LLM 不许自己选题型。
-2. `tutor_llm_agent_question_generate._normalize_question`（:46）
-   —— LLM 出题面，**同时产出** `answer` / `accepted_answers` / `key_points` /
-   `rubric` / `solution_steps` / `difficulty`。
-3. `tutor_llm_agent_question_validate._normalize_question_validation`（:18）
-   —— **第二个 LLM 调用**独立校验三个布尔：`relevant` / `answer_supported` /
-   `difficulty_appropriate`，外加 `reason`；`retry` 必须与三者一致，
-   不一致直接 `SdkError`。不通过就重新生成。
-4. `question_type_mapping.enforce_mapped_question_type`（:259）
-   —— 最后强制把 `question_type` 改回服务端选定的，防 LLM 改题型。
+The study companion's four stages (evidence per stage)
+--------------------------------------------------
+1. `question_type_mapping.resolve_target_question_type` (:131)
+   —— the question type is decided by the **server**: the seed's teaching style → `MACHINE_QUESTION_TYPES`.
+   The comment is blunt: "a teaching style is pedagogical data, not an LLM-selected
+   output format". The LLM is not allowed to pick the question type itself.
+2. `tutor_llm_agent_question_generate._normalize_question` (:46)
+   —— the LLM produces the question text, **simultaneously producing** `answer` / `accepted_answers` / `key_points` /
+   `rubric` / `solution_steps` / `difficulty`.
+3. `tutor_llm_agent_question_validate._normalize_question_validation` (:18)
+   —— a **second LLM call** independently validates three booleans: `relevant` / `answer_supported` /
+   `difficulty_appropriate`, plus `reason`; `retry` must be consistent with the three,
+   otherwise it errors out with `SdkError` directly. If it fails, regenerate.
+4. `question_type_mapping.enforce_mapped_question_type` (:259)
+   —— finally force `question_type` back to the server-selected one, preventing the LLM from changing the question type.
 
-MVE 的关键改造：生成的是**配方**，不是答案
-------------------------------------------
-伴学把 LLM 给的 `answer` 当标准答案（`accepted_answers`）。
-MVE **绝不能**这么做 —— `loop_core.py:165` 写死了：expected 与 tolerance
-只从服务端私有的 `answer_spec` 读，绝不用模型生成的参考答案替换。
+MVE's key change: what is generated is a **recipe**, not an answer
+--------------------------------------------------
+The study companion treats the LLM's `answer` as the ground truth (`accepted_answers`).
+MVE **must not** do this —— `loop_core.py:165` hardcodes it: expected and tolerance
+are only read from the server-private `answer_spec`, never replaced with a model-generated reference answer.
 
-我上一轮据此推出「MVE 不能自动生成题目，硬边界」——**这个推论是错的**。
-错在把「不能信模型给的答案数值」等同于「不能让模型出题」。
-正确做法：让 LLM 出的是**可执行的取数配方**（`answer_spec`：
-SQL，或 工具 + 参数 + 取值路径），而不是答案数值。
+My previous round concluded from this that "MVE cannot auto-generate questions, a hard boundary" —— **this inference was wrong**.
+The mistake was equating "cannot trust the model's answer value" with "cannot let the model produce questions".
+The correct approach: what the LLM produces is an **executable data-retrieval recipe** (`answer_spec`:
+SQL, or tool + arguments + value path), not the answer value.
 
-配方是可执行的 → 裁判跑一遍就从 VLML 拿到真值。于是伴学第 3 步里
-「由第二个 LLM 判断的 `answer_supported`」，在 MVE 里变成**确定性验证**：
+The recipe is executable → the referee runs it once and gets the truth from VLML. So in the study companion's
+step 3, the `answer_supported` "judged by a second LLM" becomes **deterministic validation** in MVE:
 
-    跑得出来吗？（执行不报错）
-    值非空吗？（不是 NULL / 空串）
-    样本量够吗？（base ≥ min_base，照 base 闸）
-    跟已有题重复吗？（同一个 (subject, dimension) 已经有了就作废）
+    Does it run? (executes without error)
+    Is the value non-empty? (not NULL / empty string)
+    Is the sample size sufficient? (base ≥ min_base, per the base gate)
+    Does it duplicate an existing question? (voided if the same (subject, dimension) already exists)
 
-**这比伴学更强**：伴学的"答案是否被支持"是另一个模型的意见（还会自相矛盾，
-所以它才要加 `_answer_reference_answer_consistent` 那种一致性标志）；
-MVE 的"这道题成不成立"是数据事实，跑一遍就知道。
+**This is stronger than the study companion**: the study companion's "is the answer supported" is another model's
+opinion (which can even be self-contradictory, hence its `_answer_reference_answer_consistent` consistency flag);
+MVE's "does this question hold up" is a data fact — one run tells you.
 
-用法
+Usage
 ----
-    python mve/question_gen.py --about "Cloud9 的手枪局" --difficulty 3
-    python mve/question_gen.py --about "首血转换" --adopt     # 验过就并入题库
+    python mve/question_gen.py --about "Cloud9's pistol rounds" --difficulty 3
+    python mve/question_gen.py --about "first-blood conversion" --adopt     # merge into the question bank once validated
 """
 
 from __future__ import annotations
@@ -58,24 +58,25 @@ from typing import Any
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
-import vlml_env  # noqa: E402  引导环境
+import vlml_env  # noqa: E402  bootstrap the environment
 
 from llm_client import chat_json  # noqa: E402
 from loop_core import AnswerSpec, RubricPoint, Task, dig  # noqa: E402
 
-# 生成的题落这里（运行时产物，不进仓库；tasks.py 在启动时合并）
+# Generated questions land here (runtime artifact, not committed to the repo; tasks.py merges at startup)
 STORE = HERE / "generated_tasks.json"
 
-# 与 action_code.TOOL_NAMES 保持一致（对外暴露的 MCP 工具）
+# Kept consistent with action_code.TOOL_NAMES (the externally exposed MCP tools)
 TOOL_NAMES = [
     "match_summary_report", "match_analysis_report", "match_players_report",
     "match_rounds_report", "match_economy_report", "pattern_detection_report",
     "player_profile_report", "scouting_report", "query_sql", "get_database_info",
 ]
 
-# ⚠️ 不再写死：换库（GRID → vlr.gg → rib.gg）后 2843069 / Cloud9 在新库里
-# **根本不存在** —— 实测 rib 库上种子题 17 个评分点 **0 个跑得出数**。
-# 锚点跟着库走，从库实查（见 anchor.py）。旧库挑出来的仍是这两个值。
+# ⚠️ No longer hardcoded: after the database swap (GRID → vlr.gg → rib.gg), 2843069 / Cloud9
+# **do not exist at all** in the new database —— on the rib database, 0 of the seed questions'
+# 17 rubric points actually yielded data.
+# The anchor follows the database, queried live from the database (see anchor.py). The old database still picked these two values.
 try:
     import anchor as _anchor
     SERIES = _anchor.series()
@@ -86,28 +87,28 @@ except Exception:                                        # pragma: no cover
 
 
 # --------------------------------------------------------------------------
-# 第 0 段：口径声明（服务端事实，不由模型决定）
+# Stage 0: convention declaration (server-side fact, not decided by the model)
 # --------------------------------------------------------------------------
 _PCT_NAME = ("_pct", "_rate", "_conv", "_percent", "pct_")
 
 
 def _dim_specs() -> dict[str, dict[str, Any]]:
-    """每个维度是**什么量**、**要不要分母** —— 服务端声明，不从模型来。
+    """What **kind of quantity** each dimension is and **whether it needs a denominator** —— declared by the server, not from the model.
 
-    伴学不让学生/模型选题型（"a teaching style is pedagogical data, not an
-    LLM-selected output format"）；MVE 同理：维度是百分比还是计数、分母从哪来，
-    是服务端事实。
+    The study companion does not let students/models pick question types ("a teaching style is pedagogical data, not an
+    LLM-selected output format"); MVE likewise: whether a dimension is a percentage or a count, and where the denominator comes from,
+    is a server-side fact.
 
-    来源：现有题的 `answer_spec`（硬事实），维度名只作兜底。
+    Source: existing questions' `answer_spec` (hard fact); dimension names only serve as a fallback.
 
-    ⚠️ 两条路径的 percent 语义**不一样**（这是裁判既有行为，不是 bug）：
-      · 工具路径 + `percent=True` → value 是**分子**、base 是**分母**，
-        裁判自己算 `num/denom*100`（`vlml0_referee.py:224`）。
-      · SQL 路径 → value 就是**最终值**（SQL 里已经 `ROUND(AVG(...)*100,1)`），
-        base 只是样本量，裁判**不换算**（`vlml0_referee.py:265`）。
+    ⚠️ The percent semantics of the two paths are **different** (this is existing referee behavior, not a bug):
+      · Tool path + `percent=True` → value is the **numerator**, base is the **denominator**,
+        the referee computes `num/denom*100` itself (`vlml0_referee.py:224`).
+      · SQL path → value is the **final value** (the SQL already does `ROUND(AVG(...)*100,1)`),
+        base is only the sample size, the referee **does not convert** (`vlml0_referee.py:265`).
 
-    不区分这两条，就会出「题面问胜率、配方取个数」的废题 —— 实测第 2 次生成
-    就是这么过的：`pistol.num` = 3 被当成胜率，真值是 3/6 = 50%。
+    Failing to distinguish these two produces dead questions like "the question text asks for a win rate, the recipe fetches a count" —— the
+    2nd generation run passed exactly like this: `pistol.num` = 3 was treated as a win rate, while the true value is 3/6 = 50%.
     """
     out: dict[str, dict[str, Any]] = {}
     try:
@@ -141,18 +142,18 @@ def _dim_specs() -> dict[str, dict[str, Any]]:
                 if s.tool and s.base_path:
                     rec["example"] = f"base_path={s.base_path}"
                 elif s.sql and s.base_column is not None:
-                    rec["example"] = f"SQL 第 {s.base_column} 列作分母/样本量"
-    # ---- 人导入采纳的新维度 ----
-    # 不加这一段，`_graph_blueprint()` 的 `if not specs.get(d,{}).get("by_sql")`
-    # 会把新人导入的维度整条跳过 —— 实测：图谱里明明有了
-    # `plant_success_rate` 节点，出题点却仍挑回 `map_fb_conv`，
-    # 出的题跟人问的毫无关系（人问爆弹成功率，出了首血转换率）。
-    # 这些维度是 VLML **用 SQL 答出来的**，所以 by_sql 必为真 —— 不是猜的。
+                    rec["example"] = f"SQL column {s.base_column} as denominator/sample size"
+    # ---- new dimensions adopted from human import ----
+    # Without this section, `_graph_blueprint()`'s `if not specs.get(d,{}).get("by_sql")`
+    # would skip entire human-imported dimensions —— observed: the knowledge graph clearly had a
+    # `plant_success_rate` node, yet the question-generation point still picked `map_fb_conv`,
+    # producing a question unrelated to the human's (the human asked about plant success rate, out came first-blood conversion).
+    # These dimensions are **answered by VLML via SQL**, so by_sql must be true —— that is not a guess.
     try:
         import knowledge_graph
         for irec in knowledge_graph.load_imported_links():
             if not irec.get("covered"):
-                continue                 # 工具集覆盖不到的，不配当出题方向
+                continue                 # directions the tool set cannot cover do not qualify as question-generation directions
             d = str(irec.get("dimension") or "").strip()
             if not d or d in out:
                 continue
@@ -162,11 +163,11 @@ def _dim_specs() -> dict[str, dict[str, Any]]:
             out[d] = {
                 "kind": "percent" if is_pct else "count",
                 "needs_base": bool(is_pct),
-                "example": "SQL 里自己算好百分比，另取一列作样本量",
+                "example": "compute the percentage inside the SQL, and take an extra column as the sample size",
                 "by_tool": bool(irec.get("tool")) and not bool(irec.get("sql")),
                 "by_sql": bool(irec.get("sql")),
-                # 人导入的维度没有 dim 节点，desc 不会从节点来 —— 这里直接用
-                # 人的原话，`_relevant` 才有得比对（见 `_human_desc` 的注释）
+                # Human-imported dimensions have no dim node; desc will not come from a node —— use
+                # the human's original wording here, so `_relevant` has something to compare against (see `_human_desc`'s comment)
                 "desc": _human_desc(str(irec.get("question") or "")),
                 "origin": "human_import",
             }
@@ -177,15 +178,16 @@ def _dim_specs() -> dict[str, dict[str, Any]]:
         if g is not None:
             n = g.nodes.get(f"dim:{d}")
             pt = str((n.detail.get("point") if n else "") or "")
-        # 只取括号前的主名：「手枪局胜率（0-100 的百分比数值，如 50.0）」→ 手枪局胜率
-        # `or rec.get("desc")` —— 人导入的维度没有节点，desc 已经在上面用人的
-        # 原话填好了，这里不能把它退回英文原名（会把验题闸 0b 打回不相关）。
-        # ⚠️ `point` 是**那道题的评分点文案**，绑死了具体值（"Corrode 上 Cloud9
-        # 的胜率"）—— 不能直接当维度定义，否则换值出的新题全被闸 0b 判不相关。
-        # 抽象化：剥掉具体实体值，只留口径。人导入的 desc 已是人的原话，不动。
+        # Only take the main name before the parenthesis: "pistol-round win rate (percentage 0-100, e.g. 50.0)" → pistol-round win rate
+        # `or rec.get("desc")` —— human-imported dimensions have no node; desc was already filled with the human's
+        # original wording above, and here it must not fall back to the English original name (that would make validation gate 0b reject it as irrelevant).
+        # ⚠️ `point` is **that question's rubric point text**, bound to specific values ("Cloud9's win rate on Corrode")
+        # —— it cannot be used directly as the dimension definition, otherwise new questions generated with different values would all be judged
+        # irrelevant by gate 0b.
+        # Abstraction: strip the specific entity values, keep only the convention. Human-imported desc is already the human's original wording, untouched.
         rec["desc"] = (rec.get("desc")
                        or _abstract_desc(pt.split("（")[0].split("(")[0].strip(), d))
-        # 维度在图谱里的取值路径 —— 用来**按配方反查维度**（见 enforce）
+        # The dimension's value path in the knowledge graph —— used to **reverse-look-up dimensions by recipe** (see enforce)
         vp = ""
         if g is not None:
             n = g.nodes.get(f"dim:{d}")
@@ -195,7 +197,7 @@ def _dim_specs() -> dict[str, dict[str, Any]]:
         if rec["kind"] != "count":
             continue
         if any(k in d for k in _PCT_NAME):
-            # 裁判判 unit 时本来就按名字判（referee.py:278），这里照它
+            # The referee judges unit by name anyway (referee.py:278), so mirror it here
             rec["kind"] = "percent"
             rec["needs_base"] = True
         elif "ratio" in d:
@@ -205,23 +207,24 @@ def _dim_specs() -> dict[str, dict[str, Any]]:
     return out
 
 
-_STOP = {"这个", "那个", "什么", "多少", "分别", "计算", "一共", "总共", "请问",
-         "数据", "指标", "数值", "结果", "情况", "表现", "the", "and", "for",
-         "with", "that", "this", "from", "team", "series"}
+_STOP = {"what", "which", "how", "many", "much", "respectively", "compute",
+         "calculate", "total", "please", "data", "metric", "value", "result",
+         "performance", "the", "and", "for", "with", "that", "this", "from",
+         "team", "series"}
 
 
 def _subject_values(key: str) -> list[str]:
-    """这个学科下**可填入的具体值** —— 连数据源实查，不手写。
+    """The **concrete values that can be filled in** under this subject —— queried live from the data source, never handwritten.
 
-    为什么要实查：手写一张清单换一次库就全错。`entity_catalog` 会连
-    `db_config.json` 指向的库（为空时用默认库 `db_switch.DEFAULT_DB`，
-    当前是 rib.gg）把 series / team / map / player 的实际取值查出来并缓存。
-    查不到就返回空（该学科出不了题），**绝不编一个值出来**。
+    Why live queries: a handwritten list goes stale with every database swap. `entity_catalog` connects to
+    the database pointed to by `db_config.json` (the default database `db_switch.DEFAULT_DB` when empty,
+    currently rib.gg) and queries the actual series / team / map / player values, caching them.
+    When nothing is found, return empty (no questions can be asked on this subject), **never fabricate a value**.
 
-    再叠一层**人登记的学科**（`subjects.py`）：换数据源（接新的公开源）后，
-    人先填一个学科，出题器就得能往这个学科上出题 —— 否则换了源，出题器
-    还在出老库里那一批值。⚠️ 如实说明：人填的值若数据源里没有对应数据，
-    这道题跑不出数值，会被验题闸拦下，不会混进题库。
+    Add another layer of **human-registered subjects** (`subjects.py`) on top: after swapping data sources (connecting a new public source),
+    a human first registers a subject, and the question generator must be able to ask questions on it —— otherwise after a source swap, the question generator
+    would still be producing values from the old database. ⚠️ To state it honestly: if a human-registered value has no corresponding data
+    in the data source, this question will not produce a value, and it will be caught by the validation gate, never slipping into the question bank.
     """
     vals: list[str] = []
     try:
@@ -240,36 +243,37 @@ def _subject_values(key: str) -> list[str]:
 
 
 def _human_desc(question: str) -> str:
-    """人导入的维度没有服务端定义 —— 用**人的原话**当它的定义。
+    """Human-imported dimensions have no server-side definition —— use **the human's original wording** as its definition.
 
-    不这么做，验题闸 0b（`_relevant`：题面与维度定义的关键词重合）必然判
-    不相关。实测（服务器 e2e）：维度 `plant_success_rate` 的 desc 退回英文
-    原名，题面是中文「Cloud9 在 Lotus 图上每回合的爆弹成功率」，中英文
-    token 零重合 → 两次生成 **2/2 全被这道闸拦下**，出题一次都没成功。
+    Without this, validation gate 0b (`_relevant`: keyword overlap between question text and dimension definition) would inevitably
+    judge it irrelevant. Observed (server e2e): the dimension `plant_success_rate`'s desc fell back to the English
+    original name, while the question text was phrased differently ("Cloud9's per-round plant success rate on Lotus"), with zero
+    token overlap → both generations were **2/2 rejected by this gate**, and question generation never succeeded once.
 
-    括号要**去掉而不是截断**：v1 的老教训 —— 截到括号前会把「成功率」
-    这个词弄丢，剩下的「…爆弹」照样跟题面对不上。
+    Parentheses must be **removed, not truncated**: an old v1 lesson —— truncating before the parenthesis would lose
+    the word "success rate", leaving "…plant", which still would not match the question text.
     """
     t = str(question or "").strip()
-    t = re.sub(r"[（(][^）)]*[）)]", "", t)          # 去括号及其中内容
-    t = re.sub(r"^(请问|帮我|我想知道|麻烦|请)[，,：:\s]*", "", t)
+    t = re.sub(r"[（(][^）)]*[）)]", "", t)          # remove parentheses and their contents
+    t = re.sub(r"^(please|pls|hi|hey|can you|could you|i want to know|i wonder|help me)\b[，,：:\s]*", "", t, flags=re.I)
     t = re.sub(r"[？?。！!]+$", "", t)
-    t = re.sub(r"(是多少[^，,。？?]{0,6}|是什么[^，,。？?]{0,6}"
-               r"|有多少[^，,。？?]{0,6}|怎么算|如何计算)$", "", t)
-    t = re.sub(r"\s+", " ", t).strip(" ，,、的")
+    t = re.sub(r"(\?+$|^how many\b[^?]{0,40}$|^what (?:is|was|are|were)\b[^?]{0,40}$"
+               r"|^how (?:do (?:you|we)|would (?:you|we)|to)\b[^?]{0,40}$"
+               r"|^how (?:is|was) it calculated\b[^?]{0,40}$)", "", t, flags=re.I)
+    t = re.sub(r"\s+", " ", t).strip(" ，,、")
     return t
 
 
 def _relevant(point: str, desc: str) -> bool:
-    """题面与维度定义是否相关 —— 伴学的 `relevant`，但**确定性**地判。
+    """Is the question text relevant to the dimension definition —— the study companion's `relevant`, but judged **deterministically**.
 
-    伴学这一步是**第二个 LLM 的意见**（所以它还得再加一致性标志防自相矛盾）。
-    MVE 用关键词重合：
-      · 维度定义「手枪局胜率」+ 题面「Cloud9 的手枪局胜率」   → 相关 ✅
-      · 维度定义「置信度标签」+ 题面「Cloud9 的强起局胜率」   → 不相关 ❌
-    实测第三轮就是第二种：模型把强起局胜率的 dimension 填成了
-    `pattern_confidence`，跑得出值（"moderate"）、维度也合法 ——
-    只有这道闸能挡住它。
+    The study companion's step is a **second LLM's opinion** (hence it needs an extra consistency flag against self-contradiction).
+    MVE uses keyword overlap:
+      · dimension definition "pistol-round win rate" + question text "Cloud9's pistol-round win rate" → relevant ✅
+      · dimension definition "confidence label" + question text "Cloud9's force-buy win rate" → irrelevant ❌
+    The third run hit the second case: the model filled the force-buy win rate question's dimension
+    as `pattern_confidence`, which yields a value ("moderate") and is a legal dimension ——
+    only this gate can stop it.
     """
     def toks(t: str) -> set[str]:
         en = {w for w in re.findall(r"[a-z_]{4,}", t.lower())}
@@ -280,7 +284,7 @@ def _relevant(point: str, desc: str) -> bool:
 
 
 def _known_entity_values() -> set[str]:
-    """库里出现过的**具体实体值**（图名/队名/选手/赛事号），用来抽象化维度定义。"""
+    """The **specific entity values** seen in the database (map names / team names / players / series ids), used to abstract dimension definitions."""
     out: set[str] = set()
     try:
         import json as _json
@@ -296,26 +300,26 @@ def _known_entity_values() -> set[str]:
 
 
 def _abstract_desc(pt: str, d: str) -> str:
-    """把评分点文案里的**具体实体值**剥掉，只留抽象口径。
+    """Strip the **specific entity values** from a rubric point text, keeping only the abstract convention.
 
-    ⚠️ 踩到的坑：维度定义直接拿种子题 rubric 的 `point`（如
-    「Corrode 上 Cloud9 的胜率」「Corrode 回合数」），那是**绑定了 GRID 那场
-    数据**的文案。换库出题后，题面是「Karmine Corp 在 Abyss 的回合胜率」，
-    跟定义**一个词都不重合** → 验题闸 0b 判"不相关"，连出 2 次全废。
+    ⚠️ Pitfall hit: the dimension definition directly took a seed question's rubric `point` (e.g.
+    "Cloud9's win rate on Corrode" / "Corrode round count"), which is text **bound to that GRID-era
+    dataset**. After a database swap, the question text becomes "Karmine Corp's round win rate on Abyss",
+    with **zero word overlap** against the definition → validation gate 0b judges it "irrelevant", and 2 consecutive runs were wasted.
 
-    维度定义必须是**抽象口径**（"某队在某图的胜率"），不能是某道题的评分点。
-    剥值后仍能挡真错配（题面说"强起局胜率"、维度填"置信度标签"照样不相关）。
+    A dimension definition must be an **abstract convention** ("a team's win rate on a map"), not one question's rubric point.
+    After stripping values, it still blocks real mismatches (question text says "force-buy win rate", dimension filled as "confidence label" is still irrelevant).
     """
     out = str(pt or "")
     for v in _known_entity_values():
         if len(v) >= 3 and v in out:
             out = out.replace(v, "")
-    # 兜底规则：**大写开头 / 含数字的英文词**基本都是实体名（Corrode、Cloud9、
-    # NRG、2843069），而口径词是中文。用它剥 catalog 里没有的旧实体
-    # （换库后 GRID 那批图名/队名已不在 catalog 里，上面那步剥不掉）。
+    # Fallback rule: **capitalized / digit-containing English words** are almost all entity names (Corrode, Cloud9,
+    # NRG, 2843069), while convention words are lowercase common nouns. Use it to strip old entities not in the catalog
+    # (after a database swap, the GRID-era map/team names are no longer in the catalog, so the step above cannot strip them).
     out = re.sub(r"\b[A-Z][A-Za-z0-9_]{2,}\b", "", out)
     out = re.sub(r"\b\d{4,}\b", "", out)
-    # 顺带剥掉当前锚点（可能不在 catalog 里，比如刚换的库）
+    # Also strip the current anchors (which may not be in the catalog, e.g. a freshly swapped database)
     try:
         import anchor as _anc
         for v in (_anc.series(), _anc.team(), _anc.map_name()):
@@ -323,73 +327,77 @@ def _abstract_desc(pt: str, d: str) -> str:
                 out = out.replace(str(v), "")
     except Exception:
         pass
-    out = re.sub(r"[（(]\s*[）)]", "", out)          # 剥空的括号
+    out = re.sub(r"[（(]\s*[）)]", "", out)          # strip empty parentheses
     out = re.sub(r"\s+", " ", out).strip()
-    # ⚠️ 第二层坑：剥完实体会**留下孤立虚词**，定义退化成「上 的胜率」——
-    # 看上去还在，实际关键词只剩"上/的"，闸 0b 拿它跟题面比 bigram 照样
-    # 判不相关（实测连废 2 次）。虚词必须一并清掉，只留口径实词。
+    # ⚠️ Second pitfall: stripping entities **leaves orphaned function words**, degrading the definition to "on the win rate" ——
+    # it looks present, but the only keywords left are "on / of", and gate 0b still
+    # judges it irrelevant against the question text's bigrams (2 consecutive runs wasted in practice). Function words must be cleared too,
+    # keeping only the convention's content words.
     for _ in range(3):
-        out2 = re.sub(r"(^| )[在的上中里下与和及为对把被而、，,](?= |$)", " ", out)
+        out2 = re.sub(r"(^| )(in|on|at|of|the|a|an|for|to|by|with|and|or|is|are|was|were|"
+                      r"as|per|from|during|that|this)(?= |$)", " ", out, flags=re.I)
         out2 = re.sub(r"\s+", " ", out2).strip()
         if out2 == out:
             break
         out = out2
-    out = re.sub(r"\s+", " ", out).strip(" 的·、，,。-—")
+    # A possessive left stranded by the entity strip ("'s") is a function word too.
+    out = re.sub(r"(^|\s)(?:'s|s')\s*", " ", out, flags=re.I)
+    out = re.sub(r"\s+", " ", out).strip(" ·,。-—'")
     return out or d
 
 
 def _suggest_dims(point: str, specs: dict[str, dict[str, Any]],
                   limit: int = 3) -> list[str]:
-    """按题面文案推荐最像的几个维度 —— 只说「换一个维度」模型换不对。"""
+    """Recommend the few dimensions most similar to the question text —— just saying "pick another dimension" does not make the model switch correctly."""
     hits = [d for d, r in specs.items()
             if _relevant(point, str(r.get("desc") or d))]
     return sorted(hits)[:limit]
 
 
 def _dim_tag(d: str, specs: dict[str, dict[str, Any]]) -> str:
-    """维度后面那句口径声明（直接进 prompt，让模型一次写对，别靠重试）。"""
+    """The convention declaration after a dimension (goes straight into the prompt, so the model gets it right in one shot instead of relying on retries)."""
     rec = specs.get(d) or {}
     kind = str(rec.get("kind") or "count")
     if kind == "percent":
         ex = str(rec.get("example") or "")
         if rec.get("by_tool") and not rec.get("by_sql"):
-            return ("【百分比：走工具时必须 percent=true，value_path 指 .num、"
-                    f"base_path 指 .denom{f'（现有题 {ex}）' if ex else ''}】")
+            return ("【Percentage: the tool path requires percent=true, value_path pointing at .num, "
+                    f"base_path pointing at .denom{f' (existing question {ex})' if ex else ''}】")
         if rec.get("by_sql") and not rec.get("by_tool"):
-            return ("【百分比：走 SQL 时 value 列必须已经是算好的百分比"
-                    "（如 ROUND(AVG(...)*100,1)），分母列作样本量"
-                    f"{f'（现有题 {ex}）' if ex else ''}】")
-        return "【百分比：必须同时给分母】"
+            return ("【Percentage: on the SQL path the value column must already be a computed percentage"
+                    " (e.g. ROUND(AVG(...)*100,1)), with the denominator column as the sample size"
+                    f"{f' (existing question {ex})' if ex else ''}】")
+        return "【Percentage: a denominator must be given as well】"
     if kind == "ratio":
-        return "【比值：不要给分母】"
+        return "【Ratio: do not give a denominator】"
     if kind == "label":
-        return "【枚举标签：值照抄工具返回的字段，不要算】"
-    return "【计数：整数】"
+        return "【Enum label: copy the value from the tool's returned field, do not compute】"
+    return "【Count: integer】"
 
 
 # --------------------------------------------------------------------------
-# 第 1 段：口径骨架由**服务端**给（照 resolve_target_question_type）
+# Stage 1: the convention skeleton is given by the **server** (mirrors resolve_target_question_type)
 # --------------------------------------------------------------------------
-# SQL 路径只暴露这几张表（其余表列太多，全给会把 prompt 撑爆）
+# The SQL path only exposes these tables (the other tables have too many columns; giving them all would bloat the prompt)
 _SQL_TABLES = ("rounds", "games", "series", "agg_first_blood_stats",
                "agg_team_game_stats", "agg_team_series_stats",
                "agg_team_map_stats", "agg_player_series_stats")
 _COLS_CACHE: dict[str, list[str]] = {}
-# 列多于此数就只留「跟口径有关」的列
+# When a table has more columns than this, keep only the "convention-relevant" ones
 _KEEP = ("win", "rate", "round", "kill", "death", "kast", "adr", "map", "team",
          "series", "pistol", "eco", "fb_", "clutch", "plant", "defuse",
          "streak", "score", "side", "_id", "name")
 
 
 async def _sql_catalog() -> str:
-    """SQL 路径的真实表/列（从 information_schema 拉，绝不手写）。
+    """The real tables/columns for the SQL path (pulled from information_schema, never handwritten).
 
-    跟工具签名同理：**不把真实列名给它，它只能猜**。
-    实测不给表结构时，模型写出的 SQL 有三分之一返回 0 行 —— 不是逻辑错，
-    是它用了不存在的列名。
+    Same as with tool signatures: **without the real column names, it can only guess**.
+    Observed: without the table structure, a third of the model's SQL returned 0 rows —— not a logic error,
+    but it used non-existent column names.
 
-    列名顺便缓存进 `_COLS_CACHE`：验题报「0 行」时要用它**点名**哪个标识符
-    不是列，光说「照抄表结构」模型改不动（实测连改三轮都加同一个不存在的列）。
+    Column names are cached into `_COLS_CACHE` along the way: when validation reports "0 rows", use it to **name**
+    which identifier is not a column; just saying "copy the table structure" does not move the model (observed: three consecutive rounds all added the same non-existent column).
     """
     global _COLS_CACHE
     inlist = ", ".join(f"'{t}'" for t in _SQL_TABLES)
@@ -398,7 +406,7 @@ async def _sql_catalog() -> str:
             "SELECT table_name, column_name FROM information_schema.columns "
             f"WHERE table_name IN ({inlist}) ORDER BY table_name, ordinal_position")
     except Exception as e:                                   # pragma: no cover
-        return f"（表结构探测失败：{type(e).__name__}）"
+        return f"(table-structure probe failed: {type(e).__name__})"
     from collections import defaultdict
     cols: dict[str, list[str]] = defaultdict(list)
     for t, c in (res.get("rows") or []):
@@ -425,12 +433,12 @@ subquery subquery1 subquery2 subquery3 derived alias
 
 
 def _bad_columns(sql: str, table: str = "") -> list[str]:
-    """SQL 里那些**不是目标表列名**的标识符 —— 多半是模型自己造的列。
+    """The identifiers in the SQL that **are not column names of the target table** —— most likely columns invented by the model.
 
-    ⚠️ 两个坑（都踩过）：
-      · 表名本身不能算坏列 —— 不然 `FROM rounds` 会把 `rounds` 报成坏列。
-      · 必须**只对着 FROM 那张表判**，不能用所有表的并集：`team_name` 在
-        agg_team_game_stats 里存在，但在 rounds 里没有，用并集就漏掉了它。
+    ⚠️ Two pitfalls (both hit before):
+      · Table names themselves must not count as bad columns —— otherwise `FROM rounds` would report `rounds` as a bad column.
+      · Must **judge only against the FROM table**, not the union of all tables: `team_name` exists in
+        agg_team_game_stats but not in rounds; using the union would miss it.
     """
     if not _COLS_CACHE:
         return []
@@ -439,7 +447,7 @@ def _bad_columns(sql: str, table: str = "") -> list[str]:
     for cs in _COLS_CACHE.values():
         allcols |= set(cs)
     tables = set(_COLS_CACHE) | set(_SQL_TABLES)
-    # 先去掉字符串字面量，否则 'Cloud9' / 'Lotus' 会被当成标识符
+    # Strip string literals first, otherwise 'Cloud9' / 'Lotus' would be treated as identifiers
     stripped = re.sub(r"'[^']*'", " ", sql or "")
     toks = set(re.findall(r"[a-z_][a-z0-9_]*", stripped.lower()))
     cand = [t for t in toks
@@ -452,16 +460,16 @@ def _bad_columns(sql: str, table: str = "") -> list[str]:
 
 
 async def _server_skeleton() -> str:
-    """图谱 + **真实工具签名与返回结构**给出的「能问什么」。
+    """The "what can be asked" given by the knowledge graph + **real tool signatures and return structures**.
 
-    伴学不让 LLM 选题型（那是 pedagogical data）；MVE 同理：
-    **哪些维度存在、从哪出、工具怎么传参**，全部由服务端声明，不由模型想象。
+    The study companion does not let the LLM pick question types (that is pedagogical data); MVE likewise:
+    **which dimensions exist, where they come from, how tools take arguments** are all declared by the server, not imagined by the model.
 
-    为什么必须连签名和结构一起给：实测第一次跑，模型出的
-    `pattern_detection_report → key_metrics.economy.pistol.num` 是**真路径**
-    （现有题就是这么取的），却因为没传 `team_name` 拿到 `{"error": ...}`，
-    被验题判成"无解"。跟 `action_code` 那条路的教训完全一样：
-    **不把真实签名和返回结构给它，它只能猜参数名**。
+    Why signatures and structures must be given together: on the very first run, the model's
+    `pattern_detection_report → key_metrics.economy.pistol.num` was a **real path**
+    (that is how the existing question fetches it), yet it got `{"error": ...}` for not passing `team_name`,
+    and was judged "unsolvable" by validation. Exactly the same lesson as the `action_code` path:
+    **without the real signature and return structure, it can only guess argument names**.
     """
     import action_code
     specs = _dim_specs()
@@ -477,113 +485,113 @@ async def _server_skeleton() -> str:
             cols = det.get("value_columns") or []
             tag = _dim_tag(d, specs)
             if prod and vp:
-                lines.append(f"  {d} → 工具 {'/'.join(prod)}，路径 {vp} {tag}")
+                lines.append(f"  {d} → tool {'/'.join(prod)}, path {vp} {tag}")
             elif prod:
-                lines.append(f"  {d} → 工具 {'/'.join(prod)} {tag}")
+                lines.append(f"  {d} → tool {'/'.join(prod)} {tag}")
             else:
-                # SQL 维度：必须把**表 / 列 / 口径形态 / 典型错法**全给出来。
+                # SQL dimensions: the **table / columns / convention shape / typical mistakes** must all be given.
                 #
-                # 此前这里只写一句「需自己写 SQL，取第 N 列」，把 detail 里
-                # 已经存在的 tables / columns_by_table / semantics /
-                # typical_errors 全吞了。于是模型只能靠猜 —— 实测三次生成
-                # 全部写成 `FROM match_summary_report`（那是**工具名**）
-                # 和 `MAX(conversion.fb_conv)`（把**维度名**当列名）。
-                # 声明一直都在图谱里，只是没给它看。
+                # Previously this only said "write your own SQL, take column N", swallowing the tables /
+                # columns_by_table / semantics /
+                # typical_errors that already existed in detail. So the model could only guess —— all three observed
+                # generations wrote `FROM match_summary_report` (that is a **tool name**)
+                # and `MAX(conversion.fb_conv)` (treating the **dimension name** as a column name).
+                # The declarations were in the knowledge graph all along; they just were not shown to it.
                 #
-                # 同构：伴学的知识点节点自带 question_types 与
-                # typical_misconceptions，出题时**照节点声明走**
-                # （question_type_mapping.py:131 "map it without LLM input"）。
+                # Isomorphic: the study companion's knowledge-point nodes come with question_types and
+                # typical_misconceptions, and question generation **follows the node declarations**
+                # (question_type_mapping.py:131 "map it without LLM input").
                 tbl = (det.get("tables") or ["?"])[0]
                 cbt = det.get("columns_by_table") or {}
-                cols_txt = "、".join((cbt.get(tbl) or det.get("columns") or []))
+                cols_txt = ", ".join((cbt.get(tbl) or det.get("columns") or []))
                 sem = str(det.get("semantics") or "").strip()
                 lines.append(
-                    f"  {d} → 自己写 SQL：FROM **{tbl}**"
-                    + (f"，可用列：{cols_txt}" if cols_txt else "")
-                    + (f"；口径形态：{sem[:80]}" if sem else "")
+                    f"  {d} → write your own SQL: FROM **{tbl}**"
+                    + (f", available columns: {cols_txt}" if cols_txt else "")
+                    + (f"; convention shape: {sem[:80]}" if sem else "")
                     + f" {tag}")
                 for e in (det.get("typical_errors") or [])[:2]:
-                    lines.append(f"      典型错法：{str(e)[:90]}")
-                # 建模声明（表节点，来自 VLML 的 DATA_MODEL.md / DERIVED_TABLES.md
-                # / column_definitions.yaml）：一行是什么、每列是什么意思。
-                # 只给列名的后果已经实测过：模型把 fb_player 写成 player_name，
-                # critique 每轮都把真名列出来，它照样按常识编三次。
+                    lines.append(f"      typical mistake: {str(e)[:90]}")
+                # Modeling declaration (table nodes, from VLML's DATA_MODEL.md / DERIVED_TABLES.md
+                # / column_definitions.yaml): what a row is, what each column means.
+                # The consequence of giving only column names has been observed: the model wrote fb_player as player_name,
+                # with the critique listing the real columns every round, and it still fabricated from common sense three times.
                 tnode = g.nodes.get(f"table:{tbl}")
                 tdet = (getattr(tnode, "detail", None) or {})
                 if tdet.get("pk"):
                     lines.append(
-                        f"      {tbl} 主键：{'、'.join(tdet['pk'])}"
-                        f"（一行 = {tdet.get('grain') or tdet.get('grain_doc') or ''}）")
+                        f"      {tbl} primary key: {', '.join(tdet['pk'])}"
+                        f" (one row = {tdet.get('grain') or tdet.get('grain_doc') or ''})")
                 desc = tdet.get("column_desc") or {}
                 named = [c for c in (cbt.get(tbl) or det.get("columns") or [])
                          if c in desc]
                 if named:
-                    lines.append("      列的含义："
-                                 + "；".join(
+                    lines.append("      column meanings: "
+                                 + ";".join(
                                      f"{c}={str((desc[c] or {}).get('desc') or '')[:50]}"
                                      for c in named[:5]))
     except Exception as e:                                   # pragma: no cover
-        lines.append(f"（图谱不可用：{type(e).__name__}）")
+        lines.append(f"(knowledge graph unavailable: {type(e).__name__})")
 
-    # 真实签名（从函数反射，绝不手写）
+    # Real signatures (reflected from functions, never handwritten)
     sigs = "\n".join(f"  await mcp.{s}"
                      for s in action_code.TOOL_SIGNATURES.values())
-    # 真实返回结构（probe 缓存）
+    # Real return structures (probe cache)
     try:
         schemas = await action_code.probe_schemas(list(action_code.TOOL_SIGNATURES))
         blocks = []
         for t, paths in schemas.items():
             shown = "\n".join(f"    {p}" for p in paths[:40])
-            blocks.append(f"  {t} 返回结构（前 {min(40, len(paths))} 条）：\n{shown}")
+            blocks.append(f"  {t} return structure (first {min(40, len(paths))} entries):\n{shown}")
         struct = "\n".join(blocks)
     except Exception as e:                                   # pragma: no cover
-        struct = f"（结构探测失败：{type(e).__name__}）"
+        struct = f"(structure probe failed: {type(e).__name__})"
 
     dims = sorted(specs)
-    return ("""维度（服务端声明）：
+    return ("""Dimensions (declared by the server):
 """ + "\n".join(lines) + f"""
 
-★ dimension 字段**只能**从下面这个枚举里挑一个，一字不改地填。
-  不要填工具名、不要填中文、不要自己造（实测模型会把工具名当成维度填进去）：
+★ The dimension field **may only** pick one value from the enum below, copied verbatim.
+  Do not fill in tool names, do not fill in Chinese, do not invent your own (observed: the model fills tool names in as dimensions):
 """ + ", ".join(dims) + """
 
-工具真实签名（照抄，参数名写错就拿不到数据）：
+Real tool signatures (copy verbatim; a wrong argument name gets no data):
 """ + sigs + """
 
-工具返回结构（叶子路径，**路径必须照抄**）：
+Tool return structures (leaf paths, **paths must be copied verbatim**):
 """ + struct + """
 
-SQL 路径可用的表与**真实列名**（列名写错就是 0 行）：
+Tables and **real column names** available on the SQL path (a wrong column name means 0 rows):
 """ + await _sql_catalog())
 
 
-_PROPOSE_SYSTEM = """你是出题 agent，为「数据分析 agent」出一道**可以用数据回答**的题。
+_PROPOSE_SYSTEM = """You are a question-generation agent. Produce one **data-answerable** question for a "data-analysis agent".
 
-硬规则（违反就是坏题）：
-1. 你出的**不是答案**，是**取数配方**。每个评分点必须给出下列之一：
-   a) `sql`：一条以 SELECT 开头的 SQL（duckdb，不支持 CTE），并说明取第几列；
-   b) `tool` + `tool_args` + `value_path`：调哪个工具、传什么参数、按哪条点分路径取值。
-2. **绝对不要**在返回里写答案的数值。数值由服务端跑你的配方去拿 ——
-   你写的数字一律视为幻觉，写了就判废。
-3. 只能使用下面「能问什么」里列出的维度/工具/表。不要发明不存在的字段。
-4. 只出能在本场数据（series_id={SERIES}）里取到值的题。
+Hard rules (violating them makes a broken question):
+1. What you produce is **not the answer**, it is a **data-retrieval recipe**. Every rubric point must give one of the following:
+   a) `sql`: a SQL statement starting with SELECT (duckdb, no CTE support), plus which column to take;
+   b) `tool` + `tool_args` + `value_path`: which tool to call, what arguments to pass, which dot path to read the value from.
+2. **Never** write the answer's value in the response. Values are fetched by the server running your recipe ——
+   any number you write is treated as a hallucination; writing one gets the question rejected.
+3. You may only use the dimensions/tools/tables listed under "What can be asked" below. Do not invent non-existent fields.
+4. Only produce questions whose values can be retrieved in this match's data (series_id={SERIES}).
 
-能问什么（服务端声明）：
+What can be asked (declared by the server):
 {skeleton}
 
-可用工具：{tools}
+Available tools: {tools}
 
-输出 JSON：
+Output JSON:
 {{
-  "topic_id": "英文小写下划线短 id",
-  "question": "题面（中文，含口径说明：队伍整体还是某队、哪张图、什么分母）",
+  "topic_id": "short lowercase-underscore English id",
+  "question": "question text (English, including the convention note: team overall or a specific team, which map, what denominator)",
   "difficulty": 1-4,
-  "requires_tools": ["用到的工具"],
+  "requires_tools": ["tools used"],
   "rubric": [
     {{
-      "point": "评分点文案",
+      "point": "rubric point text",
       "subject": {{"series": "{SERIES}", "team": "{C9}"}},
-      "dimension": "从上面 ★ 枚举里挑一个，如 pistol_win_rate",
+      "dimension": "pick one from the ★ enum above, e.g. pistol_win_rate",
       "weight": 50,
       "min_base": 1,
       "answer_spec": {{
@@ -593,26 +601,26 @@ _PROPOSE_SYSTEM = """你是出题 agent，为「数据分析 agent」出一道**
     }}
   ]
 }}
-subject 的键只能是 series / team / map / player 这类真实维度，不要编。
-★ subject 必须把题面里的**限定条件全写进去**：题面提到某张图就写
-  "map": "Lotus"，提到某个队员就写 "player": "名字"。
-  只写 series + team 两个键（漏掉 map / player）会撞上已有的题被判废，
-  这是最常见的废题原因。
+subject's keys may only be real dimensions such as series / team / map / player; do not invent them.
+★ subject must include **all qualifiers from the question text**: if the question text mentions a map, write
+  "map": "Lotus"; if it mentions a specific player, write "player": "name".
+  Writing only the series + team keys (missing map / player) will collide with an existing question and get rejected;
+  this is the most common reason for rejection.
 
-口径规则（服务端定，错了就是废题）—— 两条路径的百分比**不是一回事**：
-· 走**工具**且维度标【百分比】：必须 "percent": true，
-  value_path 指到 .num、base_path 指到 .denom。裁判会自己算 num/denom*100。
-  ★ 只给 .num 不给 .denom = 问胜率却取了个数 = 废题。
-· 走 **SQL** 且维度标【百分比】：value_column 那一列必须**已经是算好的百分比**
-  （写成 ROUND(AVG(CASE WHEN ... THEN 1.0 ELSE 0.0 END)*100, 1)），
-  base_column 指到样本量那一列。裁判**不会再换算**。
-  ★ 只写 COUNT(*) 当分子 = 废题。
-· 标【计数】【比值】的维度不要给分母；标【枚举标签】的值照抄工具返回。
+Convention rules (decided by the server; getting them wrong makes a broken question) —— the two paths' percentages are **not the same thing**:
+· Via **tool** and the dimension is marked 【Percentage】: you must set "percent": true,
+  with value_path pointing at .num and base_path pointing at .denom. The referee computes num/denom*100 itself.
+  ★ Giving only .num without .denom = asking for a win rate but fetching a count = broken question.
+· Via **SQL** and the dimension is marked 【Percentage】: the value_column must **already be a computed percentage**
+  (written as ROUND(AVG(CASE WHEN ... THEN 1.0 ELSE 0.0 END)*100, 1)),
+  with base_column pointing at the sample-size column. The referee **will not convert again**.
+  ★ Writing just COUNT(*) as the numerator = broken question.
+· Dimensions marked 【Count】【Ratio】 take no denominator; values marked 【Enum label】 are copied from the tool's return.
 """
 
 
 def _subject_key_of(col: str) -> str:
-    """列名 → 能当 subject 键的语义（照图谱里已有的 subject 命名）。"""
+    """Column name → semantics that can serve as a subject key (following existing subject naming in the knowledge graph)."""
     c = str(col or "").lower()
     if "player" in c:
         return "player"
@@ -634,10 +642,10 @@ _DIM_MASTERY_CACHE: dict[str, dict[str, Any]] = {}
 
 
 def _dim_mastery() -> dict[str, dict[str, Any]]:
-    """维度级掌握度（带缓存）。数据源 = **exam_log**（考核，撤了支架的真水平）。
+    """Dimension-level mastery (cached). Data source = **exam_log** (the exam, true ability without scaffolding).
 
-    ⚠️ 不能用 run_log：练习是带图谱跑的，覆盖率恒 100% 的贴顶假平线，
-    量的是支架不是能力（项目核心设计）。拿它当掌握度等于自欺。
+    ⚠️ run_log must not be used: practice runs with the knowledge graph, so coverage is a fake flat line pinned at 100%,
+    measuring the scaffolding rather than the ability (a core project design). Using it as mastery is self-deception.
     """
     if _DIM_MASTERY_CACHE:
         return _DIM_MASTERY_CACHE
@@ -650,13 +658,13 @@ def _dim_mastery() -> dict[str, dict[str, Any]]:
 
 
 def _table_rows(table: str) -> int:
-    """当前库里这张表有几行（带缓存，一个进程只查一次）。
+    """How many rows this table has in the current database (cached, one query per process).
 
-    ⚠️ 换数据源后**图谱里指向的表可能是空的**：rib/vlr 没有 kill 事件，
-    于是 `agg_first_blood_stats` 0 行、`base_events.is_kill` 0 行 —— 而图谱
-    是 GRID 时代建的，维度节点照旧指向它。挑空表出题，模型写得再对也跑不出数
-    （实测连出 2 次全被验题以"配方跑出来是空"判废）。
-    所以挑题点前必须先确认这张表在当前库里**真的有数据**。
+    ⚠️ After a data-source swap, **tables referenced in the knowledge graph may be empty**: rib/vlr have no kill
+    events, so `agg_first_blood_stats` has 0 rows and `base_events.is_kill` has 0 rows —— while the knowledge graph
+    was built in the GRID era, and its dimension nodes still point at them. Picking an empty table for question generation means the model
+    can write it perfectly and still yield no data (observed: 2 consecutive generations rejected by validation for "the recipe ran empty").
+    So before picking a question point, first confirm this table **really has data** in the current database.
     """
     t = str(table or "").strip()
     if not t:
@@ -682,18 +690,18 @@ _SEED_SQL_CACHE: dict[str, str] = {}
 
 
 def _seed_skeleton(dim: str) -> str:
-    """图谱没 recipe 时的**骨架兜底**：取种子题里那条人审过的正确 SQL。
+    """**Skeleton fallback** when the knowledge graph has no recipe: take the human-reviewed correct SQL from the seed question.
 
-    ⚠️ 这是伴学 `examples` 的同构位 —— **给正确例题让模型照抄**，而不是事后
-    拦它。此前走岔了：图谱的 `recipe` 只有部分维度有（map_win_rate 是空），
-    骨架一空模型就只能自己发明 WHERE，于是把 `winning_team_name` 写进
-    WHERE、胜率恒 100%，题是废的；我为此加了一道"口径自噬"闸去事后拦，
-    结果模型连着两轮写出**一模一样**的 SQL —— 事后拦不动，只能事前给对。
+    ⚠️ This is the isomorphic slot of the study companion's `examples` —— **give correct example questions for the model to copy**, rather than blocking it afterward.
+    A previous wrong turn: the knowledge graph's `recipe` only exists for some dimensions (map_win_rate is empty), and
+    with an empty skeleton the model could only invent its own WHERE, so it wrote `winning_team_name` into the
+    WHERE, making the win rate always 100% and the question dead; for that I added a "convention self-cannibalization" gate to block it afterward,
+    and the model wrote **identical** SQL for two consecutive rounds —— blocking afterward does not work; only giving the right thing beforehand does.
 
-    而**正确写法一直在种子题里**（tasks.py:229）：
-        SELECT ROUND(AVG(CASE WHEN winning_team_name='<队伍>' ...)), COUNT(*)
-        FROM rounds WHERE series_id='<赛事>' AND map_name='<图>'
-    WHERE 里干干净净，胜负交给 CASE 判。它是人审过、跑得出数的。
+    And **the correct formulation has been in the seed question all along** (tasks.py:229):
+        SELECT ROUND(AVG(CASE WHEN winning_team_name='<team>' ...)), COUNT(*)
+        FROM rounds WHERE series_id='<series>' AND map_name='<map>'
+    The WHERE is clean, with win/loss decided by CASE. It is human-reviewed and yields data.
     """
     d = str(dim or "").strip()
     if not d:
@@ -713,7 +721,7 @@ def _seed_skeleton(dim: str) -> str:
                     best = _s
         if best:
             out = best
-            # 脱敏：具体实体值换成 '?'（骨架只给形状，值要模型自己去库里查）
+            # Desensitize: replace specific entity values with '?' (the skeleton only gives shape; values are for the model to look up in the database)
             try:
                 import anchor as _anc
                 for v in (_anc.series(), _anc.team(), _anc.map_name(), SERIES, C9):
@@ -735,13 +743,13 @@ _SCOPED_CACHE: dict[tuple[str, str], list[str] | None] = {}
 
 
 def _scoped_values(kind: str, series_id: str) -> list[str] | None:
-    """**这场比赛里真有的**实体值。查不到/不适用就返回 None（表示不限定）。
+    """Entity values that **really exist in this match**. Returns None when not found / not applicable (meaning "unconstrained").
 
-    ⚠️ 第三道可解性校验（前两道：表非空、列存在）。`_subject_values()` 给的
-    是**全库**的值域，不等于这场比赛打过 —— 实测：1058 只打了 Sunset /
-    Haven / Summit，却从全库 7 张图里挑出 **Abyss**，于是
-    `WHERE series_id='1058' AND map_name='Abyss'` 0 回合 → 题无解，连出 3 次
-    全废。所以值必须再按 series 收一次口。
+    ⚠️ The third solvability check (the first two: non-empty table, existing columns). What `_subject_values()` gives
+    is the **whole-database** value domain, which does not equal what this match played —— observed: 1058 played only Sunset /
+    Haven / Summit, yet **Abyss** was picked from the whole database's 7 maps, so
+    `WHERE series_id='1058' AND map_name='Abyss'` had 0 rounds → the question is unsolvable, and 3 consecutive generations were wasted.
+    So values must be scoped once more by series.
     """
     k = str(kind or "").strip()
     sid = str(series_id or "").strip()
@@ -780,23 +788,23 @@ def _scoped_values(kind: str, series_id: str) -> list[str] | None:
 def _graph_blueprint(difficulty: int = 2,
                      avoid: set[tuple[str, str]] | None = None,
                      prefer: str = "") -> dict[str, Any]:
-    """服务端**从图谱挑出题点** —— 照伴学，题点不由 LLM 选。
+    """The server **picks the question point from the knowledge graph** —— per the study companion, the question point is not chosen by the LLM.
 
-    伴学的做法（`question_type_mapping.py:131` 的 docstring 说得最直白）：
+    The study companion's approach (stated most bluntly in `question_type_mapping.py:131`'s docstring):
         "Choose the first declared teaching style and **map it without
          LLM input**. Seed ordering is preserved as the author-provided
          priority."
-    即：**知识点节点自带 question_types / difficulty / typical_misconceptions，
-    出题器选中那个节点，题型与口径由节点声明决定**，模型只负责把题面写出来。
+    I.e.: **knowledge-point nodes come with question_types / difficulty / typical_misconceptions,
+    and the question generator picks that node; the question type and convention are decided by the node declarations**, with the model only responsible for writing the question text.
 
-    MVE 同构：图谱的维度节点 detail 里已经有 `tables` / `columns_by_table` /
-    `semantics` / `recipe` / `typical_errors`，服务端据此挑定
-    「哪个维度 × 哪个 subject 键 × 哪张表 × 哪些列 × 什么口径形态」，
-    把这些**写死进 prompt**，模型只填 WHERE 的值和题面文案。
+    MVE isomorphic: the knowledge graph's dimension nodes' detail already has `tables` / `columns_by_table` /
+    `semantics` / `recipe` / `typical_errors`, and the server uses them to fix
+    "which dimension × which subject key × which table × which columns × what convention shape",
+    **hardcoding these into the prompt**, with the model only filling in the WHERE values and question text.
 
-    为什么必须做到这一步（实测教训）：只把"真实列清单"放进 critique 是不够的
-    —— 三次生成里 critique 每次都把 `fb_player` 列在真实列里，模型照样坚持写
-    不存在的 `player_name`。**让它挑，它就会按常识编**；唯一可靠的办法是不让它挑。
+    Why this step is necessary (lessons observed): putting just the "real column list" into the critique is not enough
+    —— in three generations, the critique listed `fb_player` among the real columns every time, yet the model still insisted on writing
+    the non-existent `player_name`. **Let it pick, and it will fabricate from common sense**; the only reliable way is not to let it pick.
     """
     avoid = avoid or set()
     try:
@@ -811,10 +819,10 @@ def _graph_blueprint(difficulty: int = 2,
         det = getattr(node, "detail", None) or {}
         tables = det.get("tables") or []
         if not tables:
-            continue                     # 工具维度：口径受工具签名限制，先不拿来出新题
+            continue                     # tool dimensions: the convention is bounded by tool signatures; not used for new questions yet
         if not specs.get(d, {}).get("by_sql"):
             continue
-        # 挑**当前库里真有数据**的那张表，不是照图谱顺序取第一张
+        # Pick the table that **really has data in the current database**, not the first one in knowledge-graph order
         tbl, cols = "", []
         for t in tables:
             if _table_rows(t) == 0:
@@ -824,57 +832,57 @@ def _graph_blueprint(difficulty: int = 2,
                     or det.get("columns") or [])
             break
         if not tbl or not cols:
-            continue                 # 这个维度在当前库里没有可解的表
-        # 这个维度能撑起哪些还没用过的 subject 键
+            continue                 # this dimension has no solvable table in the current database
+        # Which unused subject keys this dimension can support
         keys = [k for k in (_subject_key_of(c) for c in cols) if k]
         for k in dict.fromkeys(keys):
-            # subject 的**值**从数据源实查（entity_catalog），不手写 ——
-            # 以前这里写 `subj[k] = "?"` 把取值权交给模型，于是永远出
-            # Cloud9 / 2843069 那一道；现在每个可填值都是一个独立候选。
+            # subject **values** are queried live from the data source (entity_catalog), not handwritten ——
+            # previously this wrote `subj[k] = "?"`, handing the choice to the model, so it always produced
+            # the same Cloud9 / 2843069 question; now every fillable value is an independent candidate.
             vals = _subject_values(k)
             if k in ("series", "team"):
-                # 已有题固定用 series=2843069 / team=Cloud9。
-                # 换**别的实体**才叫新题（也是迁移：同一知识点换个队伍算不算得出）
+                # Existing questions fix series=2843069 / team=Cloud9.
+                # Only swapping to **other entities** counts as a new question (also transfer: does the same knowledge point work with a different team)
                 vals = [v for v in vals if v not in (SERIES, C9)]
             if not vals:
                 continue
             for v in vals:
                 subj = {"series": SERIES, "team": C9}
                 subj[k] = v
-                # ---- subject 必须是**这个维度自己的粒度**，不能一律带 team ----
-                # 实测：map_rounds 只用 map_name + series_id，但 subject 里
-                # 躺着 team=Cloud9，模型照着写 `AND team_name='...'` ——
-                # rounds 表根本没有 team_name，0 行，题无解。
-                # 伴学的同构位是 `project_target_topic_evidence()`：只投影
-                # **这个知识点声明过的**字段，不多给。
+                # ---- subject must be **this dimension's own grain**; it cannot always carry team ----
+                # Observed: map_rounds only uses map_name + series_id, but subject
+                # carried team=Cloud9, and the model wrote `AND team_name='...'` accordingly ——
+                # the rounds table has no team_name at all, 0 rows, the question is unsolvable.
+                # The study companion's isomorphic slot is `project_target_topic_evidence()`: project only
+                # the fields **this knowledge point declares**, nothing more.
                 grain = set(keys) | {"series"}
                 subj = {kk: vv for kk, vv in subj.items() if kk in grain}
                 if not subj.get("series"):
                     subj["series"] = SERIES
-                # ---- 第三道可解性校验：值必须**这场比赛里真有** ----
+                # ---- Third solvability check: the value must **really exist in this match** ----
                 _sid = str(subj.get("series") or SERIES)
                 if k == "series":
-                    # 换的是**另一场比赛**，队伍也得跟着换 —— 否则
-                    # `WHERE series_id=<新场> AND team_name=Cloud9` 直接 0 行
+                    # Swapping to **another match**; the team must swap too —— otherwise
+                    # `WHERE series_id=<new match> AND team_name=Cloud9` directly gives 0 rows
                     _teams = _scoped_values("team", str(v)) or []
                     if _teams:
                         subj["team"] = C9 if C9 in _teams else _teams[0]
                 else:
                     _sc = _scoped_values(k, _sid)
                     if _sc and str(v) not in _sc:
-                        continue        # 这场没打过这张图 / 没这个队
+                        continue        # this match did not play this map / has no such team
                 key = (json.dumps(subj, sort_keys=True), d)
                 if key in avoid:
                     continue
                 score = 0
                 if prefer and d == prefer:
-                    score -= 10          # planner 指定的方向优先
-                # 难度匹配：读**图谱自带**的 difficulty（伴学的难度长在知识点
-                # 节点上，不在出题器里）。以前这里自己数 recipe 的关键字，而
-                # recipe 只是脱敏骨架、常常没有 GROUP BY，于是明明要分组的题
-                # 被判成 1 档。
+                    score -= 10          # the planner-specified direction takes priority
+                # Difficulty matching: read the knowledge graph's own **difficulty** (in the study companion, difficulty lives on the knowledge-point
+                # node, not in the question generator). Previously this counted recipe keywords itself, while
+                # recipe is just a desensitized skeleton often lacking GROUP BY, so a question that clearly needs grouping
+                # was judged tier 1.
                 own = int(det.get("difficulty") or 0)
-                if not own:                  # 老图没这个字段才退回数关键字
+                if not own:                  # only fall back to counting keywords for old graphs without this field
                     low = str(det.get("recipe") or det.get("semantics") or "").lower()
                     own = 1
                     if "over (" in low or "over(" in low or "from (select" in low:
@@ -883,13 +891,13 @@ def _graph_blueprint(difficulty: int = 2,
                         own = 3
                     elif "group by" in low:
                         own = 2
-                # 难度匹配要吃**掌握度**，不能只吃静态种子难度。
-                # 伴学 `difficulty_policy.py:94-139`：
-                #     combined = (种子难度归一 + 掌握度) / 2 → _level() → 2/3/4
-                # 即"这个知识点现在该出多难"是**种子难度与掌握度的联合函数**，
-                # 不是节点上写死的常量。MVE 此前只读 `det["difficulty"]`
-                # （种子难度），读不到"Voyager 现在会到哪" → 梯度少一维，
-                # 于是曲线只能 0→100 阶跃（实测 42 条日志）。
+                # Difficulty matching must factor in **mastery**, not just the static seed difficulty.
+                # Per the study companion `difficulty_policy.py:94-139`:
+                #     combined = (seed difficulty normalized + mastery) / 2 → _level() → 2/3/4
+                # I.e. "how hard this knowledge point should be asked now" is a **joint function of seed difficulty and mastery**,
+                # not a constant written on the node. MVE previously only read `det["difficulty"]`
+                # (seed difficulty), missing "where Voyager is now" → the gradient was one dimension short,
+                # so the curve could only step 0→100 (observed over 42 logs).
                 own_m = float((_dim_mastery().get(d) or {}).get("mastery") or 0.0)
                 try:
                     from difficulty import seed_unit as _su, _level as _lv
@@ -897,9 +905,9 @@ def _graph_blueprint(difficulty: int = 2,
                 except Exception:                        # pragma: no cover
                     fit = own
                 score += abs(fit - int(difficulty or 2)) * 3
-                # 伴学 readiness：没掌握的先来（先修没过的不给进下一层）。
-                # 掌握度低的维度在**低档**优先出，高档则不优先 —— 否则
-                # 一上来就拿不会的维度出难题，又是阶跃。
+                # Study companion readiness: what is not yet mastered comes first (a failed prerequisite does not advance to the next tier).
+                # Low-mastery dimensions take priority in **low tiers** but not in high tiers —— otherwise
+                # a hard question on an unknown dimension right away produces another step change.
                 if own_m < 0.5:
                     score += (-4 if int(difficulty or 2) <= 2 else +4)
                 cands.append((score, d, {
@@ -909,40 +917,40 @@ def _graph_blueprint(difficulty: int = 2,
                     "table": tbl,
                     "columns": list(cols),
                     "semantics": str(det.get("semantics") or ""),
-                    # ↓↓↓ 伴学 `project_target_topic_evidence()` 的 KNOWLEDGE 组。
-                    # 这四个字段**早就随脚手架照搬进图谱了**（question_types 15/15、
-                    # examples 15/15、typical_misconceptions 13/15、skills 9/15 有值），
-                    # 但出题器一直没读 —— 等于素材搬来了没人用。
+                    # ↓↓↓ the KNOWLEDGE group of the study companion's `project_target_topic_evidence()`.
+                    # These four fields **were copied into the knowledge graph along with the scaffolding** (question_types 15/15,
+                    # examples 15/15, typical_misconceptions 13/15, skills 9/15 have values),
+                    # but the question generator never read them —— the material was moved over but nobody used it.
                     "question_types": list(det.get("question_types") or []),
                     "skills": list(det.get("skills") or []),
                     "examples": list(det.get("examples") or [])[:2],
-                    # ⚠️ 误区必须用 `typical_misconceptions`（**完整版**），不是
-                    # `typical_errors`（裁过的）。实测差一条，而漏的正是最容易
-                    # 踩的那条：fb_conv 的 "agg_first_blood_stats 已是 round_id
-                    # 一行，别再 JOIN rounds 去重，会放大行数"。
+                    # ⚠️ Misconceptions must use `typical_misconceptions` (**the full version**), not
+                    # `typical_errors` (the truncated one). Observed: one item was missing, and the missing one was exactly the
+                    # easiest to trip over: fb_conv's "agg_first_blood_stats is already one row per round_id,
+                    # do not JOIN rounds to dedupe, it will inflate the row count".
                     "misconceptions": list(
                         det.get("typical_misconceptions")
                         or det.get("typical_errors") or [])[:4],
-                    # 结构骨架：**难度 4 能不能出出来，全靠给不给它**。
-                    # 实测不给骨架连试 4 次，模型每次都写成
-                    # `COUNT(*) OVER (ORDER BY ...)`（累计计数，不是连续段数）
-                    # 或把 `team_name` 写进没有这列的 rounds 表 —— 4/4 全废。
-                    # 而 gaps-and-islands 的正确形状**就在图谱里**（脱敏过的
-                    # recipe，还标了 WHERE 该放哪一层）。让模型照骨架改值，
-                    # 而不是让它从零发明 —— 这正是"题点归服务端"该覆盖的最后一层。
-                    # 图谱没 recipe 的维度，退回种子题里那条人审过的 SQL。
+                    # Structural skeleton: **whether difficulty 4 can be produced depends entirely on giving it**.
+                    # Observed: without a skeleton, 4 consecutive tries all had the model writing
+                    # `COUNT(*) OVER (ORDER BY ...)` (a cumulative count, not a consecutive-run count)
+                    # or writing `team_name` into the rounds table that lacks that column —— 4/4 all dead.
+                    # Yet the correct shape of gaps-and-islands **is right there in the knowledge graph** (the desensitized
+                    # recipe, which even marks where the WHERE should go). Let the model modify values per the skeleton
+                    # instead of inventing from zero —— this is the last layer that "question points belong to the server" should cover.
+                    # For dimensions without a recipe in the knowledge graph, fall back to the human-reviewed SQL from the seed question.
                     "skeleton": str(det.get("recipe") or _seed_skeleton(d))[:700],
                     "own_difficulty": own,
-                    # 百分比维度要连样本量一起取（见 propose 里的 require_base 提示）
+                    # Percentage dimensions must fetch the sample size along with the value (see the require_base hint in propose)
                     "require_base": bool(specs.get(d, {}).get("needs_base")),
                 }))
 
-    # ---- 候选来源 2：人导入落的**边**（不建节点，见 knowledge_graph.link_import）----
+    # ---- Candidate source 2: the **edges** from human import (no nodes created; see knowledge_graph.link_import) ----
     #
-    # 为什么必须有这一段：图谱的维度节点全部从 `TASKS[].rubric` 派生（出过题
-    # 才进图），而人导入的题**故意不建节点** —— 于是上面那个循环永远挑不到
-    # 人的方向，自适应出题又绕回旧题。人定的题要影响出题，入口只能在边上：
-    # 边记录了它真实用到的表/列/骨架（来自那次真跑过的 SQL）。
+    # Why this section is necessary: the knowledge graph's dimension nodes all derive from `TASKS[].rubric` (only questions that have been
+    # asked enter the graph), while human-imported questions **deliberately create no nodes** —— so the loop above never picks up
+    # human directions, and adaptive question generation circles back to old questions. For human-defined questions to influence question generation, the entry point can only be on
+    # edges: the edge records the tables/columns/skeleton it actually used (from that real run's SQL).
     try:
         import knowledge_graph as _kg
         for lk in _kg.load_imported_links():
@@ -950,7 +958,7 @@ def _graph_blueprint(difficulty: int = 2,
                 continue
             d = str(lk.get("dimension") or "").strip()
             if not d or not specs.get(d, {}).get("by_sql"):
-                continue                 # 没真跑过 SQL 的方向不拿来出题
+                continue                 # directions that never really ran SQL are not used for question generation
             sql = str(lk.get("sql") or "")
             shape = _kg.sql_shape(sql, list(lk.get("tables") or []))
             if not shape["tables"]:
@@ -958,17 +966,17 @@ def _graph_blueprint(difficulty: int = 2,
             tbl = shape["tables"][0]
             cols = (shape["columns_by_table"].get(tbl)
                     or shape["columns"] or [])
-            # 人导入的边本身不带教学素材；维度名若对得上已有节点就借用它的
+            # The human-imported edge itself carries no teaching material; if the dimension name matches an existing node, borrow it
             lk_det: dict[str, Any] = {}
             _node = g.nodes.get(f"dim:{d}")
             if _node is not None:
                 lk_det = getattr(_node, "detail", None) or {}
-            # 人的题面自带 subject（那次取数的粒度），它才是"新"的地方
+            # The human's question text comes with its own subject (the grain of that data retrieval); that is where the "new" is
             subj = dict(lk.get("subject") or {}) or {"series": SERIES}
             key = (json.dumps(subj, sort_keys=True), d)
             if key in avoid:
                 continue
-            score = -6                   # 人导入的方向优先（弱于 prefer 的 -10）
+            score = -6                   # human-imported directions take priority (weaker than prefer's -10)
             if prefer and d == prefer:
                 score -= 10
             own = int(shape["difficulty"] or 2)
@@ -981,9 +989,9 @@ def _graph_blueprint(difficulty: int = 2,
                 "table": tbl,
                 "columns": list(cols),
                 "semantics": shape["semantics"],
-                # 边上没有教学素材字段（它记的是那次真跑过的 SQL）。但人的题
-                # 常常落在**已有维度**上 —— 那就把那个节点的素材补过来，
-                # 否则人导入的方向永远是"裸骨架出题"，比种子方向少一层。
+                # The edge has no teaching-material fields (it records that real run's SQL). But the human's question
+                # often lands on an **existing dimension** —— then borrow that node's material,
+                # otherwise human-imported directions would always be "bare-skeleton question generation", one layer short of seed directions.
                 "question_types": list(lk_det.get("question_types") or []),
                 "skills": list(lk_det.get("skills") or []),
                 "examples": list(lk_det.get("examples") or [])[:2],
@@ -993,7 +1001,7 @@ def _graph_blueprint(difficulty: int = 2,
                 "skeleton": str(shape["recipe"] or "")[:700],
                 "own_difficulty": own,
                 "require_base": bool(specs.get(d, {}).get("needs_base")),
-                "source": "human_link",           # 溯源：这个方向来自人导入的边
+                "source": "human_link",           # provenance: this direction comes from a human-imported edge
                 "seed_question": str(lk.get("question") or "")[:300],
                 "cover_level": str(lk.get("cover_level") or ""),
                 "insights": list(lk.get("insights") or []),
@@ -1010,98 +1018,98 @@ def _graph_blueprint(difficulty: int = 2,
 async def propose(*, about: str = "", difficulty: int = 2,
                   critique: str = "", avoid: str = "",
                   blueprint: dict[str, Any] | None = None) -> dict[str, Any]:
-    """第 2 段：LLM 出题面 + 取数配方（**不含答案数值**）。
+    """Stage 2: the LLM produces the question text + data-retrieval recipe (**no answer values included**).
 
-    `critique` 是**上一轮验题的失败原因**，原样喂回去 —— 这是原版 Voyager 的
-    iterative prompting / critic，也是 `action_code.collect()` 里已经验证有效
-    的那一招：不给理由的重试，模型只会换一种方式犯同一个错。
+    `critique` is **the previous round's validation failure reason**, fed back verbatim —— this is the original Voyager's
+    iterative prompting / critic, and the move already proven effective in `action_code.collect()`:
+    a retry without a reason only makes the model make the same mistake in a different way.
 
-    `avoid` 是**已经出过的 (subject, dimension) 清单**。事前给比事后挡便宜：
-    实测不给的话，模型每轮都撞已有题，白烧两次调用。
+    `avoid` is the **list of already-produced (subject, dimension) pairs**. Giving it beforehand is cheaper than blocking afterward:
+    observed: without it, the model collides with existing questions every round, burning two calls for nothing.
     """
     band = DIFFICULTY_RUBRIC.get(int(difficulty) or 2) or {}
     band_txt = ""
     if band:
         band_txt = (
-            f"\n\n难度 {difficulty} 的含义（服务端会**照这条逐字数**你的 SQL，"
-            f"不达标就判废）：{band.get('needs', '')}。"
-            f"配方里必须出现 {' / '.join(band.get('any_of') or {})} 之一。")
-    user = (f"围绕「{about or '本场比赛'}」出一道题，难度 {difficulty}。"
-            "记住：给取数配方，不要给答案数值。" + band_txt)
+            f"\n\nWhat difficulty {difficulty} means (the server will **count your SQL against this line word by word**,"
+            f"and reject anything below it): {band.get('needs', '')}."
+            f"The recipe must contain one of {' / '.join(band.get('any_of') or {})}.")
+    user = (f"Produce one question around \"{about or 'this match'}\" at difficulty {difficulty}."
+            "Remember: give the data-retrieval recipe, not the answer values." + band_txt)
     if blueprint:
-        # 服务端已挑定出题点 —— 模型**不许改**，只许把值填进去。
-        # 这是伴学 `resolve_target_question_type` + `enforce_mapped_question_type`
-        # 那一对的同构物：题点归服务端，题面归模型。
+        # The server has already picked the question point —— the model **may not change it**, only fill in the values.
+        # This is the isomorphic counterpart of the study companion's `resolve_target_question_type` + `enforce_mapped_question_type`
+        # pair: question points belong to the server, question text belongs to the model.
         bp = (
-            f"\n\n【服务端已挑定的出题点 —— 不许改动，照它出题】"
-            f"\n  维度 dimension 必须写：{blueprint.get('dimension')}"
-            f"\n  subject 必须写：{json.dumps(blueprint.get('subject') or {}, ensure_ascii=False)}"
-            f"  （其中 {blueprint.get('subject_key')} 的值你去库里查一个真实存在的填进去）"
-            f"\n  FROM 必须是这张表：{blueprint.get('table')}"
-            f"\n  只能用这些列：{'、'.join(blueprint.get('columns') or [])}"
-            f"\n  口径形态照这个：{str(blueprint.get('semantics') or '')[:160]}"
-            f"\n  **不要**写上面没出现的列名，也不要换表。表里的列就是这些，"
-            f"没有 player_name / team_name 这种常识列 —— 队员列是 fb_player，队伍列是 fb_team。"
+            f"\n\n【Question point already picked by the server —— do not change it, produce the question per it】"
+            f"\n  The dimension field must be written as: {blueprint.get('dimension')}"
+            f"\n  subject must be written as: {json.dumps(blueprint.get('subject') or {}, ensure_ascii=False)}"
+            f"  (for the {blueprint.get('subject_key')} value, look up a real one in the database and fill it in)"
+            f"\n  FROM must be this table: {blueprint.get('table')}"
+            f"\n  Only these columns may be used: {', '.join(blueprint.get('columns') or [])}"
+            f"\n  Follow this convention shape: {str(blueprint.get('semantics') or '')[:160]}"
+            f"\n  **Do not** write column names that do not appear above, and do not switch tables. The table's columns are exactly these;"
+            f"there are no common-sense columns like player_name / team_name —— the player column is fb_player, the team column is fb_team."
         )
-        # ── 题型由**知识点节点声明**决定，不经模型 ──
-        # 伴学 `question_type_mapping.py:131`：取节点自带的 question_types
-        # 第一项映射到机器题型，"map it without LLM input"。
+        # ── The question type is decided by the **knowledge-point node declaration**, not via the model ──
+        # Study companion `question_type_mapping.py:131`: take the node's own question_types
+        # first item, mapped to a machine question type, "map it without LLM input".
         qt = [str(x) for x in (blueprint.get("question_types") or []) if x]
         if qt:
-            kind = ("写 SQL" if "sql" in qt[0]
-                    else "调工具取值" if "tool" in qt[0] else qt[0])
-            bp += (f"\n  答案配方类型（**由知识点节点声明，不许改**）：{qt[0]}"
-                   f" → answer_spec 里必须给 {kind}")
+            kind = ("write SQL" if "sql" in qt[0]
+                    else "call a tool to fetch the value" if "tool" in qt[0] else qt[0])
+            bp += (f"\n  Answer recipe type (**declared by the knowledge-point node, may not be changed**): {qt[0]}"
+                   f" → answer_spec must give {kind}")
         sk = [str(x) for x in (blueprint.get("skills") or []) if x]
         if sk:
-            bp += f"\n  这个点考的技能：{'、'.join(sk[:4])}"
+            bp += f"\n  Skills tested by this point: {', '.join(sk[:4])}"
 
-        # 误区用**完整版**（typical_misconceptions），不是裁过的 typical_errors。
-        # 出题时该"引出"这些错法，而不是在题面里把答案说破。
+        # Misconceptions use the **full version** (typical_misconceptions), not the truncated typical_errors.
+        # Question generation should "elicit" these mistakes, not give the answer away in the question text.
         mis = [str(x) for x in (blueprint.get("misconceptions") or []) if x]
         if mis:
-            bp += "\n  ★ 这个知识点的**典型误区**（你的题要能区分「真会」和「蒙对」，"
-            bp += "别在题面里直接把答案说出来）："
+            bp += "\n  ★ This knowledge point's **typical misconceptions** (your question must distinguish \"really knows\" from \"guessed right\";"
+            bp += "do not give the answer away directly in the question text):"
             for m in mis:
                 bp += f"\n    - {m}"
-        # 百分比口径必须**额外取一列**当样本量。不写这条，模型每次都只取
-        # 分子（实测：连续 4 次被验题以"取不到分母/样本量"判废，白烧 4 次调用）。
-        # 事前说清楚比事后回灌 critique 便宜。
+        # Percentage conventions must **fetch an extra column** as the sample size. Without this line, the model only fetches the
+        # numerator every time (observed: 4 consecutive rejections by validation for "no denominator/sample size", burning 4 calls for nothing).
+        # Saying it clearly beforehand is cheaper than feeding critique back afterward.
         if blueprint.get("require_base"):
-            bp += (f"\n  ★ 这个维度是**百分比**：SQL 里除了比值本身，必须再取一列"
-                   f"当样本量/分母，并在 answer_spec 里用 `base_column` 标出它是第几列"
-                   f"（0 开始数）。只给比值、不给样本量的题一律判废。")
+            bp += (f"\n  ★ This dimension is a **percentage**: besides the ratio itself, the SQL must fetch an extra column"
+                   f"as the sample size/denominator, and mark which column it is with `base_column` in answer_spec"
+                   f"(counting from 0). Questions giving only the ratio without the sample size are always rejected.")
         skel = str(blueprint.get("skeleton") or "").strip()
         if skel:
-            # 骨架是**服务端给出的正确形状**（脱敏过的，'?' 是占位符）。
-            # 不给骨架的实测：难度 4 连出 4 次全废（写成累计计数 / 编造列）。
+            # The skeleton is **the correct shape given by the server** (desensitized, '?' is a placeholder).
+            # Observed without a skeleton: difficulty 4 rejected 4 consecutive times (written as cumulative count / fabricated column).
             bp += (
-                "\n  ★ 照这个**结构骨架**写你的 SQL（'?' 换成你查到的真实值，"
-                "形状不许改）：\n" + skel +
-                "\n  骨架里 WHERE 的**位置就是口径**：内层先编号、外层再筛。"
-                "不要把过滤条件全塞进最内层 —— 塞进去段就断了。")
-        # ⚠️ 实测踩到：口径用 CASE WHEN 判胜负时，模型把那一列**又写进 WHERE**
-        # （`WHERE winning_team_name='X'`）→ 只剩赢的回合，胜率恒为 100 或直接
-        # 空。WHERE 只筛范围（series/map），胜负必须交给 CASE 判。
+                "\n  ★ Write your SQL per this **structural skeleton** (replace '?' with the real values you look up;"
+                "the shape may not be changed):\n" + skel +
+                "\n  The **position of WHERE in the skeleton is the convention**: number in the inner layer, filter in the outer layer."
+                "Do not stuff all the filter conditions into the innermost layer —— stuff them in and the run breaks.")
+        # ⚠️ Pitfall hit in practice: when the convention judges win/loss with CASE WHEN, the model **also writes that column into WHERE**
+        # (`WHERE winning_team_name='X'`) → only the won rounds remain, so the win rate is always 100 or directly
+        # empty. WHERE only filters the scope (series/map); win/loss must be judged by CASE.
         if "case when" in (str(blueprint.get("semantics") or "")
                            + str(blueprint.get("skeleton") or "")).lower():
-            bp += ("\n  ★★ 胜/负必须交给 **CASE WHEN** 判，"
-                   "**不要**把判定胜负的那列再写进 WHERE —— 写进去就只剩赢的"
-                   "回合，胜率恒为 100 或直接跑空。WHERE 只用来限定范围"
-                   "（series_id / map_name），胜负在 SELECT 里判。")
-        # 例题：节点自带的**正确口径长什么样**。骨架是脱敏形状，例题带真实值，
-        # 两个合起来模型才既有形状又有落法（值仍要它自己去库里查）。
+            bp += ("\n  ★★ Win/loss must be judged by **CASE WHEN**;"
+                   "**do not** write the win/loss-judging column into WHERE again —— write it in and only won"
+                   " rounds remain, so the win rate is always 100 or the query runs empty. WHERE is only used to limit the scope"
+                   " (series_id / map_name); win/loss is judged in SELECT.")
+        # Example question: what the node's own **correct convention looks like**. The skeleton is a desensitized shape; the example question has real values;
+        # together they give the model both shape and landing (values still need to be looked up in the database by it).
         ex = [str(x) for x in (blueprint.get("examples") or []) if x]
         if ex:
-            bp += ("\n  参考例题（**口径形状**照它，值换成你查到的真实值，"
-                   "不要照抄字面量）：\n" + str(ex[0])[:320])
+            bp += ("\n  Reference example (**follow its convention shape**, replace values with the real ones you look up;"
+                   "do not copy the literals verbatim):\n" + str(ex[0])[:320])
         user += bp
     if avoid:
-        user += ("\n\n下面这些 (subject, dimension) 组合**已经有题了，不要再出**：\n"
+        user += ("\n\nThe following (subject, dimension) combinations **already have questions; do not produce them again**:\n"
                  + avoid)
     if critique:
-        user += ("\n\n上一轮出的题被**确定性验题**挡下了，逐条原因如下。"
-                 "必须逐条改掉再出题（不要换汤不换药）：\n" + critique)
+        user += ("\n\nThe previous round's question was blocked by **deterministic validation**, with the reasons listed one by one."
+                 "Every one must be fixed before producing a new question (do not change the packaging but not the substance):\n" + critique)
     out = chat_json(
         [
             {"role": "system", "content": _PROPOSE_SYSTEM.format(
@@ -1115,39 +1123,39 @@ async def propose(*, about: str = "", difficulty: int = 2,
 
 
 # --------------------------------------------------------------------------
-# 第 3 段：确定性验题（伴学的 answer_supported 由第二个 LLM 判 —— 这里用数据）
+# Stage 3: deterministic validation (the study companion's answer_supported is judged by a second LLM —— here we use data)
 # --------------------------------------------------------------------------
 async def _run_spec(spec: dict[str, Any]) -> dict[str, Any]:
-    """跑一遍取数配方，返回 {value, base, error}。**这是验题的全部依据**。"""
+    """Run the data-retrieval recipe once, returning {value, base, error}. **This is the entire basis of validation**."""
     sql = str(spec.get("sql") or "").strip()
     if sql:
         if not sql.lower().startswith("select"):
-            return {"error": "sql 必须以 SELECT 开头"}
+            return {"error": "sql must start with SELECT"}
         try:
             res = await vlml_env.execute_custom_sql(sql_query=sql)
         except Exception as e:
-            return {"error": f"SQL 执行失败：{type(e).__name__}: {str(e)[:120]}"}
+            return {"error": f"SQL execution failed: {type(e).__name__}: {str(e)[:120]}"}
         rows = (res or {}).get("rows") or []
         if not rows:
-            return {"error": "SQL 返回 0 行 —— 这道题在本场数据里无解"}
+            return {"error": "SQL returned 0 rows —— this question is unsolvable in this match's data"}
         row = rows[0]
         vc = int(spec.get("value_column") or 0)
         if vc >= len(row):
-            return {"error": f"value_column={vc} 超出返回列数 {len(row)}"}
+            return {"error": f"value_column={vc} exceeds the returned column count {len(row)}"}
         value = row[vc]
         base = None
         bc = spec.get("base_column")
         if bc is None and len(row) >= 2:
-            # 模型常算出「值 + COUNT(*) 样本量」两列，却忘了填 base_column
-            # （实测第 3 轮就差这一个字段）。服务端能看到列数，就替它补上：
-            # 取不是 value_column 的最后那一列。
+            # The model often produces two columns "value + COUNT(*) sample size" but forgets to fill base_column
+            # (observed: round 3 was missing exactly this field). The server can see the column count, so fill it in for it:
+            # take the last column that is not value_column.
             others = [i for i in range(len(row)) if i != vc]
             if others:
                 bc = others[-1]
         if bc is not None and int(bc) < len(row):
             base = row[int(bc)]
-        # **行数必须回给调用方**：裁判只能判一个标量（value_column 取 row[0]），
-        # 返回多行就意味着真值只取到"碰巧排第一的那一行" —— 见下面闸 3c。
+        # **The row count must be returned to the caller**: the referee can only judge one scalar (value_column takes row[0]), so
+        # returning multiple rows means the truth is only "whichever row happens to be first" —— see gate 3c below.
         return {"value": value, "base": base, "base_column": bc,
                 "n_rows": len(rows)}
 
@@ -1155,42 +1163,42 @@ async def _run_spec(spec: dict[str, Any]) -> dict[str, Any]:
     if tool:
         fn = getattr(vlml_env, tool, None)
         if fn is None:
-            return {"error": f"没有工具 {tool}"}
+            return {"error": f"no tool {tool}"}
         args = dict(spec.get("tool_args") or {})
         try:
             res = await fn(**args)
         except Exception as e:
-            return {"error": f"工具调用失败：{type(e).__name__}: {str(e)[:120]}"
-                             f"（传的参数是 {args}）"}
+            return {"error": f"tool call failed: {type(e).__name__}: {str(e)[:120]}"
+                             f" (the arguments passed were {args})"}
         if isinstance(res, dict) and "error" in res and len(res) <= 2:
-            # 实测：pattern_detection_report 不传 team_name 就返回 {"error": ...}，
-            # 那时任何路径都取不到 —— 必须说清是**参数**的问题，不是路径的问题。
-            return {"error": f"工具返回错误 {str(res.get('error'))[:80]}"
-                             f" —— 多半是必填参数没传（当前传的是 {args}）"}
+            # Observed: pattern_detection_report returns {"error": ...} without team_name,
+            # at which point no path can fetch anything —— it must be stated clearly that it is an **argument** problem, not a path problem.
+            return {"error": f"tool returned error {str(res.get('error'))[:80]}"
+                             f" —— most likely a required argument was not passed (currently passed {args})"}
         vp = str(spec.get("value_path") or "")
         if not vp:
-            return {"error": "走工具路径却没有给 value_path"}
+            return {"error": "took the tool path but gave no value_path"}
         value = dig(res, vp)
         bp = str(spec.get("base_path") or "")
         base = dig(res, bp) if bp else None
         got = {"value": value, "base": base}
         if _empty(value):
-            got["hint"] = ("返回里有这些顶层段："
+            got["hint"] = ("these top-level sections are in the return:"
                            + ", ".join(list((res or {}).keys())[:8]))
         return got
 
-    return {"error": "answer_spec 既没 sql 也没 tool"}
+    return {"error": "answer_spec has neither sql nor tool"}
 
 
 _ROUNDS_TOTAL: int | None = None
 
 
 async def _max_rounds() -> int:
-    """全场总回合数 —— 计数型维度的量纲上限。
+    """Total rounds across the match —— the magnitude cap for count-type dimensions.
 
-    为什么需要它：实测模型写过 `SELECT SUM(round_number) FROM rounds ...`，
-    把**回合号求和**当成"打了多少回合"，跑出 145 —— 非空、能跑、维度也合法，
-    前面六道闸全过。只有"值不能超过全场总回合数"这道闸能挡住它。
+    Why it is needed: observed: the model wrote `SELECT SUM(round_number) FROM rounds ...`,
+    treating a **sum of round numbers** as "how many rounds were played", producing 145 —— non-empty, runnable, and a legal dimension,
+    passing the first six gates. Only the gate "the value cannot exceed the total rounds of the match" can stop it.
     """
     global _ROUNDS_TOTAL
     if _ROUNDS_TOTAL is None:
@@ -1204,42 +1212,42 @@ async def _max_rounds() -> int:
 
 
 def _fix_for_error(err: str, sql: str = "") -> str:
-    """把执行错误翻译成**可执行的修法**（只报症状模型改不动，实测三轮都改不动）。
+    """Translate execution errors into **actionable fixes** (reporting only symptoms does not move the model; observed: three rounds all unmoved).
 
-    跟 `action_code.collect()` 里那条 critic 同构：光说「你写的这条不在返回里」
-    没用，必须把真实候选路径一起给出去。
+    Isomorphic to that critic in `action_code.collect()`: just saying "what you wrote is not in the return"
+    does not work; the real candidate paths must be given out along with it.
     """
-    if "0 行" in err or "为空" in err:
-        # 先判表名：实测模型最爱把**工具名**当表名（match_rounds_report 之类），
-        # 光说"照抄表结构"它只会换一个工具名继续错。
+    if "0 rows" in err or "empty" in err:
+        # Judge the table name first: observed: the model's favorite is to treat a **tool name** as a table name (match_rounds_report and the like);
+        # just saying "copy the table structure" makes it swap in another tool name and keep making the same mistake.
         m = re.search(r"\bfrom\s+([a-z_][a-z0-9_]*)", (sql or "").lower())
         tbl = m.group(1) if m else ""
         if tbl and _COLS_CACHE and tbl not in _COLS_CACHE:
-            return (f"FROM 里的 `{tbl}` 不是表名（那是**工具名**，工具只能走 tool 路径，"
-                    f"不能放进 FROM）。SQL 只能查这些表：{', '.join(_SQL_TABLES)}。"
-                    f"\n  rounds 表的列：{', '.join(_COLS_CACHE.get('rounds', [])[:16])}")
+            return (f"`{tbl}` in FROM is not a table name (that is a **tool name**; tools can only go through the tool path,"
+                    f"not in FROM). SQL can only query these tables: {', '.join(_SQL_TABLES)}."
+                    f"\n  rounds table's columns: {', '.join(_COLS_CACHE.get('rounds', [])[:16])}")
         bad = _bad_columns(sql, tbl)
         if bad:
-            # 点名造出来的列，并给出它 FROM 的那张表的真实列
+            # Name the fabricated columns, and give the real columns of the table it came FROM
             near = _COLS_CACHE.get(tbl) or _COLS_CACHE.get("rounds") or []
             tip = ""
             if any("team" in b for b in bad):
-                tip = (" rounds 表没有 team_name 列，筛队伍用 winning_team_name；"
-                       "要按队伍统计去 agg_team_game_stats。")
-            return (f"SQL 里这些不是 `{tbl or '目标表'}` 的列：{', '.join(bad)}。"
-                    f"{tip}\n  `{tbl or 'rounds'}` 的真实列：{', '.join(near[:18])}")
-        return ("SQL 返回 0 行：表名与列名必须照抄 ★ 表结构清单；"
-                f"WHERE 里 series_id 用 '{SERIES}'，条件别加太死。")
-    if "必填参数" in err or "工具返回错误" in err:
-        return "把必填参数补进 tool_args（照「工具真实签名」里的参数名）。"
-    if "取不到值" in err or "没有给 value_path" in err:
-        return "value_path 必须照抄「工具返回结构」里的叶子路径（不要带前导点）。"
-    if "没有工具" in err:
-        return "tool 必须从「可用工具」清单里选。"
+                tip = (" the rounds table has no team_name column; filter teams with winning_team_name;"
+                       "for team-level aggregates go to agg_team_game_stats.")
+            return (f"These in the SQL are not columns of `{tbl or 'the target table'}`: {', '.join(bad)}."
+                    f"{tip}\n  `{tbl or 'rounds'}`'s real columns: {', '.join(near[:18])}")
+        return ("SQL returned 0 rows: table and column names must be copied from the ★ table-structure list;"
+                f"use series_id '{SERIES}' in WHERE, and do not make the conditions too strict.")
+    if "required argument" in err or "tool returned error" in err:
+        return "Add the required arguments to tool_args (copy the argument names from \"real tool signatures\")."
+    if "denominator" in err or "value_path" in err:
+        return "value_path must be copied from the leaf paths in \"tool return structures\" (no leading dot)."
+    if "no tool" in err:
+        return "tool must be chosen from the \"available tools\" list."
     if "clamp" in err or "value_column" in err:
-        return "value_column 指的是 SELECT 的第几列（从 0 开始），别超出列数。"
-    return ("照「工具真实签名」「表结构」「返回结构」逐字核对，"
-            "不要自己造表名、列名、字段名。")
+        return "value_column refers to which column of the SELECT (counting from 0); do not exceed the column count."
+    return ("Check \"real tool signatures\", \"table structure\", and \"return structure\" word by word;"
+            "do not invent table names, column names, or field names.")
 
 
 def _empty(value: Any) -> bool:
@@ -1253,10 +1261,10 @@ def _empty(value: Any) -> bool:
 
 
 def _difficulty_gap(candidate: dict[str, Any], want: int) -> str:
-    """这道题的配方配不配得上它自称的难度？返回缺口说明，配得上返回空串。
+    """Does this question's recipe justify its self-declared difficulty? Returns the gap description, or an empty string when justified.
 
-    判据必须**可数**（数 SQL 里的关键字），不能靠模型自评 ——
-    自评等于让它自己给自己打分。
+    The criterion must be **countable** (counting keywords in the SQL), not model self-assessment ——
+    self-assessment means letting it grade itself.
     """
     need = DIFFICULTY_RUBRIC.get(int(want) or 2)
     if not need:
@@ -1270,91 +1278,91 @@ def _difficulty_gap(candidate: dict[str, Any], want: int) -> str:
             if s:
                 sqls.append(s.lower())
     if not sqls:
-        # 工具路径：没有 SQL 可数，只能看评分点数量（弱判据，不拦）
+        # Tool path: no SQL to count; can only look at the number of rubric points (weak criterion, does not block)
         return ""
     joined = " \n ".join(sqls)
     has_group = "group by" in joined
     for feat, kws in (need.get("any_of") or {}).items():
         if any(k in joined for k in kws):
             return ""
-    # 弱判据：同一档也可以靠"拆得更细"达到 —— 分组 + 足够的评分点数。
-    # 少了这一条，难度 2 会误杀「两个评分点但没 GROUP BY」的题（实测
-    # `SELECT COUNT(*)...` 被判不达标，其实那就是一道正经的 2 档题）。
+    # Weak criterion: the same tier can also be reached by "splitting more finely" —— grouping + enough rubric points.
+    # Without this, difficulty 2 would kill "two rubric points but no GROUP BY" questions by mistake (observed:
+    # `SELECT COUNT(*)...` judged below standard, when it is in fact a proper tier-2 question).
     alt = int(need.get("or_points") or 0)
     if alt and len(rubric) >= alt and (has_group or not need.get("or_points_need_group")):
         return ""
-    return f"需要出现 {' / '.join(need.get('any_of') or {})} 之一" \
-           + (f"，或分组且不少于 {alt} 个评分点" if alt else "")
+    return f"must contain one of {' / '.join(need.get('any_of') or {})}" \
+           + (f", or grouping with no fewer than {alt} rubric points" if alt else "")
 
 
-# 难度分档：每档写清"什么样才算这个难度"。
+# Difficulty tiers: each tier spells out "what counts as this difficulty".
 #
-# 为什么必须写死：此前 prompt 里只有一句 `难度 {n}`，schema 里只有
-# `"difficulty": 1-4` —— 模型自由解读，服务端从不校验。于是出题器把
-# 梯度算出来的难度传过来，生成出的题却可能还是一条 `SELECT COUNT(*)`，
-# "按难度生成不同的题"名存实亡。
+# Why it must be hardcoded: previously the prompt had only the line `difficulty {n}`, and the schema only had
+# `"difficulty": 1-4` —— the model interpreted freely and the server never validated. So the question generator passed in
+# the difficulty computed by the gradient, yet the generated question might still be a single `SELECT COUNT(*)`,
+# making "generate different questions by difficulty" exist in name only.
 #
-# 照伴学的同构：伴学的难度是**题库铺开**的（82 个知识点 × 3 档，每档的题
-# 面与评分点数量都不同），不是靠生成时临时发挥。MVE 没有那份题库，
-# 就把"每档长什么样"压缩成可数的 SQL 特征，生成后逐条数。
+# Mirroring the study companion's approach: the study companion's difficulty is **laid out across the question bank** (82 knowledge points × 3 tiers, each tier's
+# question text and rubric point count differ), not improvised at generation time. MVE does not have that question bank,
+# so it compresses "what each tier looks like" into countable SQL features, counted one by one after generation.
 DIFFICULTY_RUBRIC: dict[int, dict[str, Any]] = {
-    1: {"needs": "单表单指标聚合",
-        "any_of": {"聚合函数": ["count(", "avg(", "sum(", "max(", "min("]}},
-    2: {"needs": "分组聚合（GROUP BY）或多个评分点",
-        "any_of": {"分组": ["group by"]},
+    1: {"needs": "single-table single-metric aggregation",
+        "any_of": {"aggregate function": ["count(", "avg(", "sum(", "max(", "min("]}},
+    2: {"needs": "grouped aggregation (GROUP BY) or multiple rubric points",
+        "any_of": {"grouping": ["group by"]},
         "or_points": 2},
-    3: {"needs": "分组 + 条件过滤，或多表 JOIN",
-        "any_of": {"多表 JOIN": [" join "],
-                   "条件分支": ["case when", " having ", "coalesce("]},
+    3: {"needs": "grouping + conditional filtering, or multi-table JOIN",
+        "any_of": {"multi-table JOIN": [" join "],
+                   "conditional branch": ["case when", " having ", "coalesce("]},
         "or_points": 3, "or_points_need_group": True},
-    4: {"needs": "窗口函数 / 自连接 / 嵌套子查询（gaps-and-islands、最长连续、排名）",
-        "any_of": {"窗口函数": ["over (", "over("],
-                   "嵌套子查询": ["from (select", "from(select"]}},
+    4: {"needs": "window function / self-join / nested subquery (gaps-and-islands, longest consecutive, ranking)",
+        "any_of": {"window function": ["over (", "over("],
+                   "nested subquery": ["from (select", "from(select"]}},
 }
 
 
 # ---------------------------------------------------------------------------
-# 一道题**合不合格**的判据（2026-10-08 定的，别再加闸）
+# The criterion for whether a question **passes** (set on 2026-10-08, do not add more gates)
 # ---------------------------------------------------------------------------
-#   合格线只有一条：**让 VLML 跑一遍，跑得出非空值**。
+#   The passing line is a single one: **let VLML run it once; a non-empty value means it passes**.
 #
-# 为什么是这一条：题是给 Voyager 做的，Voyager 的答案要跟"VLML 跑出来的真值"
-# 比。跑不出值的题根本没有真值，等于给 Voyager 一道无法判分的题 —— 这才是
-# 唯一必须挡的。
+# Why this line: questions are for Voyager to do, and Voyager's answers are compared against the "truth VLML produces".
+# A question that cannot produce a value has no truth at all, equivalent to giving Voyager an ungradeable question —— this is
+# the only one that must be blocked.
 #
-# 伴学的同构位是 `answer_supported`（答案能被材料支撑），它靠**第二个 LLM
-# 的意见**判；MVE 有真实数据源，可以**确定性**地判 —— 跑一遍就行，不必问
-# 模型。这是 MVE 比伴学强的那一处，不是要向它看齐的地方。
+# The study companion's isomorphic slot is `answer_supported` (the answer can be supported by the material), judged by a **second LLM's
+# opinion**; MVE has a real data source and can judge **deterministically** —— one run is enough, no need to ask the
+# model. This is where MVE is stronger than the study companion, not a place to catch up with it.
 #
-# 下面 `STRICT_MODE` 里的几条（百分比越界 / 量纲 / 非数字值 / "连续"形状）
-# 是**合理性兜底**，不是合格线。它们是踩坑时一条条加上去的（每条的注释里
-# 都记着当时废了哪道题），但**正确用法是让它们逐步退场**：骨架给对之后
-# 模型不再乱写，这几条就该拦不到东西。要只用合格线，跑 `--loose`。
+# The few gates below in `STRICT_MODE` (percentage out of range / magnitude / non-numeric value / "consecutive" shape)
+# are **sanity backstops**, not the passing line. They were added one by one when hitting pitfalls (each one's comment
+# records which question was killed at the time), but **the correct usage is to let them retire gradually**: once the skeleton is given correctly,
+# the model stops writing wildly, and these gates should catch nothing. To use only the passing line, run `--loose`.
 # ---------------------------------------------------------------------------
 STRICT_MODE = True
 
 
 async def validate(candidate: dict[str, Any], *,
                    existing: set[tuple[str, str]] | None = None) -> dict[str, Any]:
-    """验题。**不问模型**，只问数据 —— 让 VLML 跑一遍，跑得出非空值就算过。
+    """Validation. **Does not ask the model**, only asks the data —— let VLML run it once; a non-empty value means it passes.
 
-    返回 {ok, checks, reasons}。`checks` 逐条列出每个评分点的验证结果 ——
-    验题结论必须可复盘，不能只给一个布尔。
+    Returns {ok, checks, reasons}. `checks` lists each rubric point's validation result one by one ——
+    the validation conclusion must be reviewable, not just a boolean.
     """
     existing = existing or set()
     specs = _dim_specs()
     reasons: list[str] = []
     checks: list[dict[str, Any]] = []
-    seen: set[tuple[str, str]] = set()      # 题内去重（现有题靠 subject 区分图）
+    seen: set[tuple[str, str]] = set()      # in-question dedup (existing questions distinguish maps by subject)
 
     if not str(candidate.get("question") or "").strip():
-        return {"ok": False, "checks": [], "reasons": ["没有题面"]}
+        return {"ok": False, "checks": [], "reasons": ["no question text"]}
     rubric = candidate.get("rubric")
     if not isinstance(rubric, list) or not rubric:
-        return {"ok": False, "checks": [], "reasons": ["没有评分点"]}
+        return {"ok": False, "checks": [], "reasons": ["no rubric points"]}
 
     for rp in rubric:
-        point = str(rp.get("point") or "").strip() or "（无文案）"
+        point = str(rp.get("point") or "").strip() or "(no text)"
         dim = str(rp.get("dimension") or "").strip()
         subj = rp.get("subject") if isinstance(rp.get("subject"), dict) else {}
         spec = rp.get("answer_spec")
@@ -1362,95 +1370,95 @@ async def validate(candidate: dict[str, Any], *,
 
         if not dim:
             row["ok"] = False
-            row["why"] = "没有 dimension"
+            row["why"] = "no dimension"
             checks.append(row)
-            reasons.append(f"「{point}」没有 dimension")
+            reasons.append(f"「{point}」has no dimension")
             continue
         key = (json.dumps(subj, sort_keys=True, ensure_ascii=False), dim)
         if key in seen:
-            # 题内撞车：现有题靠 subject 区分图（Corrode/Haven/Lotus 各一个
-            # map_rounds），所以同题里出现两个一样的 (subject, dimension)
-            # 就说明模型把两个评分点写成同一条查询了。
+            # In-question collision: existing questions distinguish maps by subject (one
+            # map_rounds each for Corrode/Haven/Lotus), so two identical (subject, dimension) pairs in one question
+            # mean the model wrote two rubric points as the same query.
             row["ok"] = False
-            row["fix"] = ("这道题里已经有同样的 (subject, dimension) 了。"
-                          "两个评分点必须用不同的维度，或用 subject 区分"
-                          "（如加 map / player 键）。")
-            row["why"] = "与本题另一个评分点重复"
+            row["fix"] = ("This question already has the same (subject, dimension) pair."
+                          "The two rubric points must use different dimensions, or be distinguished by subject"
+                          "(e.g. add a map / player key).")
+            row["why"] = "duplicates another rubric point in this question"
             checks.append(row)
-            reasons.append(f"「{point}」与本题另一评分点重复（{dim}）")
+            reasons.append(f"「{point}」duplicates another rubric point in this question ({dim})")
             continue
         seen.add(key)
         if key in existing:
             row["ok"] = False
-            row["fix"] = (f"这个 (subject, dimension) 已经有题了："
-                          f"subject={json.dumps(subj, ensure_ascii=False)}、"
-                          f"dimension={dim}。把 subject 写细一点（加上 map 或 "
-                          "player 键），或者换一个维度。")
-            row["why"] = "与已有题重复的 (subject, dimension)"
+            row["fix"] = (f"This (subject, dimension) pair already has a question: "
+                          f"subject={json.dumps(subj, ensure_ascii=False)}, "
+                          f"dimension={dim}. Write subject in more detail (add a map or "
+                          "player key), or switch to a different dimension.")
+            row["why"] = "a (subject, dimension) pair duplicating an existing question"
             checks.append(row)
-            reasons.append(f"「{point}」与已有题重复（{dim}）")
+            reasons.append(f"「{point}」duplicates an existing question ({dim})")
             continue
         if not isinstance(spec, dict):
             row["ok"] = False
-            row["why"] = "没有 answer_spec（不能信模型给的答案数值）"
+            row["why"] = "no answer_spec (cannot trust the model's answer value)"
             checks.append(row)
-            reasons.append(f"「{point}」没有取数配方")
+            reasons.append(f"「{point}」has no data-retrieval recipe")
             continue
-        # 模型偷写答案数值 → 直接判废（伴学接受它，MVE 不接受）
+        # The model sneaks in an answer value → rejected directly (the study companion accepts it, MVE does not)
         if any(spec.get(k) is not None for k in ("expected", "expected_value",
                                                  "answer", "value")):
             row["ok"] = False
-            row["why"] = "配方里夹带了答案数值 —— 判废"
+            row["why"] = "the recipe smuggles in an answer value —— rejected"
             checks.append(row)
-            reasons.append(f"「{point}」配方里夹带答案数值")
+            reasons.append(f"「{point}」the recipe smuggles in an answer value")
             continue
 
-        # 闸 0：维度必须是服务端声明过的（模型不许发明口径）
+        # Gate 0: the dimension must be declared by the server (the model may not invent conventions)
         if dim not in specs:
             row["ok"] = False
-            row["fix"] = (f"dimension 必须从 ★ 枚举里选一个（现在填的 {dim} 不在里面）。"
-                          f"可用：{', '.join(sorted(specs))}")
-            row["why"] = f"维度 {dim} 不在服务端声明的口径里"
+            row["fix"] = (f"dimension must be chosen from the ★ enum (the {dim} just filled is not in it). "
+                          f"Available: {', '.join(sorted(specs))}")
+            row["why"] = f"dimension {dim} is not among the server-declared conventions"
             checks.append(row)
-            reasons.append(f"「{point}」维度 {dim} 不在服务端声明里")
+            reasons.append(f"「{point}」dimension {dim} is not declared by the server")
             continue
-        # 闸 0b：题面与维度定义必须相关（伴学的 relevant，这里用关键词重合判）
+        # Gate 0b: the question text must be relevant to the dimension definition (the study companion's relevant; here judged by keyword overlap)
         dspec = specs[dim]
         desc = str(dspec.get("desc") or dim)
         if not _relevant(point, desc):
             guess = _suggest_dims(point, specs)
             row["ok"] = False
-            row["fix"] = (f"dimension={dim} 的服务端定义是「{desc}」，跟题面对不上。"
-                          + (f"按题面看，更可能是：{', '.join(guess)}。"
-                             if guess else "point 文案必须围绕该维度的定义写。"))
-            row["why"] = f"题面与维度不相关（该维度的服务端定义是「{desc}」）"
+            row["fix"] = (f"dimension={dim}'s server definition is \"{desc}\", which does not match the question text. "
+                          + (f"Judging from the question text, more likely: {', '.join(guess)}. "
+                             if guess else "the point text must be written around this dimension's definition."))
+            row["why"] = f"the question text is irrelevant to the dimension (this dimension's server definition is \"{desc}\")"
             checks.append(row)
-            reasons.append(f"「{point}」与维度 {dim}（定义：{desc}）不相关")
+            reasons.append(f"「{point}」is irrelevant to dimension {dim} (definition: {desc})")
             continue
-        # 闸 1：百分比口径必须给分母（挡「问胜率却取个数」）
+        # Gate 1: percentage conventions must give a denominator (blocks "asks for a win rate but fetches a count")
         wants_pct = str(dspec.get("kind")) == "percent" and bool(dspec.get("needs_base"))
         if wants_pct:
-            # 实际走哪条路径，以 `_run_spec` 的判断为准（有 sql 就走 SQL）
+            # Which path is actually taken is decided by `_run_spec`'s judgment (SQL if there is sql)
             by_tool = not str(spec.get("sql") or "").strip() and \
                 bool(str(spec.get("tool") or "").strip())
             has_base = bool(str(spec.get("base_path") or "").strip()) or \
                 spec.get("base_column") is not None
-            # SQL 路径允许**运行时补**（模型算出两列却忘填 base_column 是家常便饭，
-            # 服务端看得到列数，能替它补），所以这里不预检，跑完再看补没补上。
-            # 工具路径没有"列"的概念、推断不了，必须在 spec 里声明 base_path。
+            # The SQL path allows **runtime backfill** (the model producing two columns but forgetting base_column is commonplace;
+            # the server can see the column count and can fill it in for it), so no pre-check here; check after running whether it got backfilled.
+            # The tool path has no concept of "columns" and cannot be inferred; base_path must be declared in spec.
             if by_tool and not has_base:
                 row["ok"] = False
-                row["fix"] = "走工具：补 base_path 指到同层的 .denom。"
-                row["why"] = "百分比口径却没给分母（问胜率却取了个数）"
+                row["fix"] = "Via tool: add base_path pointing at the same-level .denom."
+                row["why"] = "percentage convention but no denominator given (asks for a win rate but fetches a count)"
                 checks.append(row)
-                reasons.append(f"「{point}」百分比口径缺分母")
+                reasons.append(f"「{point}」percentage convention missing a denominator")
                 continue
             if by_tool and not bool(spec.get("percent")):
                 row["ok"] = False
-                row["fix"] = "工具路径的百分比口径必须写 \"percent\": true。"
-                row["why"] = "工具路径的百分比口径必须写 percent=true"
+                row["fix"] = "The tool-path percentage convention must write \"percent\": true."
+                row["why"] = "the tool-path percentage convention must write percent=true"
                 checks.append(row)
-                reasons.append(f"「{point}」工具路径缺 percent=true")
+                reasons.append(f"「{point}」tool path missing percent=true")
                 continue
 
         got = await _run_spec(spec)
@@ -1462,26 +1470,28 @@ async def validate(candidate: dict[str, Any], *,
             checks.append(row)
             reasons.append(f"「{point}」{got['error']}")
             continue
-        # 百分比口径跑完必须拿得到分母/样本量（SQL 路径的自动补在这里兑现）
+        # After running, a percentage convention must obtain a denominator/sample size (the SQL path's auto-backfill pays off here)
         if wants_pct and _empty(got.get("base")):
             row["ok"] = False
             row["fix"] = (
-                "走工具：base_path 要指到同层的 .denom。"
+                "Via tool: base_path must point at the same-level .denom."
                 if str(spec.get("tool") or "").strip() else
-                "走 SQL：SELECT 要返回两列 —— 百分比值 + COUNT(*) 作样本量，"
-                "并把 base_column 指到样本量那一列。")
-            row["why"] = "百分比口径取不到分母/样本量"
+                "Via SQL: SELECT must return two columns —— the percentage value + COUNT(*) as the sample size, "
+                "with base_column pointing at the sample-size column.")
+            row["why"] = "percentage convention: denominator/sample size not obtained"
             checks.append(row)
-            reasons.append(f"「{point}」百分比口径取不到分母")
+            reasons.append(f"「{point}」percentage convention: denominator not obtained"
+            )
             continue
         if _empty(got.get("value")):
-            why = "配方跑出来是空 —— 这道题在本场数据里无解"
+            why = "the recipe ran empty —— this question is unsolvable in this match's data"
             if got.get("hint"):
-                why += f"（{got['hint']}）"
+                why += f" ({got['hint']})"
             row["ok"] = False
             row["why"] = why
             checks.append(row)
-            reasons.append(f"「{point}」取值为空")
+            reasons.append(f"「{point}」the value is empty"
+            )
             continue
 
         min_base = int(rp.get("min_base") or 1)
@@ -1490,13 +1500,14 @@ async def validate(candidate: dict[str, Any], *,
             try:
                 if float(base) < min_base:
                     row["ok"] = False
-                    row["why"] = f"样本量 {base} < min_base {min_base}"
+                    row["why"] = f"sample size {base} < min_base {min_base}"
                     checks.append(row)
-                    reasons.append(f"「{point}」样本量不足（{base} < {min_base}）")
+                    reasons.append(f"「{point}」insufficient sample size ({base} < {min_base})"
+                    )
                     continue
             except (TypeError, ValueError):
                 pass
-        # 闸 2：算出来的必须是合法百分比（工具路径 value/base*100，SQL 路径直接用）
+        # Gate 2: the computed value must be a legal percentage (tool path value/base*100, SQL path used directly)
         if wants_pct:
             v, b = got.get("value"), got.get("base")
             try:
@@ -1506,80 +1517,84 @@ async def validate(candidate: dict[str, Any], *,
                     pct = float(v)
             except (TypeError, ValueError, ZeroDivisionError) as e:
                 row["ok"] = False
-                row["why"] = f"百分比口径算不出数值（{type(e).__name__}）"
+                row["why"] = f"percentage convention: cannot compute a value ({type(e).__name__})"
                 checks.append(row)
-                reasons.append(f"「{point}」百分比口径算不出数值")
+                reasons.append(f"「{point}」percentage convention: cannot compute a value"
+                )
                 continue
             if STRICT_MODE and not (0.0 <= pct <= 100.0):
                 row["ok"] = False
-                row["why"] = f"百分比算出来 {round(pct, 1)} 不在 0-100 —— 口径取错了"
+                row["why"] = f"the computed percentage {round(pct, 1)} is not in 0-100 —— the convention is wrong"
                 checks.append(row)
-                reasons.append(f"「{point}」百分比越界（{round(pct, 1)}）")
+                reasons.append(f"「{point}」percentage out of range ({round(pct, 1)})"
+                )
                 continue
             row["truth"] = round(pct, 1)
 
-        # 闸 3（严格档）：量纲 —— 计数型维度的值不能超过全场总回合数
+        # Gate 3 (strict): magnitude —— a count-type dimension's value cannot exceed the total rounds of the match
         if STRICT_MODE and str(dspec.get("kind")) == "count":
             try:
                 v = float(got.get("value"))
             except (TypeError, ValueError):
-                # 取出来的不是数（实测取到过 'Haven' —— value_column 指到了
-                # map_name 那列）。此时不能 pass 放行：一个地图名当"最长连败
-                # 回合数"混进题库，裁判会拿它当真值，整道题的评分就废了。
+                # The fetched value is not a number (observed fetching 'Haven' —— value_column pointed at
+                # the map_name column). At this point pass must not let it through: a map name masquerading as the "longest losing
+                # streak round count" slipping into the question bank would make the referee treat it as the truth, wasting the whole question's scoring.
                 row["ok"] = False
-                row["fix"] = (f"配方取出来的值是 {got.get('value')!r}，不是数字 —— "
-                              "value_column 指错列了（多半指到了 map_name / "
-                              "player_name 这类标签列）。把它改成数值那一列。")
-                row["why"] = f"取出的值 {got.get('value')!r} 不是数字"
+                row["fix"] = (f"the value the recipe fetched is {got.get('value')!r}, not a number —— "
+                              "value_column points at the wrong column (probably at label columns like map_name / "
+                              "player_name). Change it to the numeric column.")
+                row["why"] = f"the fetched value {got.get('value')!r} is not a number"
                 checks.append(row)
-                reasons.append(f"「{point}」取出的值不是数字（{got.get('value')!r}）")
+                reasons.append(f"「{point}」the fetched value is not a number ({got.get('value')!r})"
+                )
                 continue
             else:
                 cap = await _max_rounds()
                 if v > cap:
                     row["ok"] = False
                     row["fix"] = (
-                        f"值 {got.get('value')} 超过全场总回合数 {cap}，量纲不对。"
-                        "多半是把 SUM(round_number) 当 COUNT(*) 用了 —— "
-                        "数回合一律用 COUNT(*)。")
-                    row["why"] = f"计数值 {got.get('value')} 超过上限 {cap}"
+                        f"value {got.get('value')} exceeds the total rounds of the match {cap}; the magnitude is wrong. "
+                        "Probably SUM(round_number) was used as COUNT(*) —— "
+                        "always use COUNT(*) to count rounds.")
+                    row["why"] = f"the count value {got.get('value')} exceeds the cap {cap}"
                     checks.append(row)
-                    reasons.append(f"「{point}」量纲越界（{got.get('value')} > {cap}）")
+                    reasons.append(f"「{point}」magnitude out of range ({got.get('value')} > {cap})"
+                    )
                     continue
 
-        # 闸 3b（通用）：只要这道评分点是**按数值比**（有 numeric_tolerance，
-        # 或维度声明不是枚举/标签），跑出来的值就必须能当数字用。
+        # Gate 3b (general): as long as this rubric point is **compared numerically** (has numeric_tolerance,
+        # or the dimension declaration is not enum/label), the value produced must be usable as a number.
         #
-        # 为什么不能只靠上面那条 count 专属的闸：实测 `max_losing_streak_map`
-        # 就是这么混进来的 —— 它的 SQL 是
+        # Why gate 3 above (count-only) alone is not enough: observed `max_losing_streak_map`
+        # slipped in exactly like this —— its SQL is
         #   `SELECT map_name, MAX(cnt) ... GROUP BY map_name` + `value_column: 0`
-        # 取到的是**地图名** 'Lotus'，而题干问"最长连败回合数"、tolerance=0.05。
-        # 裁判拿 'Lotus' 当真值，模型交任何数字都判错 → 连跑 5 轮全 0%，
-        # critique 一字不变。那不是"学不会"，是**题是坏的**。
-        # 坏题比没有题更糟：它会伪装成"学习曲线没起来"，把人引向错的方向。
+        # fetching the **map name** 'Lotus', while the question text asks for the "longest losing streak round count" with tolerance=0.05.
+        # The referee treats 'Lotus' as the truth, so any number the model submits is judged wrong → 5 straight rounds at 0%,
+        # with the critique unchanged. That is not "can't learn", it is a **broken question**.
+        # A broken question is worse than no question: it disguises itself as "the learning curve never took off", leading people in the wrong direction.
         if STRICT_MODE and str(dspec.get("kind")) != "count" and spec.get("sql"):
             try:
                 float(got.get("value"))
             except (TypeError, ValueError):
                 row["ok"] = False
                 row["fix"] = (
-                    f"配方取出来的值是 {got.get('value')!r}，不是数字 —— "
-                    "value_column 指错列了（多半指到了 map_name / player_name "
-                    "这类标签列）。把它改成数值那一列；"
-                    "如果这一列本来就是分组键，就把它从 SELECT 里去掉或挪到后面。")
-                row["why"] = f"取出的值 {got.get('value')!r} 不是数字（题干按数值评分）"
+                    f"the value the recipe fetched is {got.get('value')!r}, not a number —— "
+                    "value_column points at the wrong column (probably at label columns like map_name / player_name). "
+                    "Change it to the numeric column; "
+                    "if that column is itself a grouping key, remove it from SELECT or move it later.")
+                row["why"] = f"the fetched value {got.get('value')!r} is not a number (the question text is scored numerically)"
                 checks.append(row)
-                reasons.append(f"「{point}」取出的值不是数字（{got.get('value')!r}）")
+                reasons.append(f"「{point}」the fetched value is not a number ({got.get('value')!r})")
                 continue
 
-        # 闸 3c（通用·决定性的一条）：**裁判只能判一个标量**。
-        # `_run_spec` 取真值就是 `rows[0]`（question_gen.py:1133），SQL 一旦返回
-        # 多行，真值就是"碰巧排第一的那一行" —— 行序一变真值就变。
-        # 实测 `plant_success_rate_lotus`：`GROUP BY round_id` 返回 10 行
-        # [(1,1),(1,0),...]，裁判取 row0 → 真值 100%，而题干问的每回合成功率
-        # 全场聚合是 7/10=70% → **题在数学上无解**，练 15 轮全 0%，
-        # 伪装成"voyager 学不到东西"。坏题比没有题更糟。
-        # 唯一豁免：显式 ORDER BY + LIMIT 1（真值由排序决定，不是行序碰运气）。
+        # Gate 3c (general, the decisive one): **the referee can only judge a single scalar**.
+        # `_run_spec` takes the truth as `rows[0]` (question_gen.py:1133), so once the SQL returns
+        # multiple rows, the truth is "whichever row happens to be first" —— the truth changes with row order.
+        # Observed `plant_success_rate_lotus`: `GROUP BY round_id` returned 10 rows
+        # [(1,1),(1,0),...], the referee took row0 → truth 100%, while the per-round success rate the question text asks for
+        # aggregated over the whole match is 7/10=70% → **the question is mathematically unsolvable**, 15 practice rounds all at 0%,
+        # disguised as "voyager can't learn anything". A broken question is worse than no question.
+        # The only exemption: explicit ORDER BY + LIMIT 1 (the truth is decided by the sort, not by row-order luck).
         if STRICT_MODE and spec.get("sql"):
             n_rows = int(got.get("n_rows") or 1)
             sql_low = str(spec.get("sql")).lower()
@@ -1588,57 +1603,59 @@ async def validate(candidate: dict[str, Any], *,
             if n_rows > 1 and not deterministic_single:
                 row["ok"] = False
                 row["fix"] = (
-                    f"这条 SQL 返回了 {n_rows} 行，但裁判只取第 1 行当真值 —— "
-                    "真值随行序漂移，题就废了。必须让它只返回一行："
-                    "把聚合收拢（外层再套一层 SUM/AVG/COUNT），"
-                    "或去掉 GROUP BY；"
-                    "确要取'排第一的那行'就写 ORDER BY … LIMIT 1。")
-                row["why"] = f"SQL 返回 {n_rows} 行，真值只取第 1 行（行序碰运气）"
+                    f"this SQL returned {n_rows} rows, but the referee only takes the 1st row as the truth —— "
+                    "the truth drifts with row order, so the question is dead. It must return exactly one row: "
+                    "collapse the aggregation (wrap another SUM/AVG/COUNT outside), "
+                    "or remove the GROUP BY; "
+                    "if you really need 'the first row', write ORDER BY … LIMIT 1.")
+                row["why"] = f"SQL returned {n_rows} rows, truth takes only the 1st row (row-order luck)"
                 checks.append(row)
-                reasons.append(f"「{point}」SQL 返回多行（{n_rows} 行），"
-                               "裁判真值不确定 —— 题面与配方口径不一致")
+                reasons.append(f"「{point}」SQL returned multiple rows ({n_rows} rows), "
+                               "the referee's truth is uncertain —— the question text and recipe convention disagree")
                 continue
 
         row["ok"] = True
-        row["why"] = "配方跑得出非空值"
+        row["why"] = "the recipe produces a non-empty value"
         row["value"] = got.get("value")
         row["base"] = base
         checks.append(row)
 
     ok = bool(checks) and all(c.get("ok") for c in checks)
 
-    # ---- 闸 8（题级）：难度达标 ----
-    # 光把「难度 4」这句话塞进 prompt 是没用的：模型不知道 4 意味着什么，
-    # 生成完也没有人检查 —— 于是"按难度生成不同的题"名存实亡，题库涨了
-    # 难度不涨。这里两件事一起做：
-    #   (a) 把每档的**可验证特征**写死在服务端（见 DIFFICULTY_RUBRIC）；
-    #   (b) 生成后**真的去数**：SQL 里有没有窗口函数 / 子查询 / JOIN。
+    # ---- Gate 8 (question-level): difficulty meets the bar ----
+    # Just stuffing the phrase "difficulty 4" into the prompt is useless: the model does not know what 4 means,
+    # and nobody checks after generation —— so "generate different questions by difficulty" exists in name only; the question bank grew
+    # but difficulty did not. Two things are done together here:
+    #   (a) hardcode each tier's **verifiable features** in the server (see DIFFICULTY_RUBRIC);
+    #   (b) after generation, **actually count**: whether the SQL has window functions / subqueries / JOIN.
     #
-    # **独立于 ok 计算**：此前把它放在 `if ok:` 里，结果模型在前面几道闸
-    # （表名写错、评分点重复）就先挂了，永远收不到"难度不达标"这句反馈 ——
-    # 实测三次生成全是 `GROUP BY player_name`，没有任何难度 4 该有的结构，
-    # 而 critique 里一个字没提。难度缺口必须**每次都算、每次都回灌**，
-    # 让模型同时改"表名"和"难度形态"，而不是改完一个才知道还有下一个。
+    # **Computed independently of ok**: previously this was inside `if ok:`, so the model died at earlier gates
+    # (wrong table name, duplicate rubric points) and never received the "difficulty below the bar" feedback ——
+    # observed: all three generations were `GROUP BY player_name`, with none of the structure difficulty 4 requires,
+    # yet not a word of it in the critique. The difficulty gap must be **computed every time and fed back every time**,
+    # so the model fixes "table name" and "difficulty shape" together, rather than learning of the next one only after fixing the current one.
     gap = _difficulty_gap(candidate, int(candidate.get("difficulty") or 2))
     if gap:
-        reasons.append(f"难度不达标（要求 {candidate.get('difficulty')} 档）：{gap}")
+        reasons.append(f"difficulty below the bar (tier {candidate.get('difficulty')} required): {gap}")
 
-    # ---- 闸 9（题级·严格档）："连续"语义必须有 gaps-and-islands 的可数形状 ----
-    # `COUNT(*) OVER (ORDER BY ...)` 也是窗口函数，能过闸 8，但它算的是
-    # **累计计数**（到当前行为止一共输了多少），MAX 出来 = 总共输了几个回合，
-    # 根本不是"最长**连续**连败"。实测 `max_losing_streak_map` 就是这么生成的：
-    # 难度闸过了、结构闸过了，口径却是错的 —— 于是这道题永远做不对。
+    # ---- Gate 9 (question-level, strict): "consecutive" semantics must have a countable gaps-and-islands shape ----
+    # `COUNT(*) OVER (ORDER BY ...)` is also a window function and can pass gate 8, but what it computes is
+    # **a cumulative count** (how many have been lost up to the current row), and MAX of it = the total rounds lost,
+    # which is not the "longest **consecutive** losing streak" at all. Observed `max_losing_streak_map` was generated exactly like this:
+    # the difficulty gate passed, the structure gate passed, yet the convention is wrong —— so this question can never be answered correctly.
     #
-    # gaps-and-islands 的形状是可数的，认这两种：
-    #   (a) 差值法：ROW_NUMBER 出现 ≥2 次（两个编号相减得到段号）
-    #   (b) 重置法：LAG / SUM(...) OVER 做断点累计
-    # 两条都没有 → 判废，并把这个形状要求原样写进 fix 回灌给模型。
+    # The gaps-and-islands shape is countable; these two are recognized:
+    #   (a) difference method: ROW_NUMBER appears ≥2 times (subtracting two numbers gives the run id)
+    #   (b) reset method: LAG / SUM(...) OVER for breakpoint accumulation
+    # Neither present → rejected, and this shape requirement is fed back to the model verbatim in fix.
     text = " ".join(
         [str(candidate.get("question") or "")]
         + [str(rp.get("point") or "")
            for rp in (candidate.get("rubric") or []) if isinstance(rp, dict)]
     ).lower()
-    if STRICT_MODE and any(k in text for k in ("连续", "连败", "连胜", "streak")):
+    if STRICT_MODE and any(k in text for k in ("streak", "consecutive", "consecutively",
+                                               "in a row", "losing streak", "winning streak",
+                                               "win streak", "loss streak")):
         sqls = " \n ".join(
             str((rp.get("answer_spec") or {}).get("sql") or "").lower()
             for rp in (candidate.get("rubric") or []) if isinstance(rp, dict))
@@ -1647,12 +1664,12 @@ async def validate(candidate: dict[str, Any], *,
             has_reset = ("lag(" in sqls or "lead(" in sqls
                          or ("sum(" in sqls and " over " in sqls))
             if n_rn < 2 and not has_reset:
-                gap_msg = ("「连续/连败」必须用 gaps-and-islands："
-                           "两个 ROW_NUMBER() 相减得段号"
-                           "（ROW_NUMBER() OVER (ORDER BY round_number) "
-                           "- ROW_NUMBER() OVER (PARTITION BY 队伍 ORDER BY round_number)），"
-                           "再用 LAG/SUM() OVER 做断点重置。"
-                           "COUNT(*) OVER (ORDER BY ...) 是**累计计数**，不是连续段数。")
+                gap_msg = ("\"Consecutive/losing streak\" must use gaps-and-islands: "
+                           "subtract two ROW_NUMBER()s to get the run id "
+                           "(ROW_NUMBER() OVER (ORDER BY round_number) "
+                           "- ROW_NUMBER() OVER (PARTITION BY <team> ORDER BY round_number)), "
+                           "then use LAG/SUM() OVER for breakpoint reset. "
+                           "COUNT(*) OVER (ORDER BY ...) is a **cumulative count**, not a consecutive-run count.")
                 reasons.append(gap_msg)
                 for c in checks:
                     c["ok"] = False
@@ -1665,14 +1682,14 @@ async def validate(candidate: dict[str, Any], *,
 
 
 # --------------------------------------------------------------------------
-# 第 4 段：强制口径来源（照 enforce_mapped_question_type）
+# Stage 4: forcing the convention source (mirrors enforce_mapped_question_type)
 # --------------------------------------------------------------------------
 def _norm_args(raw: Any) -> dict[str, Any]:
-    """把模型可能写歪的 tool_args 规范化成 dict。
+    """Normalize the possibly-malformed tool_args into a dict.
 
-    实测模型会把 `{"team_name": "Cloud9"}` 写成 `"team_name=Cloud9"`、
-    甚至写成 JSON 字符串 —— `dict(...)` 会直接抛 ValueError 把出题器打挂。
-    照伴学 `enforce_mapped_question_type` 的精神：模型写歪的格式，服务端改回来。
+    Observed: the model writes `{"team_name": "Cloud9"}` as `"team_name=Cloud9"`,
+    or even as a JSON string —— `dict(...)` would throw ValueError and crash the question generator.
+    Per the spirit of the study companion's `enforce_mapped_question_type`: malformed model formats are fixed by the server.
     """
     if isinstance(raw, dict):
         return dict(raw)
@@ -1695,16 +1712,16 @@ def _norm_args(raw: Any) -> dict[str, Any]:
 
 
 def enforce(candidate: dict[str, Any]) -> dict[str, Any]:
-    """把 LLM 可能改坏的地方改回服务端口径。
+    """Fix back the places the LLM may have broken to the server's conventions.
 
-    伴学强制改回 `question_type`；MVE 强制的是**口径的归属**：
-    配方里声明的工具必须在白名单里、SQL 必须 SELECT 开头、
-    tool_args 必须是 dict（否则工具调用直接崩）。
+    The study companion forces `question_type` back; what MVE forces is **the ownership of the convention**:
+    tools declared in the recipe must be in the whitelist, SQL must start with SELECT,
+    tool_args must be a dict (otherwise the tool call crashes outright).
     """
     out = dict(candidate)
-    # topic_id 必须是英文小写下划线 —— 模型会给中文（实测给了
-    # `max_losing_streak_map粒度`），这个 id 会进题库、进日志、进面板 URL，
-    # 不能留中文。服务端能补的就不废题（照伴学 enforce 精神）。
+    # topic_id must be lowercase-underscore English —— the model may give Chinese (observed giving
+    # one with a Chinese word for "granularity" appended); this id goes into the question bank, logs, and dashboard URLs,
+    # so Chinese cannot stay. What the server can backfill, it does not reject over (per the study companion's enforce spirit).
     tid = str(out.get("topic_id") or "").strip()
     if tid:
         slug = re.sub(r"[^a-z0-9_]+", "_", tid.lower()).strip("_")
@@ -1726,35 +1743,35 @@ def enforce(candidate: dict[str, Any]) -> dict[str, Any]:
             spec = dict(spec)
             tool = str(spec.get("tool") or "").strip()
             if tool and tool not in TOOL_NAMES:
-                spec.pop("tool", None)       # 不在白名单 → 去掉，验题会判废
+                spec.pop("tool", None)       # not in the whitelist → removed; validation will reject
             sql = str(spec.get("sql") or "").strip()
             if sql and not sql.lower().startswith("select"):
                 spec.pop("sql", None)
                 sql = ""
             if sql:
-                # SQL 与工具路径**二选一**：留着两套互相矛盾的配方，裁判和验题
-                # 都会按自己那套解读（实测修法提示因此走错了分支）。
+                # SQL and tool paths are **mutually exclusive**: keeping two mutually contradictory recipes means the referee and validation
+                # each interpret their own way (observed: the fix hint therefore went down the wrong branch).
                 for k in ("tool", "tool_args", "value_path", "base_path"):
                     spec.pop(k, None)
             spec["tool_args"] = _norm_args(spec.get("tool_args"))
-            # 路径别带前导点（模型爱写 ".key_metrics..."）
+            # Paths must not carry a leading dot (the model likes writing ".key_metrics...")
             for k in ("value_path", "base_path"):
                 if str(spec.get(k) or "").startswith("."):
                     spec[k] = str(spec[k]).lstrip(".")
-            # 口径归属由服务端定，不靠模型记不记得写：维度声明是百分比、
-            # 配方又给了分母，那 percent 就必须是 true（照伴学
-            # enforce_mapped_question_type 强制改回服务端选定值的做法）。
+            # Convention ownership is decided by the server, not by whether the model remembers to write it: the dimension declares a percentage,
+            # and the recipe gives a denominator, then percent must be true (per the study companion's
+            # enforce_mapped_question_type approach of forcing back to the server-selected value).
             if str(rec.get("kind")) == "percent" and bool(rec.get("needs_base")):
                 has_base = bool(str(spec.get("base_path") or "").strip()) or \
                     spec.get("base_column") is not None
                 if has_base:
                     spec["percent"] = True
             rp["answer_spec"] = spec
-        # 维度填错但**配方是对的** → 按取值路径反查，服务端改回来。
-        # 实测模型三轮都把 pistol 的手枪局题填成 kast_pct，而它的 value_path
-        # 写的却是 key_metrics.economy.pistol.num —— 路径是硬事实，
-        # 比让模型猜维度可靠得多（照伴学 enforce_mapped_question_type：
-        # 模型写歪的归属，服务端强制改回）。
+        # Dimension filled wrong but **the recipe is right** → reverse-look-up by value path; the server fixes it back.
+        # Observed: the model filled the pistol-round question as kast_pct three rounds in a row, while its value_path
+        # was key_metrics.economy.pistol.num —— the path is a hard fact,
+        # far more reliable than letting the model guess the dimension (per the study companion's enforce_mapped_question_type:
+        # malformed ownership from the model is forced back by the server).
         desc0 = str(rec.get("desc") or dim)
         if dim and str(rp.get("point") or "") and not _relevant(
                 str(rp.get("point") or ""), desc0):
@@ -1768,16 +1785,16 @@ def enforce(candidate: dict[str, Any]) -> dict[str, Any]:
                         break
         rp["answer_spec"] = spec if isinstance(spec, dict) else rp.get("answer_spec")
 
-        # 只在**工具路径**下纠正工具与参数（走 SQL 时别塞一套矛盾的配方进来）
+        # Only correct tools and arguments under the **tool path** (do not stuff in a contradictory recipe when on SQL)
         if isinstance(spec, dict) and not str(spec.get("sql") or "").strip():
-            # 工具名错：图谱说这个维度由谁生产，就用谁（实测模型把
-            # pattern_detection_report 写成 match_summary_report，然后报
-            # "missing 1 required positional argument: series_id"）。
+            # Wrong tool name: whoever the knowledge graph says produces this dimension, use them (observed: the model wrote
+            # pattern_detection_report as match_summary_report, then reported
+            # "missing 1 required positional argument: series_id").
             prods = [p for p in (rec.get("producers") or []) if p in TOOL_NAMES]
             if prods and str(spec.get("tool") or "") not in prods:
                 spec["tool"] = prods[0]
-            # 参数忘传：subject 里写着 series / team / map，服务端照签名补。
-            # 「没传 team_name 就拿不到数据」是实测最高频的废题原因。
+            # Forgotten arguments: subject declares series / team / map, and the server backfills them per the signature.
+            # "No team_name passed means no data" is the most frequent observed cause of rejected questions.
             subj = rp.get("subject") if isinstance(rp.get("subject"), dict) else {}
             args = dict(spec.get("tool_args") or {})
             try:
@@ -1810,7 +1827,7 @@ def enforce(candidate: dict[str, Any]) -> dict[str, Any]:
 
 
 # --------------------------------------------------------------------------
-# 落盘 / 载入
+# Persist / load
 # --------------------------------------------------------------------------
 def load_generated() -> list[dict[str, Any]]:
     try:
@@ -1821,7 +1838,7 @@ def load_generated() -> list[dict[str, Any]]:
 
 
 def adopt(candidate: dict[str, Any], checks: list[dict[str, Any]]) -> dict[str, Any]:
-    """验过的题落盘（带上验题证据，事后能复盘"当时为什么算通过"）。"""
+    """Persist a validated question (with validation evidence, so "why it passed at the time" can be reviewed afterward)."""
     items = load_generated()
     rec = dict(candidate)
     rec["_validation"] = {
@@ -1838,13 +1855,13 @@ def adopt(candidate: dict[str, Any], checks: list[dict[str, Any]]) -> dict[str, 
 
 
 async def revalidate_store() -> list[dict[str, Any]]:
-    """回头复核**已入库**的生成题 —— 新闸管不到存量，必须补一刀。
+    """Retroactively re-check **already-stored** generated questions —— new gates do not reach the existing stock, so an extra pass is needed.
 
-    为什么必须有它：验题规则是逐步补的，题是先入库的。实测
-    `max_losing_streak_map` 在新闸（"取出的值必须是数字"）加上之前就落盘了，
-    之后无论重跑多少轮，它都静静地躺在库里当"永远做不对的题"：
-    连跑 5 轮 0%、critique 一字不变 —— 看起来像"学习曲线起不来"，
-    其实是**一道坏题把整条曲线钉死在地板上**。
+    Why it is necessary: validation rules were added incrementally, while questions were stored first. Observed:
+    `max_losing_streak_map` was persisted before the new gate ("the fetched value must be a number") was added,
+    and afterward, no matter how many rounds were rerun, it quietly sat in the bank as the "never answerable question":
+    5 straight rounds at 0% with the critique unchanged —— it looked like "the learning curve never took off",
+    when in fact **one broken question pinned the whole curve to the floor**.
     """
     items = load_generated()
     bad: list[dict[str, Any]] = []
@@ -1857,18 +1874,18 @@ async def revalidate_store() -> list[dict[str, Any]]:
             vr = await validate(rec)
         except Exception as e:                               # pragma: no cover
             rec["invalid"] = True
-            rec["invalid_reason"] = f"复核时报错：{type(e).__name__}: {e}"
+            rec["invalid_reason"] = f"error during re-check: {type(e).__name__}: {e}"
             bad.append(rec); changed = True
             continue
         if not vr.get("ok") or vr.get("difficulty_gap"):
             rec["invalid"] = True
-            rec["invalid_reason"] = "；".join(
+            rec["invalid_reason"] = ";".join(
                 str(r) for r in (vr.get("reasons") or []))[:400]
-            rec["invalid_note"] = ("复核判废（不是删除）：配方在**现在的**验题规则下"
-                                   "过不了。留着是为了复盘，但不再进题库。")
+            rec["invalid_note"] = ("rejected on re-check (not deleted): the recipe cannot pass under the **current** validation rules. "
+                                   "Kept for review, but no longer enters the question bank.")
             bad.append(rec); changed = True
         elif rec.get("invalid"):
-            # 修好了就恢复 —— 复核是双向的
+            # Restored once fixed —— re-checking goes both ways
             rec.pop("invalid", None); rec.pop("invalid_reason", None)
             rec.pop("invalid_note", None)
             changed = True
@@ -1879,7 +1896,7 @@ async def revalidate_store() -> list[dict[str, Any]]:
 
 
 def to_task(rec: dict[str, Any]) -> Task:
-    """落盘的题 → Task 对象（供 tasks.py 合并进 TASKS）。"""
+    """A persisted question → Task object (for tasks.py to merge into TASKS)."""
     rubric = []
     for rp in (rec.get("rubric") or []):
         spec = rp.get("answer_spec") if isinstance(rp.get("answer_spec"), dict) \
@@ -1910,8 +1927,8 @@ def to_task(rec: dict[str, Any]) -> Task:
         question=str(rec.get("question") or ""),
         rubric=rubric,
         difficulty=int(rec.get("difficulty") or 2),
-        # 自动生成的题**默认不进掌握度**（照伴学：只有 validated 的题才计分）。
-        # 它先要被人或裁判确认口径是对的 —— 生成 ≠ 生效。
+        # Auto-generated questions **default to not entering mastery** (per the study companion: only validated questions count).
+        # It must first have its convention confirmed by a human or the referee —— generated ≠ active.
         validated_target=bool(rec.get("validated_target") or False),
         min_base=1,
         requires_tools=list(rec.get("requires_tools") or []),
@@ -1923,15 +1940,15 @@ def to_task(rec: dict[str, Any]) -> Task:
 # --------------------------------------------------------------------------
 def _main() -> int:
     import argparse
-    ap = argparse.ArgumentParser(description="自动出题：生成取数配方 + 确定性验题")
-    ap.add_argument("--about", default="", help="围绕什么出题")
+    ap = argparse.ArgumentParser(description="Automatic question generation: produce data-retrieval recipes + deterministic validation")
+    ap.add_argument("--about", default="", help="what to produce questions around")
     ap.add_argument("--difficulty", type=int, default=2)
-    ap.add_argument("--tries", type=int, default=3, help="最多生成几次")
-    ap.add_argument("--adopt", action="store_true", help="验过就并入库")
+    ap.add_argument("--tries", type=int, default=3, help="maximum generation attempts")
+    ap.add_argument("--adopt", action="store_true", help="merge into the bank once validated")
     args = ap.parse_args()
 
 def existing_pairs() -> tuple[set[tuple[str, str]], str]:
-    """已有题的 (subject, dimension) 集合 + 给模型看的清单。"""
+    """The (subject, dimension) set of existing questions + the list shown to the model."""
     try:
         from tasks import TASKS
     except Exception:                                        # pragma: no cover
@@ -1948,25 +1965,25 @@ def existing_pairs() -> tuple[set[tuple[str, str]], str]:
 
 
 def _critique_of(vr: dict[str, Any]) -> str:
-    """把验题结果翻成「错在哪 + 怎么改」（伴学的 `generation_feedback`）。
+    """Translate validation results into "what is wrong + how to fix" (the study companion's `generation_feedback`).
 
-    伴学：`entry_tutor_question_entries.py:1885` 把上一轮的 `validation_failure`
-    原样塞进 `generation_feedback`。MVE 同构，但多给一句「怎么改」——
-    只报症状实测三轮都改不动（模型会换一种方式犯同一个错）。
+    Study companion: `entry_tutor_question_entries.py:1885` stuffs the previous round's `validation_failure`
+    verbatim into `generation_feedback`. MVE is isomorphic, but adds one more line "how to fix" ——
+    reporting only symptoms was observed to not move the model for three rounds (it makes the same mistake in a different way).
     """
     lines = [
-        f"  - 评分点「{c.get('point')}」错在：{c.get('why')}"
-        + (f"\n      怎么改：{c['fix']}" if c.get("fix") else "")
+        f"  - Rubric point 「{c.get('point')}」 wrong at: {c.get('why')}"
+        + (f"\n      How to fix: {c['fix']}" if c.get("fix") else "")
         for c in vr.get("checks") or [] if not c.get("ok")
     ]
-    # 难度缺口独立于评分点闸 —— 见 `validate` 闸 8 的注释：
-    # 放在 `if ok:` 里的话，模型永远收不到这句反馈。
+    # The difficulty gap is independent of the rubric-point gates —— see the comment on gate 8 in `validate`:
+    # placed inside `if ok:`, the model would never receive this feedback.
     gap = str(vr.get("difficulty_gap") or "").strip()
     if gap:
         lines.append(
-            f"  - 【难度不达标】要求 {vr.get('difficulty')} 档：{gap}。"
-            "要么把 SQL 改写成该档的形态，要么如实把 difficulty 调低 —— "
-            "不要靠改题面文案蒙过去。")
+            f"  - 【Difficulty below the bar】tier {vr.get('difficulty')} required: {gap}. "
+            "Either rewrite the SQL into that tier's shape, or honestly lower difficulty —— "
+            "do not bluff your way through by changing the question text.")
     return "\n".join(lines)
 
 
@@ -1975,32 +1992,32 @@ async def generate_adopt(*, about: str = "", difficulty: int = 2,
                          verbose: bool = True,
                          focus_dimension: str = "") -> tuple[dict[str, Any] | None,
                                                              list[dict[str, Any]]]:
-    """出题编排的**唯一入口**：生成 → 强制 → 验题 →（失败就回灌重试）→ 落盘。
+    """The **single entry point** for question-generation orchestration: generate → enforce → validate → (feed back and retry on failure) → persist.
 
-    CLI 和 `run_mve` 都走这里 —— 编排只有一份，不会两边跑偏。
-    返回 (落盘记录 or None, 每一轮的验题明细)。
+    Both the CLI and `run_mve` go through here —— there is only one orchestration, so the two cannot diverge.
+    Returns (persisted record or None, each round's validation details).
     """
     existing, avoid_txt = existing_pairs()
-    # 出题点由**服务端从图谱挑定**，不交给模型（照伴学：题型由知识点节点声明）。
+    # The question point is **picked by the server from the knowledge graph**, not handed to the model (per the study companion: the question type is declared by the knowledge-point node).
     bp = _graph_blueprint(difficulty, avoid=existing,
                           prefer=str(focus_dimension or ""))
     if bp:
-        # 服务端既已挑定，`about` 里 planner 给的"范围"要求就必须让位 ——
-        # 实测两者打架：`about` 说"用队员级范围"，而图谱挑中的
-        # max_losing_streak 是**回合级**口径（rounds 表根本没有队员列），
-        # 模型夹在中间，把 fb_player 写进了 rounds 表，三次全挂。
-        # 题点归服务端，题面归模型 —— 不能两头都听。
-        about = (f"围绕「{bp.get('dimension')}」这个口径，按 "
-                 f"{bp.get('subject_key')} 的粒度出一道新题")
-        # 方向来自人导入的**边**时，把人的原题给模型当母本 —— 否则它只看到
-        # 一个干巴巴的维度名，出的题跟人问的不是一回事（这是"影响自适应
-        # 出题"真正要落的地方）。
+        # Since the server has already picked it, the "scope" requirement the planner gave in `about` must yield ——
+        # observed conflict between the two: `about` said "use player-level scope", while the knowledge graph picked
+        # max_losing_streak, a **round-level** convention (the rounds table has no player column at all),
+        # and the model caught in the middle wrote fb_player into the rounds table, failing all three times.
+        # Question points belong to the server, question text belongs to the model —— cannot listen to both.
+        about = (f"Produce a new question around the \"{bp.get('dimension')}\" convention, at "
+                 f"{bp.get('subject_key')} granularity")
+        # When the direction comes from a human-imported **edge**, give the human's original question to the model as the parent —— otherwise it sees only
+        # a bare dimension name, and the question it produces is not what the human asked (this is where "influencing adaptive
+        # question generation" truly lands).
         if bp.get("source") == "human_link" and bp.get("seed_question"):
-            about += f"。参考人导入的原题：{bp['seed_question']}"
+            about += f". Reference the human-imported original question: {bp['seed_question']}"
         if verbose:
-            print(f"  图谱出题点 : {bp.get('dimension')} × {bp.get('subject_key')}"
-                  f"｜表 {bp.get('table')}"
-                  f"｜列 {'、'.join(bp.get('columns') or [])[:80]}")
+            print(f"  Knowledge-graph question point : {bp.get('dimension')} × {bp.get('subject_key')}"
+                  f"｜table {bp.get('table')}"
+                  f"｜columns {', '.join(bp.get('columns') or [])[:80]}")
     critique = ""
     trace: list[dict[str, Any]] = []
     for i in range(1, tries + 1):
@@ -2009,16 +2026,16 @@ async def generate_adopt(*, about: str = "", difficulty: int = 2,
                                      blueprint=bp))
         if not cand:
             if verbose:
-                print(f"第 {i} 次：模型没返回可用 JSON")
+                print(f"Attempt {i}: the model did not return usable JSON")
             continue
         if verbose:
-            print(f"\n=== 第 {i} 次生成 ===")
+            print(f"\n=== Generation attempt {i} ===")
             print(f"  topic_id  : {cand.get('topic_id')}")
-            print(f"  题面      : {str(cand.get('question'))[:100]}")
-            print(f"  难度      : {cand.get('difficulty')}")
+            print(f"  Question  : {str(cand.get('question'))[:100]}")
+            print(f"  Difficulty: {cand.get('difficulty')}")
             for rp in (cand.get("rubric") or []):
                 sp = rp.get("answer_spec") or {}
-                how = (f"SQL 取第 {sp.get('value_column')} 列" if sp.get("sql")
+                how = (f"SQL takes column {sp.get('value_column')}" if sp.get("sql")
                        else f"{sp.get('tool')} → {sp.get('value_path')}")
                 print(f"    · {rp.get('point')}｜{rp.get('dimension')}｜{how}")
                 if sp.get("sql"):
@@ -2026,7 +2043,7 @@ async def generate_adopt(*, about: str = "", difficulty: int = 2,
                 if sp.get("tool_args"):
                     print(f"        args: {sp.get('tool_args')}")
                 if sp.get("base_path") or sp.get("base_column") is not None:
-                    print(f"        分母: {sp.get('base_path') or sp.get('base_column')}"
+                    print(f"        Denominator: {sp.get('base_path') or sp.get('base_column')}"
                           f"｜percent={bool(sp.get('percent'))}")
 
         vr = await validate(cand, existing=existing)
@@ -2036,36 +2053,36 @@ async def generate_adopt(*, about: str = "", difficulty: int = 2,
                 mark = "✅" if c.get("ok") else "❌"
                 extra = ""
                 if c.get("ok"):
-                    extra = f"（跑出 {c.get('value')!r}"
+                    extra = f" (ran {c.get('value')!r}"
                     if c.get("base") is not None:
-                        extra += f"，base={c.get('base')}"
+                        extra += f", base={c.get('base')}"
                     if c.get("truth") is not None:
-                        extra += f" → 真值 {c.get('truth')}"
-                    extra += "）"
-                print(f"    验题 {mark} {c.get('point')} — {c.get('why')}{extra}")
+                        extra += f" → truth {c.get('truth')}"
+                    extra += ")"
+                print(f"    Validation {mark} {c.get('point')} — {c.get('why')}{extra}")
                 if not c.get("ok") and c.get("fix"):
-                    print(f"         修法：{c['fix']}")
+                    print(f"         Fix: {c['fix']}")
         if vr["ok"]:
             if verbose:
-                print("  ✅ 验题通过：每个评分点的配方都能从 VLML 跑出非空值")
+                print("  ✅ Validation passed: every rubric point's recipe produces a non-empty value from VLML")
             rec = adopt(cand, vr["checks"]) if do_adopt else cand
             if do_adopt and verbose:
-                print(f"  已并入题库 → {STORE}")
+                print(f"  Merged into the question bank → {STORE}")
             return rec, trace
         if verbose:
-            print("  ❌ 验题未过：" + "；".join(vr["reasons"])[:300])
+            print("  ❌ Validation failed: " + ";".join(vr["reasons"])[:300])
         critique = _critique_of(vr)
-        # 同一个方向连着撞墙两次 → 换个方向，别在一条死路上耗完次数。
-        # 实测：出题器给的 about 是「围绕 kast_pct，用队员级范围出题」，
-        # 而 kast_pct 的服务端口径是**队伍级**的 —— 模型只能硬去查
-        # match_players_report（那是工具名不是表），三次全挂在同一个错上。
-        # 只说"再改一次"它就会换个措辞重犯；必须显式让它换方向。
+        # Hitting a wall twice in a row on the same direction → switch direction; do not burn all the tries on one dead end.
+        # Observed: the about the question generator gave was "produce a question around kast_pct at player-level scope",
+        # while kast_pct's server-side convention is **team-level** —— the model could only force a query on
+        # match_players_report (a tool name, not a table), failing all three times on the same mistake.
+        # Just saying "change it again" makes it rephrase and repeat; it must be explicitly told to switch direction.
         if i >= 2:
-            critique += ("\n  - 【换方向】这个角度已经连着失败了 "
-                         f"{i} 次，很可能它在当前数据里根本不成立"
-                         "（比如某个维度只支持队伍/比赛级，没有队员级口径）。"
-                         "请换一个**服务端确实声明过**的维度或 subject 键重新出题，"
-                         "不要在原方向上改措辞。")
+            critique += ("\n  - 【Switch direction】this angle has now failed "
+                         f"{i} times in a row; it very likely does not hold in the current data at all "
+                         "(e.g. some dimension only supports team/match level, with no player-level convention). "
+                         "Please produce a new question with a dimension or subject key **the server has actually declared**, "
+                         "do not rephrase on the original direction.")
     return None, trace
 
 
@@ -2074,15 +2091,15 @@ async def generate_adopt(*, about: str = "", difficulty: int = 2,
 # --------------------------------------------------------------------------
 def _main() -> int:
     import argparse
-    ap = argparse.ArgumentParser(description="自动出题：生成取数配方 + 确定性验题")
-    ap.add_argument("--about", default="", help="围绕什么出题")
+    ap = argparse.ArgumentParser(description="Automatic question generation: produce data-retrieval recipes + deterministic validation")
+    ap.add_argument("--about", default="", help="what to produce questions around")
     ap.add_argument("--difficulty", type=int, default=2)
-    ap.add_argument("--tries", type=int, default=3, help="最多生成几次")
-    ap.add_argument("--adopt", action="store_true", help="验过就并入库")
+    ap.add_argument("--tries", type=int, default=3, help="maximum generation attempts")
+    ap.add_argument("--adopt", action="store_true", help="merge into the bank once validated")
     ap.add_argument("--revalidate", action="store_true",
-                    help="回头复核已入库的生成题，在新的验题规则下过不了的标记判废")
+                    help="retroactively re-check stored generated questions, marking as rejected those that cannot pass under the new validation rules")
     ap.add_argument("--loose", action="store_true",
-                    help="只用合格线（VLML 跑一遍跑得出非空值），关掉合理性兜底闸")
+                    help="use only the passing line (VLML runs once and produces a non-empty value), turning off the sanity backstop gates")
     args = ap.parse_args()
 
     if args.revalidate:
@@ -2091,22 +2108,22 @@ def _main() -> int:
             STRICT_MODE = False
         bad = asyncio.run(revalidate_store())
         if not bad:
-            print("存量复核：全部通过（没有被判废的题）")
+            print("Existing-stock re-check: all passed (no rejected questions)")
             return 0
-        print(f"存量复核：{len(bad)} 道题在新验题规则下过不了，已标记 invalid（不删，留证据）")
+        print(f"Existing-stock re-check: {len(bad)} questions cannot pass under the new validation rules, marked invalid (not deleted, evidence kept)")
         for r in bad:
-            print(f"  ✗ {r.get('topic_id')}：{str(r.get('invalid_reason'))[:200]}")
+            print(f"  ✗ {r.get('topic_id')}: {str(r.get('invalid_reason'))[:200]}")
         return 1
 
     if args.loose:
         STRICT_MODE = False
-        print("（--loose：只用合格线 —— VLML 跑一遍跑得出非空值即合格）")
+        print("(--loose: only the passing line —— VLML runs once and produces a non-empty value to pass)")
     rec, _ = asyncio.run(generate_adopt(
         about=args.about, difficulty=args.difficulty,
         tries=args.tries, do_adopt=args.adopt))
     if rec is None:
-        print("\n这几次都没生成出成立的题（这是诚实结果，不是 bug："
-              "模型编的字段在数据里不存在，就会被确定性验题挡下来）")
+        print("\nNo valid question was produced in these attempts (this is an honest result, not a bug: "
+              "fields the model fabricates that do not exist in the data will be blocked by deterministic validation)")
         return 1
     return 0
 

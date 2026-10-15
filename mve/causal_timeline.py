@@ -1,25 +1,25 @@
 #!/usr/bin/env python3
-"""行动因果时间线（照猫娘伴学的 root_fact_seq）。
+"""Action causal timeline (mirrors the study companion's root_fact_seq).
 
-伴学源码里没有「行动因果」这个词，但 docs/认知引擎阶段文档.md:80 有同构实现：
+The study companion source has no term "action causal", but docs/认知引擎阶段文档.md:80 has an isomorphic implementation:
 
-    「attempt、question、control 已统一进入单调的 root_fact_seq，
-      同秒事实和迟到 extraction 具有稳定因果顺序」
+    "attempt, question, control have all been unified into the monotonic root_fact_seq,
+     same-second facts and late extractions have a stable causal order"
 
-即：**所有类型的事实进同一条单调递增时间线，只保证顺序，不产生分数。**
-　- control fact = 人导入（人出的题、人给的解释）
-　- attempt fact = Voyager 的行动（编排、事实集、verdict）
-　- referee fact = 裁判的判定
-　- narrative fact = 叙事产出
+That is: **all types of facts enter the same monotonically increasing timeline; only order is guaranteed, no scores are produced.**
+  - control fact = human import (a human-posed question, a human-given explanation)
+  - attempt fact = Voyager's action (orchestration, fact set, verdict)
+  - referee fact = the referee's verdict
+  - narrative fact = narrative output
 
-为什么必须单独建这条线：
-　掌握度是「评分」，会被 validated_target=False 的题排除；
-　但人导入的题虽然不评分，仍然要被出题器看见——
-　「人工导入的意图进时间线（因果），不进掌握度（评分）；
-　　出题器看学习轨迹，不看单次分数」。
-　没有这条线，人导入就等于什么都没发生。
+Why this line must exist separately:
+  Mastery is "scoring", and excludes topics with validated_target=False;
+  but human-imported topics, though unscored, must still be visible to the question generator —
+  "human-imported intent enters the timeline (causal), not mastery (scoring);
+   the question generator looks at the learning trajectory, not single scores".
+  Without this line, a human import amounts to nothing happening.
 
-本文件不 import vlml_env，面板可以直接读。
+This file does not import vlml_env, so the dashboard can read it directly.
 """
 
 from __future__ import annotations
@@ -32,22 +32,22 @@ from typing import Any
 
 LOG = Path(__file__).resolve().parent / "causal_timeline.jsonl"
 
-# 事实种类。control 与 attempt 的区分是这份设计的核心。
-CONTROL = "control"        # 人导入：出题、给解释、改范围
-ATTEMPT = "attempt"        # Voyager 的行动
-REFEREE = "referee"        # 裁判判定
-NARRATIVE = "narrative"    # 叙事产出
+# Fact kinds. The control/attempt distinction is the core of this design.
+CONTROL = "control"        # human import: posing questions, giving explanations, changing scope
+ATTEMPT = "attempt"        # Voyager's action
+REFEREE = "referee"        # referee verdict
+NARRATIVE = "narrative"    # narrative output
 
 KIND_LABEL = {
-    CONTROL: "人导入",
-    ATTEMPT: "Voyager 行动",
-    REFEREE: "裁判判定",
-    NARRATIVE: "叙事产出",
+    CONTROL: "Human import",
+    ATTEMPT: "Voyager action",
+    REFEREE: "Referee verdict",
+    NARRATIVE: "Narrative output",
 }
 
 
 def _next_seq(rows: list[dict[str, Any]]) -> int:
-    """单调递增序号。同秒到达的事实靠它保序，不靠时间戳。"""
+    """Monotonically increasing sequence number. Facts arriving in the same second are ordered by it, not by timestamp."""
     highest = 0
     for r in rows:
         try:
@@ -105,7 +105,7 @@ def for_panel(limit: int = 30) -> list[dict[str, Any]]:
 
 
 def counts_by_topic() -> dict[str, dict[str, int]]:
-    """出题器要看的：每题各有多少 control / attempt。"""
+    """What the question generator needs: how many control / attempt facts each topic has."""
     out: dict[str, dict[str, int]] = {}
     for r in load():
         topic = str(r.get("topic_id") or "")
@@ -119,10 +119,10 @@ def counts_by_topic() -> dict[str, dict[str, int]]:
 
 
 def latest_topics_by_kind(kind: str) -> list[str]:
-    """按「最近发生」排序的 topic 列表（去重，最新在前）。
+    """Topic list sorted by "most recent first" (deduplicated, newest first).
 
-    `counts_by_topic()` 只有计数没有时序，出题器用它分不出「人上周导入过」
-    和「人刚才导入过」。人导入的意义就在于**当下**的意图，所以必须按时序取。
+    `counts_by_topic()` has counts but no timing; the question generator cannot tell "imported last week"
+    from "imported just now" with it. The point of a human import is the intent **right now**, so it must be taken in time order.
     """
     rows = [r for r in load() if str(r.get("kind")) == kind and str(r.get("topic_id") or "")]
     rows.sort(key=lambda r: int(r.get("seq") or 0), reverse=True)
@@ -137,4 +137,4 @@ def latest_topics_by_kind(kind: str) -> list[str]:
 def reset() -> None:
     if LOG.exists():
         LOG.unlink()
-    print(f"已清空行动因果时间线：{LOG}")
+    print(f"Action causal timeline cleared: {LOG}")

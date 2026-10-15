@@ -1,33 +1,34 @@
 #!/usr/bin/env python3
-"""掌握度模型 V2 —— 照猫娘伴学 `adaptive_learning/mastery_v2.py` 移植。
+"""Mastery model V2 — ported from the study-companion plugin's `adaptive_learning/mastery_v2.py`.
 
-为什么换掉旧的：旧版照的是伴学的 **V1**（`knowledge_tracker.py:252-286`），
-而 V1 有两处硬伤，伴学自己都已经在 V2 里修掉了：
+Why the old one was replaced: the old version mirrored the plugin's **V1** (`knowledge_tracker.py:252-286`),
+and V1 had two hard flaws, both of which the plugin itself already fixed in V2:
 
-  1. `confidence = 1-exp(-attempts/5)` —— **只数作答次数**，
-     刷次数就能把掌握度推高（Voyager 一晚上几十轮，比人快得多）。
-     V2 改成按**证据权重之和**算（mastery_v2.py:278）。
-  2. `recency = 1.0` —— V1 里**写死**（knowledge_tracker.py:266），
-     即"三个月前的满分和刚才的满分等价"。V2 引入 `time_decay`，
-     半衰期 60 天（mastery_v2.py:43、:416-424）。
+  1. `confidence = 1-exp(-attempts/5)` — **counts answer attempts only**,
+     so grinding attempts pushes mastery up (Voyager runs dozens of rounds in a night, far faster than a human).
+     V2 computes it from the **sum of evidence weights** instead (mastery_v2.py:278).
+  2. `recency = 1.0` — **hard-coded** in V1 (knowledge_tracker.py:266),
+     i.e. "a perfect score three months ago is equivalent to one just now". V2 introduces `time_decay`,
+     with a half-life of 60 days (mastery_v2.py:43, :416-424).
 
-V2 还有三样 V1 没有的：
-  3. **每条证据有权重** = 评价可信度 × 作答可靠性 × 时间衰减（:335）。
-     于是"LLM 判的"不如"SQL 算的"可信、"答得太省"的要打折。
-  4. **加权平均**代替简单平均，accuracy / variance / quality 全按权重算。
-  5. **可重建**：`as_of` 显式传入、policy 版本化、attempt_id 去重 ——
-     同一批事实，增量累积与一次性重算必须得到同一个数（:208-221）。
+Three things V2 has that V1 lacks:
+  3. **Each piece of evidence has a weight** = evaluator confidence × answer reliability × time decay (:335).
+     So "judged by an LLM" is less trustworthy than "computed by SQL", and "answered too frugally" gets discounted.
+  4. **Weighted average** replaces the simple average; accuracy / variance / quality are all computed by weight.
+  5. **Reconstructible**: `as_of` passed explicitly, versioned policy, attempt_id deduplication —
+     the same batch of facts must yield the same number whether accumulated incrementally or recomputed in one go (:208-221).
 
-伴学自己把 V2 标为 **shadow**（mastery_v2.py:1-7）：线上仍是 V1，
-V2 并行跑用于对账。我们直接把它转正 —— 因为 MVE 没有"线上用户"要兼容。
+The plugin itself marks V2 as **shadow** (mastery_v2.py:1-7): V1 is still live in production,
+with V2 running in parallel for reconciliation. We promote it to live directly — because MVE has
+no "production users" to stay compatible with.
 
-两处 MVE 特有适配（伴学没有对应物，按同构映射）：
-  - `response_time_ms`（人答题耗时）→ **`tool_calls`**（Voyager 成功调了几次工具）。
-    语义相同：都是"这次作答投入了多少"，太快/太省就不可靠。
-  - `evaluator_confidence`（评判者可信度）→ **裁判事实的确定性占比**。
-    伴学只有"默认 0.75"；MVE 的裁判事实有明确来源
-    （`vlml0_referee.deterministic` / `vlml0_referee::工具` / `vlml0_referee.llm`），
-    按确定性事实占比映射到 [0.6, 0.95]。
+Two MVE-specific adaptations (no counterpart in the plugin, mapped isomorphically):
+  - `response_time_ms` (human answer time) → **`tool_calls`** (how many tools Voyager called successfully).
+    Same semantics: both mean "how much this answer invested", and too fast / too frugal means unreliable.
+  - `evaluator_confidence` (evaluator trustworthiness) → **the share of deterministic referee facts**.
+    The plugin only has "default 0.75"; MVE's referee facts have clear sources
+    (`vlml0_referee.deterministic` / `vlml0_referee::tool` / `vlml0_referee.llm`),
+    mapped to [0.6, 0.95] by the share of deterministic facts.
 """
 
 from __future__ import annotations
@@ -46,9 +47,10 @@ MASTERY_MASTERED = "mastered"
 
 @dataclass(frozen=True)
 class MasteryPolicy:
-    """全部系数集中在一个不可变对象上 —— 照伴学 mastery_v2.py:21-95。
+    """All coefficients live on a single immutable object — mirroring the plugin's mastery_v2.py:21-95.
 
-    集中在这里的意义（伴学原文）：历史重建可审计，且调用方无法偷偷改模型行为。
+    The point of centralizing them here (the plugin's original text): historical reconstruction is
+    auditable, and callers cannot quietly change model behavior.
     """
 
     model_version: str = MODEL_VERSION
@@ -64,15 +66,18 @@ class MasteryPolicy:
     response_time_min_reliability: float = 0.6
     response_time_suspicious_ms: int = 1_000
     response_time_full_reliability_ms: int = 5_000
-    # MVE 同构项：工具调用深度（伴学用 response_time_ms，我们没有"作答耗时"）
+    # MVE isomorphic term: tool-call depth (the plugin uses response_time_ms; we have no "answer time")
     depth_min_reliability: float = 0.6
     depth_full_calls: int = 2
     time_decay_half_life_days: float = 60.0
-    # ---- MVE：按**会话**衰减（伴学是按天，见下方注释）----
-    # 伴学的时间单位是天（:43），因为它的学习者是"隔天回来复习一次"。
-    # Voyager 不是：它一晚上能跑几十轮，按天算 recency 恒等于 1.000 —— 等于没衰减。
-    # 但反过来，同一段连续实验里第 1 轮和第 40 轮也不该互相衰减（那是同一场练习）。
-    # 所以按**会话**切：一段连续操作 = 一个会话，隔够 gap 才算下一个。
+    # ---- MVE: decay by **session** (the plugin uses days, see the comment below) ----
+    # The plugin's time unit is days (:43), because its learner "comes back to review every other day".
+    # Voyager is not: it can run dozens of rounds in one night, so day-based recency is always 1.000 —
+    # equivalent to no decay at all.
+    # But conversely, round 1 and round 40 within the same continuous experiment shouldn't decay each
+    # other either (that's one practice session).
+    # So cut by **session**: one continuous stretch of operation = one session, and only a long enough
+    # gap counts as the next.
     time_decay_basis: str = "session"        # "session" | "day"
     time_decay_half_life_sessions: float = 3.0
     session_gap_hours: float = 2.0
@@ -84,7 +89,7 @@ class MasteryPolicy:
     mastered_threshold: float = 0.8
     unresolved_wrong_mastery_cap: float = 0.79
     rounding_digits: int = 6
-    # 三态门槛（伴学 practice_outcome.py:14）
+    # Three-state threshold (the plugin's practice_outcome.py:14)
     mastery_min_attempts: int = 3
 
     def __post_init__(self) -> None:
@@ -111,8 +116,8 @@ class MasteryPolicy:
             raise ValueError("consistency factor must not exceed 1")
         if self.confidence_floor + self.confidence_span > 1.0:
             raise ValueError("confidence factor must not exceed 1")
-        # 伴学为此专门加了断言（mastery_v2.py:92）：封顶必须低于毕业线，
-        # 否则"有没消化的错题不许毕业"这条规矩形同虚设。
+        # The plugin added an assertion for this (mastery_v2.py:92): the cap must be below the graduation
+        # threshold, otherwise the rule "no graduating with undigested wrong questions" is void.
         if self.unresolved_wrong_mastery_cap >= self.mastered_threshold:
             raise ValueError("unresolved wrong mastery cap must be below the mastered threshold")
 
@@ -122,7 +127,7 @@ DEFAULT_POLICY = MasteryPolicy()
 
 @dataclass(frozen=True)
 class MasteryEvidence:
-    """一条不可变的评估事实（照伴学 mastery_v2.py:101-118）。"""
+    """One immutable assessment fact (mirroring the plugin's mastery_v2.py:101-118)."""
 
     attempt_id: str
     verdict: str
@@ -132,7 +137,7 @@ class MasteryEvidence:
     response_time_ms: int | None
     evaluator_confidence: float | None
     submitted_at: datetime | str
-    # MVE 特有：这次作答成功调了几次工具（伴学用 response_time_ms 表达同一件事）
+    # MVE-specific: how many tools this answer called successfully (the plugin expresses the same thing via response_time_ms)
     tool_calls: int | None = None
 
     def __post_init__(self) -> None:
@@ -152,8 +157,8 @@ class MasterySnapshot:
     confidence: float
     evidence_count: int
     unresolved_wrong_count: int
-    level: str            # 五档（MVE 沿用伴学 V1 的档位名，面板要用）
-    status: str           # 三态（practice_outcome.py:7-9）
+    level: str            # five tiers (MVE keeps the plugin V1's tier names; the dashboard uses them)
+    status: str           # three states (practice_outcome.py:7-9)
     flags: tuple[str, ...] = ()
     mastery_model_version: str = MODEL_VERSION
     computed_at: str = ""
@@ -187,11 +192,11 @@ class _Prepared:
 
 
 def assign_sessions(times: Iterable[datetime], gap_hours: float) -> list[int]:
-    """把一串时刻切成会话：相邻间隔 > gap 就开一个新会话。
+    """Split a series of timestamps into sessions: a gap > gap_hours between neighbors starts a new session.
 
-    只依赖时间戳 → **可重建**（不需要额外的"开始/结束会话"状态）。
-    这也是不让人手工开关会话的原因：手工开关会留下状态，而 V2 的全部价值
-    就在于"同一批事实随时能重算出同一个数"。
+    Depends only on timestamps → **reconstructible** (no extra "session start/end" state needed).
+    This is also why sessions aren't toggled manually: manual toggling leaves state behind, and V2's
+    whole value is "the same batch of facts can recompute the same number at any time".
     """
     ordered = sorted(t for t in times if isinstance(t, datetime))
     out: list[int] = []
@@ -214,9 +219,10 @@ def calculate_mastery(
     as_of: datetime | str | None = None,
     policy: MasteryPolicy = DEFAULT_POLICY,
 ) -> MasterySnapshot:
-    """从一个题的全部事实投影出掌握度（照伴学 mastery_v2.py:208-303）。
+    """Project mastery from all of a question's facts (mirroring the plugin's mastery_v2.py:208-303).
 
-    `as_of` 显式传入而不是读时钟 —— 伴学原文：这样重建才是确定的。
+    `as_of` is passed explicitly instead of reading the clock — the plugin's original text: only then
+    is reconstruction deterministic.
     """
     resolved_topic = str(topic_id or "").strip()
     if not resolved_topic:
@@ -229,7 +235,8 @@ def calculate_mastery(
     unique = _deduplicate(evidence)
     ordered = sorted(unique, key=lambda e: (_coerce_datetime(e.submitted_at, default=projection_time),
                                             e.attempt_id))
-    # 会话划分：同一段连续操作内的证据互不衰减，隔够 gap 才进下一个会话。
+    # Session splitting: evidence within one continuous stretch of operation doesn't decay each other;
+    # only a long enough gap moves to the next session.
     sessions = assign_sessions(
         [_coerce_datetime(e.submitted_at, default=projection_time) for e in ordered],
         policy.session_gap_hours,
@@ -284,10 +291,10 @@ def calculate_mastery(
         flags.append("unresolved_wrong_cap")
 
     rounded = _round_unit(mastery, policy)
-    # 三态照伴学 practice_outcome.py:41-45。
-    # 注意伴学在这有个坑：V2 snapshot 没有 `attempts` 字段，而 practice_outcome
-    # 读的正是它 → attempts=0 < 3 → 对 V2 会恒判 insufficient_evidence。
-    # 我们用 evidence_count 填这个位置（语义一致：有几条证据）。
+    # The three states mirror the plugin's practice_outcome.py:41-45.
+    # Note the plugin's pitfall here: the V2 snapshot has no `attempts` field, yet practice_outcome
+    # reads exactly that → attempts=0 < 3 → V2 would always be judged insufficient_evidence.
+    # We fill that slot with evidence_count (same semantics: how many pieces of evidence).
     if evidence_count < policy.mastery_min_attempts:
         status = MASTERY_INSUFFICIENT_EVIDENCE
     elif rounded >= policy.mastered_threshold and not (
@@ -315,21 +322,21 @@ def calculate_mastery(
 
 
 def _level(mastery: float) -> str:
-    """五档，照伴学 knowledge_tracker.py:240-250。"""
+    """Five tiers, mirroring the plugin's knowledge_tracker.py:240-250."""
     v = _clamp(float(mastery or 0.0))
     if v < 0.20:
-        return "未接触"
+        return "not started"
     if v < 0.40:
-        return "薄弱"
+        return "weak"
     if v < 0.60:
-        return "进行中"
+        return "in progress"
     if v < 0.80:
-        return "熟练"
-    return "掌握"
+        return "proficient"
+    return "mastered"
 
 
 def _deduplicate(evidence: Iterable[MasteryEvidence]) -> tuple[MasteryEvidence, ...]:
-    """同一 attempt_id 重复投递：事实一致就忽略，冲突就报错（伴学:306-315）。"""
+    """Duplicate submissions with the same attempt_id: ignore if the facts agree, error on conflict (plugin :306-315)."""
     unique: dict[str, MasteryEvidence] = {}
     for item in evidence:
         prev = unique.get(item.attempt_id)
@@ -354,8 +361,8 @@ def _prepare(
     evaluator_confidence = _finite_unit(
         item.evaluator_confidence, default=policy.evaluator_confidence_default
     )
-    # 伴学是 response_time_reliability × （没有 depth 项）；
-    # MVE 用工具调用深度做同一件事：只调一个聚合报告就交卷 → 不可靠。
+    # The plugin is response_time_reliability × (no depth term);
+    # MVE uses tool-call depth for the same thing: submitting after a single aggregate report call → unreliable.
     depth_reliability = _depth_reliability(item.tool_calls, policy)
     time_decay = _decay(submitted_at, as_of=as_of, policy=policy, session_age=session_age)
     evidence_weight = _clamp(evaluator_confidence * depth_reliability * time_decay)
@@ -370,11 +377,11 @@ def _prepare(
 
 
 def _normalized_score(verdict: str, score: float | int | None, policy: MasteryPolicy) -> float:
-    """照伴学 mastery_v2.py:346-368。
+    """Mirroring the plugin's mastery_v2.py:346-368.
 
-    与 V1 的关键差别：**有具体分数就用分数**（V1 只认 verdict 的三档）。
-    MVE 的 score 是覆盖率（0-100），所以 45% 的 partial 不会和 75% 的
-    partial 拿同一个 0.6 —— 这一条直接消掉了 V1 的信息损失。
+    The key difference from V1: **if there's a concrete score, use the score** (V1 only recognizes
+    the verdict's three tiers). MVE's score is coverage (0-100), so a 45% partial and a 75%
+    partial don't both get the same 0.6 — this directly eliminates V1's information loss.
     """
     normalized_verdict = str(verdict or "").strip().lower()
     fallback = {
@@ -397,7 +404,7 @@ def _normalized_score(verdict: str, score: float | int | None, policy: MasteryPo
 
 
 def _difficulty_modifier(difficulty: float | int | None, policy: MasteryPolicy) -> float:
-    """伴学 mastery_v2.py:371-388，题目难度用服务端 1..5 档。"""
+    """Plugin's mastery_v2.py:371-388; question difficulty uses the server-side 1..5 tiers."""
     if isinstance(difficulty, bool) or difficulty is None:
         normalized = 0.5
     else:
@@ -420,7 +427,7 @@ def _hint_modifier(used_hint: bool | None, policy: MasteryPolicy) -> float:
 
 
 def _response_time_reliability(response_time_ms: int | None, policy: MasteryPolicy) -> float:
-    """照伴学 mastery_v2.py:399-413（MVE 目前不传作答耗时，保留以对齐结构）。"""
+    """Mirroring the plugin's mastery_v2.py:399-413 (MVE doesn't pass answer time for now; kept to align the structure)."""
     if isinstance(response_time_ms, bool) or response_time_ms is None or response_time_ms < 0:
         return 1.0
     if response_time_ms <= policy.response_time_suspicious_ms:
@@ -435,10 +442,10 @@ def _response_time_reliability(response_time_ms: int | None, policy: MasteryPoli
 
 
 def _depth_reliability(tool_calls: int | None, policy: MasteryPolicy) -> float:
-    """`_response_time_reliability` 的同构版：把"作答耗时"换成"工具调用深度"。
+    """The isomorphic version of `_response_time_reliability`: swapping "answer time" for "tool-call depth".
 
-    只成功调了 1 次工具（例如只拿一个聚合报告就报四个数）→ 不可靠，
-    照伴学对"1 秒交卷"的处理取同一个下限 0.6。
+    Only 1 successful tool call (e.g. reporting four numbers off a single aggregate report) → unreliable,
+    taking the same lower bound 0.6 as the plugin does for "submitting in 1 second".
     """
     if isinstance(tool_calls, bool) or tool_calls is None or tool_calls < 0:
         return 1.0
@@ -454,15 +461,15 @@ def _decay(
     policy: MasteryPolicy,
     session_age: int = 0,
 ) -> float:
-    """时间衰减的分派：MVE 默认按**会话**，伴学口径按天（可切回）。
+    """Time-decay dispatch: MVE defaults to **sessions**, the plugin's convention is days (switchable back).
 
-    按会话：`2^(-会话年龄 / 半衰期会话数)`。同一会话内 = 1（不衰减），
-    隔 3 个会话 = 0.5。间隔多久算一个会话由 `session_gap_hours` 定。
+    By session: `2^(-session age / half-life in sessions)`. Within the same session = 1 (no decay),
+    3 sessions apart = 0.5. How long a gap counts as one session is set by `session_gap_hours`.
 
-    用 `2.0 ** x` 而不是 `math.exp2`：后者是 Python 3.11 才加的，
-    实测在 3.10 的解释器上直接 `AttributeError: module 'math' has no
-    attribute 'exp2'`，整轮在 update_mastery 处崩掉 —— 掌握度模型不该
-    依赖解释器版本。
+    Use `2.0 ** x` rather than `math.exp2`: the latter was only added in Python 3.11,
+    and observed on a 3.10 interpreter it raises `AttributeError: module 'math' has no
+    attribute 'exp2'` outright, crashing the whole round at update_mastery — the mastery model
+    shouldn't depend on the interpreter version.
     """
     if policy.time_decay_basis == "day":
         return _time_decay(submitted_at, as_of=as_of, policy=policy)
@@ -471,10 +478,10 @@ def _decay(
 
 
 def _time_decay(submitted_at: datetime, *, as_of: datetime, policy: MasteryPolicy) -> float:
-    """伴学 mastery_v2.py:416-424：半衰期 60 天（人的复习节奏）。
+    """Plugin's mastery_v2.py:416-424: half-life of 60 days (a human's review rhythm).
 
-    对 MVE 基本不起作用 —— Voyager 一晚上几十轮，60 天≈零衰减，
-    这也是默认走 `time_decay_basis = "session"` 的原因。
+    Basically inert for MVE — Voyager runs dozens of rounds in a night, so 60 days ≈ zero decay,
+    which is why the default is `time_decay_basis = "session"`.
     """
     age_days = max(0.0, (as_of - submitted_at).total_seconds()) / 86_400.0
     return _clamp(math.exp(-math.log(2.0) * age_days / policy.time_decay_half_life_days))
@@ -524,10 +531,10 @@ def _format_datetime(value: datetime) -> str:
 
 
 def evidence_from_row(row: dict, *, default_difficulty: float = 3.0) -> MasteryEvidence:
-    """从 run_log 的一行还原一条证据 —— 跨进程重建用。
+    """Reconstruct one piece of evidence from a run_log row — for cross-process reconstruction.
 
-    证据必须能从日志**完整**重建：否则每次跑都是新进程，
-    权重/时间衰减就永远只看到当前这一轮。
+    Evidence must be **fully** reconstructible from the log: otherwise, with every run a new process,
+    weights/time decay would only ever see the current round.
     """
     ts = str(row.get("ts") or "")
     round_no = row.get("round")
@@ -545,29 +552,32 @@ def evidence_from_row(row: dict, *, default_difficulty: float = 3.0) -> MasteryE
 
 
 # ---------------------------------------------------------------------------
-# 维度级掌握度 —— 伴学 readiness 的同构物
+# Dimension-level mastery — the isomorphic counterpart of the plugin's readiness
 # ---------------------------------------------------------------------------
-# 伴学的 `readiness_in_scope`（knowledge_tracker.py:435-503）是
-# **「图谱 + 掌握度」的联合查询**：
+# The plugin's `readiness_in_scope` (knowledge_tracker.py:435-503) is a
+# **joint "knowledge graph + mastery" query**:
 #     mastery vs required_mastery → ready / blockers
-# 那里掌握度就挂在**图谱节点**（topic）上，粒度天然对齐 —— 所以伴学的
-# 图谱能回答"这个知识点现在能不能出题、该出多难"。
+# There, mastery hangs off the **knowledge graph node** (topic), so granularities align naturally —
+# which is why the plugin's graph can answer "can this knowledge point be tested right now, and at
+# what difficulty".
 #
-# MVE 粒度错位：掌握度按 **topic** 算（`calculate_mastery`），
-# 而图谱节点是 **dim:\*** —— 于是图谱做不了伴学那样的 readiness 查询，
-# 出题器只能读节点上**静态的种子难度**，读不到"Voyager 现在会到哪了"。
-# 这是学习曲线 0→100 阶跃的根因之一：梯度少了掌握度这一维。
+# MVE's granularity mismatch: mastery is computed per **topic** (`calculate_mastery`),
+# while the knowledge graph nodes are **dim:*** — so the graph can't do plugin-style readiness
+# queries, and the question generator can only read the **static seed difficulty** on nodes,
+# not "where Voyager is at now". This is one of the root causes of the learning curve's 0→100 step
+# function: the gradient is missing the mastery dimension.
 #
-# 这里把 topic 级掌握度**投影到维度**：
-#     维度 d 的掌握度 = 出现过 d 的所有**考核**题的分数均值
-# ⚠️ 只认 exam_log。run_log 是带图谱跑的练习，覆盖率恒 100%（贴顶假平线），
-#    拿它算掌握度等于把支架当能力（项目核心设计，见 README 双日志一节）。
+# Here topic-level mastery is **projected onto dimensions**:
+#     dimension d's mastery = mean score of all **exam** questions that involve d
+# ⚠️ Only exam_log counts. run_log is practice run with the knowledge graph, where coverage is always
+#    100% (a flat fake line hugging the top); computing mastery from it treats the scaffold as
+#    ability (a core project design; see the dual-log section of the README).
 # ---------------------------------------------------------------------------
 _DIM_MASTERY_CACHE: dict[str, dict[str, Any]] = {}
 
 
 def dimension_mastery(*, reload: bool = False) -> dict[str, dict[str, Any]]:
-    """{dimension: {mastery, n, last, topics}} —— 以考核为准，不用练习。"""
+    """{dimension: {mastery, n, last, topics}} — exam-based, not practice."""
     if _DIM_MASTERY_CACHE and not reload:
         return _DIM_MASTERY_CACHE
     import json as _json

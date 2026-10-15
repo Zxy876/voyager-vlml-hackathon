@@ -1,25 +1,26 @@
-"""voyager_vlml —— 原版 Voyager 学习循环的 VLML 同构版。
+"""voyager_vlml — the VLML isomorphic version of the original Voyager learning loop.
 
-用户指令（2026-10-12）：当前 mve/ 后端问题太大（反馈骨架建在「比对 VLML 标准
-答案」上，违反设计），改为**从原版 Voyager 重建**，按五步同构：
+User instruction (2026-10-12): the current mve/ backend has too big a problem (its feedback skeleton is
+built on "comparing against VLML's reference answers", which violates the design), so rebuild **from the
+original Voyager**, following a five-step isomorphism:
 
-  ① MC 初始化携带的信息 → 我们的 VLML 同构版里程碑        （本文件同级的 agents/curriculum.py）
-  ② control_primitives 的 JS 代码 → SQL 原语               （control_primitives/）
-  ③ 在 voyager 环境里安装 VLML MCP 依赖（DB / RIB / VLGG）   （env/）
-  ④ 迭代修正机制 prompt 里的语言 → SQL                      （prompts/ + agents/critic.py）
-  ⑤ 面板后置（本轮只验证后端闭环）
+  ① MC-initialization carried info → our VLML-isomorphic milestone        (agents/curriculum.py at this level)
+  ② control_primitives JS code     → SQL primitives                        (control_primitives/)
+  ③ install VLML MCP deps in the voyager env (DB / RIB / VLGG)            (env/)
+  ④ iterative-revision prompt language → SQL                              (prompts/ + agents/critic.py)
+  ⑤ dashboard deferred (this round only validates the backend loop)
 
-同构对照表（原版 MC 字段 → VLML）：
-  biome             → 数据源（rib / vlgg / DB）
-  nearby_blocks     → 可见表（按进度档解锁）
-  other_blocks      → 其它见过的表
-  nearby_entities   → 实体可填值（库里真实取值范围）
-  inventory         → 当前实体锚点（series / team / map）
-  chests            → 已学会技能（可复用 SQL 配方）
-  completed_tasks   → 已解锁里程碑（图谱节点已完成）
-  failed_tasks      → 失败 / 跳过（带原因）
-  "Mine 1 wood log" → VLML 种子里程碑（树干起点、无前置）
-  —— 新增：里程碑树（seed / trunk / keystone）+ 随机 (表,列) 最小单位 ——
+Isomorphism mapping (original MC field → VLML):
+  biome             → data source (rib / vlgg / DB)
+  nearby_blocks     → visible tables (unlocked by progress tier)
+  other_blocks      → other tables seen before
+  nearby_entities   → fillable entity values (actual value range in the DB)
+  inventory         → current entity anchor (series / team / map)
+  chests            → learned skills (reusable SQL recipes)
+  completed_tasks   → unlocked milestones (knowledge-graph node completed)
+  failed_tasks      → failed / skipped (with reason)
+  "Mine 1 wood log" → VLML seed milestone (trunk start, no prerequisites)
+  —— added: milestone tree (seed / trunk / keystone) + random (table, column) as the minimal unit ——
 """
 
 __all__ = ["agents"]

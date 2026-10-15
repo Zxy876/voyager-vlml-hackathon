@@ -1,31 +1,31 @@
 #!/usr/bin/env python3
-"""Voyager 技能库持久化 —— 照原仓库 SkillManager 做「防膨胀」。
+"""Voyager skill library persistence — mirroring the original repo's SkillManager for "bloat prevention".
 
-原仓库 voyager/agents/skill.py 里三条让技能库不炸掉的硬规矩：
+Three hard rules from the original repo's voyager/agents/skill.py that keep the skill library from exploding:
 
-  1. 技能不是 list.append，而是 `dict[program_name]` —— 同名技能 **覆盖**，不是新增：
+  1. Skills are not list.append, but `dict[program_name]` — same-named skills are **overwritten**, not added:
        if program_name in self.skills:
            print(f"Skill {program_name} already exists. Rewriting!")
            self.vectordb._collection.delete(ids=[program_name])
-     （SkillManager.add_new_skill）
+     (SkillManager.add_new_skill)
 
-  2. 检索只取 top_k：
+  2. Retrieval takes top_k only:
        k = min(self.vectordb._collection.count(), retrieval_top_k)   # retrieval_top_k=5
        docs_and_scores = self.vectordb.similarity_search_with_score(query, k=k)
-     技能库再大，进 prompt 的永远只有 5 条 —— 这是"库会涨但 prompt 不涨"的关键。
+     No matter how big the library grows, only 5 entries ever enter the prompt — this is the key to "the library grows but the prompt does not".
 
-  3. 无用技能直接不入：
+  3. Useless skills are simply not stored:
        if info["task"].startswith("Deposit useless items into the chest at"):
            return
 
-本模块把这三条原样搬过来：
-  1. add() 按 (topic, name) 去重，命中就 Rewriting（覆盖 + 归档旧版 + versions+1）
-  2. retrieve() 只返回 top_k 条（向量余弦优先，embedding 不通降级词面；
-     同题优先 + 有效性加权不变）
-  3. add() 会丢掉低价值经验（太短 / 与已有技能几乎重复 / 只是复述题目）
+This module copies those three verbatim:
+  1. add() deduplicates by (topic, name), and on a hit does Rewriting (overwrite + archive old version + versions+1)
+  2. retrieve() returns top_k entries only (vector cosine first, degrading to lexical when embedding is unavailable;
+     same-topic priority + effectiveness weighting unchanged)
+  3. add() drops low-value lessons (too short / nearly duplicate of an existing skill / merely restating the question)
 
-膨胀有没有真被拦住必须可观测 —— stats() 给出 writes（累计写入尝试）
-与 skills（实际条目）的比值：v1 是 15 次写入 → 15 条（1.0，完全没拦住）。
+Whether bloat was truly blocked must be observable — stats() gives the ratio of writes (cumulative write attempts)
+to skills (actual entries): v1 was 15 writes → 15 entries (1.0, not blocked at all).
 """
 
 from __future__ import annotations
@@ -38,38 +38,38 @@ from typing import Any
 
 STORE = Path(__file__).resolve().parent / "skill_store.json"
 
-# 照原仓库 retrieval_top_k=5：进 prompt 的经验条数上限
+# Mirroring the original repo's retrieval_top_k=5: cap on lesson entries entering the prompt
 RETRIEVAL_TOP_K = 5
 
-# 名字/内容相似度阈值（无向量库，用中英混排的词面 Jaccard 近似）
-DUP_THRESHOLD = 0.62    # 超过 → 视为同一条技能 → 覆盖（Rewriting）
-SKIP_THRESHOLD = 0.90   # 超过 → 内容几乎没变 → 连覆盖都不用，直接丢弃
-MIN_LESSON_LEN = 12     # 照 "Deposit useless items" 特判：太短的经验没有复用价值
-MAX_HISTORY = 3         # 旧版本最多留几条（归档，不进 prompt）
+# Name/content similarity thresholds (no vector DB; approximated with lexical Jaccard over mixed CN/EN text)
+DUP_THRESHOLD = 0.62    # above → treated as the same skill → overwrite (Rewriting)
+SKIP_THRESHOLD = 0.90   # above → content barely changed → skip even overwriting, discard directly
+MIN_LESSON_LEN = 12     # Mirroring the "Deposit useless items" special case: too-short lessons have no reuse value
+MAX_HISTORY = 3         # Max old versions kept (archived, not entering the prompt)
 
-# 向量模式（embedding 走 Nebius Qwen3-Embedding-8B，原版同款思路但全栈不出
-# Token Factory、不引 Chroma）。余弦分布与 Jaccard 不同，跨题门槛必须分开设。
-# 0.40 是 2026-10-14 实测定标：8 条探针（Qwen3-Embedding-8B, 4096 维）——
-#   相关（同轴换说/跨语言）0.66-0.70；同领域异题 0.45-0.47；
-#   完全无关（红烧肉/天气/写诗）0.26-0.34 → 分界带 0.34-0.45，取中偏 recall。
-# 样本小（8 条），是定标起点不是定律；换 embedding 模型必须重测。
-VEC_CROSS_MIN_SIM = 0.40    # 跨题门槛（向量模式）：低于它视为不相关
+# Vector mode (embedding via Nebius Qwen3-Embedding-8B, same approach as the original but the whole stack stays inside
+# Token Factory and does not pull in Chroma). The cosine distribution differs from Jaccard, so cross-topic thresholds must be set separately.
+# 0.40 is the 2026-10-14 empirical calibration: 8 probes (Qwen3-Embedding-8B, 4096 dims) —
+#   related (same axis rephrased / cross-language) 0.66-0.70; same-domain different question 0.45-0.47;
+#   completely unrelated (braised pork / weather / poetry) 0.26-0.34 → boundary band 0.34-0.45, taking the middle, recall-leaning.
+# Small sample (8 probes) makes this a calibration starting point, not a law; changing the embedding model requires re-measuring.
+VEC_CROSS_MIN_SIM = 0.40    # Cross-topic threshold (vector mode): below it counts as unrelated
 
-# 跨题经验注入 prompt 的两条门槛（不加就会被上一题的经验带偏）
-CROSS_TOPIC_MIN_SIM = 0.12   # 与本题题干的词面相关度下限
-CROSS_TOPIC_MAX = 2          # 跨题最多几条
+# Two thresholds for injecting cross-topic lessons into the prompt (without them, the previous question's lessons skew it)
+CROSS_TOPIC_MIN_SIM = 0.12   # Lower bound on lexical relatedness to this question's text
+CROSS_TOPIC_MAX = 2          # Max cross-topic entries
 
 
-# ---------------- 文件读写 ----------------
+# ---------------- File I/O ----------------
 
 def _empty() -> dict[str, Any]:
     return {
         "version": 2,
         "skills": {},
-        "writes": 0,      # 累计尝试写入次数
-        "added": 0,       # 真正新建
-        "rewrites": 0,    # 被覆盖（Rewriting）
-        "skipped": 0,     # 被判为无用/重复而丢弃
+        "writes": 0,      # Cumulative attempted writes
+        "added": 0,       # Actually created new
+        "rewrites": 0,    # Overwritten (Rewriting)
+        "skipped": 0,     # Discarded as useless/duplicate
     }
 
 
@@ -80,7 +80,7 @@ def _load_raw() -> dict[str, Any]:
         data = json.loads(STORE.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return _empty()
-    # v1 是 {"memory": [str, ...]} —— 迁移成 v2，否则老的技能库会一直当新条目
+    # v1 is {"memory": [str, ...]} — migrate to v2, or the old library keeps treating entries as new
     if isinstance(data, dict) and isinstance(data.get("memory"), list):
         return _migrate_v1(data["memory"])
     if not isinstance(data, dict) or not isinstance(data.get("skills"), dict):
@@ -91,7 +91,7 @@ def _load_raw() -> dict[str, Any]:
 
 
 def _migrate_v1(memory: list[str]) -> dict[str, Any]:
-    """v1 的 list[str] → v2 的 dict。老条目没有名字，取前 12 字当名字。"""
+    """v1's list[str] → v2's dict. Old entries have no name; take the first 12 characters as the name."""
     out = _empty()
     now = time.time()
     for i, text in enumerate(memory):
@@ -120,10 +120,10 @@ def _save(data: dict[str, Any]) -> None:
     )
 
 
-# ---------------- 名字归一化与相似度 ----------------
+# ---------------- Name normalization and similarity ----------------
 
 def norm_name(name: str) -> str:
-    """技能名归一化：去空白与标点，照 program_name 当主键用。"""
+    """Skill-name normalization: strip whitespace and punctuation, used as the primary key like program_name."""
     return re.sub(r"[^\w\u4e00-\u9fff]+", "", str(name or "")).lower()
 
 
@@ -132,7 +132,7 @@ def _key(topic: str, name: str) -> str:
 
 
 def _tokens(s: str) -> set[str]:
-    """中英混排分词：英文/数字按词，中文按 2-gram。"""
+    """Mixed CN/EN tokenization: English/digits by word, Chinese by 2-gram."""
     s = re.sub(r"[^\w\u4e00-\u9fff]+", " ", str(s or "").lower())
     toks: set[str] = set()
     for w in s.split():
@@ -153,12 +153,12 @@ def similarity(a: str, b: str) -> float:
     return len(ta & tb) / len(ta | tb)
 
 
-# ---------------- 向量模式（照原版 SkillManager 的向量检索，轻量实现） ----------------
-# 原版（voyager_original/voyager/agents/skill.py:43-47,117-130）用 Chroma +
-# OpenAIEmbeddings 做相似度检索。这里同构其思路但不引重依赖：
-# embedding 走 voyager_vlml.llm.embed（Nebius Token Factory 上的
-# Qwen3-Embedding-8B），向量随技能存 JSON，检索时自算余弦。
-# embedding 不通时全程降级词面 Jaccard —— 检索可用性不依赖 Nebius 通不通。
+# ---------------- Vector mode (mirroring the original SkillManager's vector retrieval, lightweight implementation) ----------------
+# The original (voyager_original/voyager/agents/skill.py:43-47,117-130) uses Chroma +
+# OpenAIEmbeddings for similarity retrieval. Here the idea is isomorphic but without heavy dependencies:
+# embedding goes through voyager_vlml.llm.embed (Qwen3-Embedding-8B on Nebius Token Factory),
+# vectors stored in JSON alongside skills, and cosine computed at retrieval time.
+# When embedding is unavailable, everything degrades to lexical Jaccard — retrieval availability does not depend on Nebius being reachable.
 
 def _cos(a: list[float], b: list[float]) -> float:
     if not a or not b or len(a) != len(b):
@@ -177,7 +177,7 @@ def _skill_emb(s: dict[str, Any]) -> list[float]:
 
 
 def _embed_one(text: str) -> list[float]:
-    """算一条文本的向量；任何失败返回 []（调用方降级词面）。"""
+    """Compute one text's vector; any failure returns [] (the caller degrades to lexical)."""
     try:
         from voyager_vlml import llm
         vs = llm.embed([str(text or "")[:2000]])
@@ -187,13 +187,13 @@ def _embed_one(text: str) -> list[float]:
 
 
 def _vec_or_lexical(qv: list[float], sv: list[float], q: str, text: str) -> tuple[float, bool]:
-    """有向量用余弦，没向量降级 Jaccard。返回 (sim, 是否向量模式)。"""
+    """Use cosine with vectors, degrade to Jaccard without. Returns (sim, whether vector mode)."""
     if qv and sv:
         return _cos(qv, sv), True
     return similarity(q, text), False
 
 
-# ---------------- 写入（去重覆盖） ----------------
+# ---------------- Writing (dedup overwrite) ----------------
 
 def add(
     topic: str,
@@ -204,27 +204,27 @@ def add(
     blueprint: dict[str, Any] | None = None,
     code: str = "",
 ) -> tuple[str, str]:
-    """写一条技能。返回 (动作, key)，动作 ∈ added / rewritten / skipped。
+    """Write one skill. Returns (action, key), where action ∈ added / rewritten / skipped.
 
-    照 SkillManager.add_new_skill：同名 → Rewriting，不是 append。
+    Mirroring SkillManager.add_new_skill: same name → Rewriting, not append.
 
-    `code` 是**解法源码** —— 原版存的是 `program_code`（完整 JS 源码），
-    检索时 `retrieve_skills` 取回来的也是 `skills[name]["code"]`，
-    拼进 prompt 的同样是源码（`programs` property）。
-    之前这里只有 `text`（一句自然语言经验），模型读了但不改行为：
-    实测注入 2 条经验、轨迹仍是单工具、覆盖率掉到 30%。
-    真正的差距就在这儿 —— **原版学的是代码，MVE 学的是话术**。
+    `code` is the **solution source code** — the original stores `program_code` (full JS source),
+    and `retrieve_skills` likewise returns `skills[name]["code"]`,
+    with the same source spliced into the prompt (`programs` property).
+    Previously there was only `text` here (one natural-language lesson), which the model read but did not change behavior for:
+    observed injecting 2 lessons, trajectory still single-tool, coverage dropping to 30%.
+    The real gap is right here — **the original learns code, MVE learned talk**.
 
-    `source` 区分技能是从哪条通道来的：
-      - `practice` —— 做题通道（判对时固化自己的做法）
-      - `bypass`   —— 旁路通道（观摩裁判的标准解法，见 `bypass_learn.py`）
-    区分的意义：**判错时我们不写自己的做法**（那已被证明是错的），
-    但旁路学到的是裁判的做法、已被验证正确 —— 两条通道的可信度不同，
-    复盘时要能分清一条技能到底是"我试出来的"还是"我学来的"。
+    `source` distinguishes which channel a skill came through:
+      - `practice` — the question-solving channel (solidify one's own approach when judged correct)
+      - `bypass`   — the bypass channel (observing the referee's standard solution, see `bypass_learn.py`)
+    Why the distinction matters: **when judged wrong we do not write our own approach** (it has been proven wrong),
+    but what the bypass channel learns is the referee's approach, already verified correct — the two channels have different credibility,
+    and a post-mortem must be able to tell whether a skill is "something I figured out" or "something I learned".
     """
     text = str(text or "").strip()
-    # 照 "Deposit useless items" 特判：没内容的经验不入库
-    if len(text) < MIN_LESSON_LEN or text in {"无", "None", "（无）"}:
+    # Mirroring the "Deposit useless items" special case: contentless lessons are not stored
+    if len(text) < MIN_LESSON_LEN or text in {"none", "None", "(none)"}:
         data = _load_raw()
         data["writes"] += 1
         data["skipped"] += 1
@@ -236,12 +236,12 @@ def add(
     key = _key(topic, name)
     now = time.time()
 
-    # 同名主键命中 → 直接覆盖
+    # Same-name primary key hit → overwrite directly
     hit = data["skills"].get(key)
     best_key, best_sim = key, 1.0 if hit else 0.0
     if not hit:
-        # LLM 每轮可能给不同名字 —— 照 curriculum 的 qa_cache：
-        # similarity_search_with_score < 阈值 就算命中缓存，不能当新条目
+        # The LLM may give a different name each round — mirroring curriculum's qa_cache:
+        # similarity_search_with_score < threshold counts as a cache hit, and must not be treated as a new entry
         probe = f"{name} {text}"
         for k, s in data["skills"].items():
             if s.get("topic") != topic:
@@ -252,12 +252,12 @@ def add(
 
     if best_sim >= DUP_THRESHOLD and best_key in data["skills"]:
         s = data["skills"][best_key]
-        # 内容几乎没变 → 连覆盖都省了（这正是 v1 膨胀十几条的那类写入）
+        # Content barely changed → skip even the overwrite (this is exactly the kind of write that bloated v1 by a dozen entries)
         #
-        # **但源码变了就必须更新，哪怕文字没变**。实测踩过：percent 口径的
-        # 源码从"单条 .num 路径"改成"num/denom 两条路径"之后，lesson 那句话
-        # 一字未变 → 走 skipped 分支 → 技能库里一直是旧源码 → 模型照旧 dig
-        # 到分子 3 就交上来（3 ≠ 50.0）。文字相同不代表内容相同。
+        # **But if the source changed, it must be updated, even if the text is unchanged**. Observed pitfall: after the percent-metric
+        # source changed from a "single .num path" to "num/denom two paths", the lesson sentence
+        # was word-for-word identical → took the skipped branch → the library kept the old source → the model still dug
+        # to numerator 3 and submitted it (3 ≠ 50.0). Identical text does not mean identical content.
         stale_code = bool(code) and code != str(s.get("code") or "")
         if similarity(text, s.get("text", "")) >= SKIP_THRESHOLD and not stale_code:
             data["skipped"] += 1
@@ -297,28 +297,28 @@ def add(
     return "added", key
 
 
-# ---------------- 检索（top_k） ----------------
+# ---------------- Retrieval (top_k) ----------------
 
 def retrieve(
     topic: str, query: str, top_k: int = RETRIEVAL_TOP_K
 ) -> list[dict[str, Any]]:
-    """照 SkillManager.retrieve_skills：只取 top_k 条进 prompt。
+    """Mirroring SkillManager.retrieve_skills: only top_k entries enter the prompt.
 
-    相似度双模（2026-10-14 向量化改造）：
-      - **向量模式**（默认）：问句与技能文本都过 Nebius embedding 算余弦 ——
-        照原版 skill.py:117-130 的向量检索思路，补词面 Jaccard 跨不过的
-        语义鸿沟（「首血后胜率」vs 配方文本「首血转换率分析」词面几乎不重叠）。
-      - **词面模式**（兜底）：embedding 不通 / 老技能没有向量时，退回
-        「同题优先 + Jaccard + 有效性」打分。
-    跨题门槛按模式分开（VEC_CROSS_MIN_SIM / CROSS_TOPIC_MIN_SIM）——
-    余弦与 Jaccard 分布不同，共用一个阈值必然误杀或漏放。
+    Dual-mode similarity (2026-10-14 vectorization rework):
+      - **Vector mode** (default): both question and skill text go through Nebius embedding for cosine —
+        mirroring the original's vector-retrieval approach in skill.py:117-130, bridging the
+        semantic gap that lexical Jaccard cannot cross ("win rate after first blood" vs recipe text "first blood conversion analysis" barely overlap lexically).
+      - **Lexical mode** (fallback): when embedding is unavailable / old skills have no vectors, fall back to
+        "same-topic priority + Jaccard + effectiveness" scoring.
+    Cross-topic thresholds are separated by mode (VEC_CROSS_MIN_SIM / CROSS_TOPIC_MIN_SIM) —
+    cosine and Jaccard distributions differ, so sharing one threshold inevitably over-kills or under-passes.
 
-    两条硬门槛（实测不加就会被跨题经验带偏）：
-      1. **跨题经验必须真的相关**才注入。库小的时候 top_k 装不满，
-         于是上一题的经验被硬塞进这一题的 prompt（"按地图维度下钻 query_sql"
-         被套到 pattern 题上，Voyager 就跑偏了）。原仓库靠向量相似度天然
-         挡住不相关技能，这里必须显式补一个相关度下限。
-      2. 跨题最多 2 条。prompt 里该占主导的是本题经验。
+    Two hard thresholds (observed: without them, cross-topic lessons skew the result):
+      1. **Cross-topic lessons must be genuinely relevant** to be injected. When the library is small, top_k is not filled,
+         so the previous question's lessons get force-stuffed into this question's prompt ("drill down query_sql by map dimension"
+         applied to the pattern question, and Voyager goes off the rails). The original repo naturally
+         blocks irrelevant skills via vector similarity; here an explicit relevance lower bound must be added.
+      2. At most 2 cross-topic entries. What should dominate the prompt is this question's lessons.
     """
     data = _load_raw()
     qv = _embed_one(query)
@@ -329,7 +329,7 @@ def retrieve(
         sim, is_vec = _vec_or_lexical(qv, _skill_emb(s), query, text)
         floor = VEC_CROSS_MIN_SIM if is_vec else CROSS_TOPIC_MIN_SIM
         if not same_topic and sim < floor:
-            continue                      # 门槛 1：不相关的跨题经验不进 prompt
+            continue                      # Threshold 1: irrelevant cross-topic lessons do not enter the prompt
         score = 3.0 if same_topic else 0.0
         score += 2.5 * sim
         hits = int(s.get("hits") or 0)
@@ -342,7 +342,7 @@ def retrieve(
     cross = 0
     for score, key, s in scored:
         if s.get("topic") != topic:
-            if cross >= CROSS_TOPIC_MAX:  # 门槛 2
+            if cross >= CROSS_TOPIC_MAX:  # Threshold 2
                 continue
             cross += 1
         if len(out) >= max(1, top_k):
@@ -355,7 +355,7 @@ def retrieve(
 
 
 def mark_used(keys: list[str]) -> None:
-    """被检索注入了 prompt → hits +1。"""
+    """Retrieved and injected into the prompt → hits +1."""
     if not keys:
         return
     data = _load_raw()
@@ -369,7 +369,7 @@ def mark_used(keys: list[str]) -> None:
 
 
 def mark_result(keys: list[str], ok: bool) -> None:
-    """注入后这一轮判对了 → ok +1。有效性低的技能会在检索里自然沉底。"""
+    """Judged correct this round after injection → ok +1. Low-effectiveness skills naturally sink in retrieval."""
     if not keys or not ok:
         return
     data = _load_raw()
@@ -382,10 +382,10 @@ def mark_result(keys: list[str], ok: bool) -> None:
         _save(data)
 
 
-# ---------------- 观测与兼容 ----------------
+# ---------------- Observability and compatibility ----------------
 
 def stats() -> dict[str, Any]:
-    """膨胀是否真被拦住，看 bloat = writes / skills。"""
+    """Whether bloat was truly blocked: see bloat = writes / skills."""
     data = _load_raw()
     n = len(data["skills"])
     writes = int(data.get("writes") or 0)
@@ -405,13 +405,20 @@ def all_skills() -> list[dict[str, Any]]:
     return [dict(s, key=k) for k, s in data["skills"].items()]
 
 
+def seed_thinking() -> list[dict[str, Any]]:
+    """General planning thinking distilled by MC (topic=mc-thinking): domain-agnostic
+    'what to do first / what after' lessons used to seed the prompt's memory block.
+    Returns an empty list when none have been distilled yet (callers skip the block)."""
+    return [s for s in all_skills() if s.get("topic") == "mc-thinking"]
+
+
 def load() -> list[str]:
-    """兼容旧调用方：返回全部技能文本（带 [topic] 前缀）。仅用于展示。"""
+    """Backward-compatible for old callers: returns all skill texts (with [topic] prefix). Display only."""
     return [f"[{s.get('topic','')}] {s.get('text','')}" for s in all_skills()]
 
 
 def save(memory: list[str]) -> None:
-    """兼容旧调用方。现在是 append 语义的直接写入，会绕过去重 —— 仅在迁移时用。"""
+    """Backward-compatible for old callers. Now a direct write with append semantics, bypassing dedup — for migration only."""
     for text in memory:
         topic, body = "", str(text)
         m = re.match(r"^\[([^\]]+)\]\s*(.*)$", body, re.S)
@@ -423,4 +430,4 @@ def save(memory: list[str]) -> None:
 def reset() -> None:
     if STORE.exists():
         STORE.unlink()
-    print(f"已清空技能库：{STORE}")
+    print(f"Skill library cleared: {STORE}")

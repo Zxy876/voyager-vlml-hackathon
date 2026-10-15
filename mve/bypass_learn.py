@@ -1,38 +1,45 @@
 #!/usr/bin/env python3
-"""旁路学习：不通过做题，直接观摩裁判（VLML0）的标准解法来积累技能。
+"""Bypass learning: accumulate skills by directly observing the referee (VLML0)'s standard
+solution instead of doing the questions.
 
-为什么要有这条旁路
-------------------
-人类学习者有两种积累能力的方式：做题（被考核），和不做题的学习（看例题、
-看讲解、看标准解法）。猫娘伴学里后者是**能力模块**（`adaptive_learning/
-cognitive_catalog.py` 的 blueprint + `cognitive_delivery.py` 的投递）：
-它独立于做题，按「认知缺陷 → 修补策略 → 具体动作」把能力送到学习者面前。
+Why this bypass has to exist
+------------------------
+Human learners have two ways of accumulating ability: doing questions (being examined), and
+learning without doing questions (studying worked examples, reading walkthroughs, reading the
+standard solution). In the study companion the latter is the **ability module** (blueprint in
+`adaptive_learning/cognitive_catalog.py` + delivery in `cognitive_delivery.py`): it is independent
+of question answering and brings ability to the learner along
+"cognitive defect → repair strategy → concrete action".
 
-MVE 之前只有做题一条路，而做题这条路上有个死结：
+Before this, MVE had only the question-answering path, and that path had a deadlock:
 
-    判错时不写技能库 —— 这次的做法已被裁判证明是错的，写进去就是埋雷
-    （`voyager.py:1103-1114`，这个决定是对的）
+    on a wrong answer nothing is written to the skill library —— what it did has been proven wrong
+    by the referee, so storing it would be planting a landmine (`voyager.py:1103-1114`; this
+    decision is correct)
 
-于是学习**只可能发生在判对时**，而判对时写的又是一条模板
-（`voyager.py:1048-1050`）。结果：技能库永远只有一两条，还没什么内容。
+So learning **can only happen when the answer is right**, and what gets written then is a template
+(`voyager.py:1048-1050`). Result: the skill library holds one or two entries and little substance.
 
-旁路把这个死结解开：**旁路上学的不是 Voyager 自己的做法，而是裁判的做法** ——
-裁判的做法是确定性层算出来的、已经被验证正确的，可以放心固化。
+This bypass breaks the deadlock: **what is learned on the bypass is not Voyager's own approach but
+the referee's approach** —— the referee's approach is computed by the deterministic layer and
+already verified correct, so it is safe to solidify.
 
-与考核通道的分工（这是伴学给的关键区分）
+Division of labour with the exam channel (the key distinction the study companion contributes)
 ----------------------------------------
-伴学判题后会**把标准答案回传给学习者**（`tutor_llm_agent_answer_evaluate.py:84`
-与 `:123` 的 `reference_answer`）—— 因为它的目的是"学会"，不是"考过"。
-MVE 的 `learn()` 则刻意不给数值（`voyager.py:1068`），因为它要的是可比的掌握度。
+After grading, the study companion **feeds the reference answer back to the learner**
+(`reference_answer` at `tutor_llm_agent_answer_evaluate.py:84` and `:123`) —— because its purpose is
+"learning", not "passing". MVE's `learn()` deliberately gives no numbers (`voyager.py:1068`), because
+what it wants is a comparable mastery level.
 
-两者都对，只是通道不同：
-    考核通道（做题）  —— 不给答案，判覆盖率，进掌握度
-    旁路通道（本模块）—— 给标准解法，不判分，只进技能库
+Both are right, they are just different channels:
+    exam channel (doing questions) —— no answer given, coverage is graded, feeds mastery
+    bypass channel (this module)   —— the standard solution is given, not graded, only the skill
+                                      library is fed
 
-跑法
+How to run it
 ----
     python mve/bypass_learn.py --topic pistol_eco_pattern
-    python mve/bypass_learn.py --topic series_totals --force   # 重跑裁判
+    python mve/bypass_learn.py --topic series_totals --force   # re-run the referee
 """
 
 from __future__ import annotations
@@ -45,7 +52,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import vlml_env  # noqa: F401,E402  必须先引导环境
+import vlml_env  # noqa: F401,E402  must bootstrap the environment first
 
 import causal_timeline  # noqa: E402
 import skill_store  # noqa: E402
@@ -58,42 +65,47 @@ BYPASS_SOURCE = "bypass"
 
 def _prompt(task: Any, ref: Any, traj: list[str], dims: list[str]) -> str:
     rubric = "\n".join(f"- {p.point}｜dimension=`{p.dimension}`" for p in task.rubric)
-    return f"""你是一名分析 agent，正在**观摩**一份标准解法，准备把它变成自己能复用的做法。
+    return f"""You are an analysis agent that is **observing** a standard solution, preparing to turn it
+into an approach you can reuse yourself.
 
-题目：{task.question}
+Question: {task.question}
 
-需要覆盖的评分点：
+The rubric points that must be covered:
 {rubric}
 
-标准解法（已被验证正确）用的工具序列：{' → '.join(traj) or '（无）'}
-它取到的维度：{', '.join(dims) or '（无）'}
+The tool sequence the standard solution (already verified correct) used: {' → '.join(traj) or '(none)'}
+The dimensions it retrieved: {', '.join(dims) or '(none)'}
 
-请从中提炼一条**下次遇到同类题目时能用上**的做法，输出 JSON：
-{{"name": "技能名，格式固定为『工具名+按什么维度拆分』，例如 match_summary_report按map下钻",
-  "lesson": "一到两句话，只写可复用的做法：该调哪个工具、按什么维度拆分、先取哪层再下钻哪层。不要复述题目，不要写具体数值",
-  "defect": "这条做法解决的是哪一类缺陷，从这几个里选一个：missing_dimension（漏维度）/ wrong_granularity（粒度不对）/ tool_uncovered（工具没被用到）/ value_form（数值形态不对）",
-  "strategy": "修补策略，从这几个里选一个：drill_down（下钻一层）/ switch_tool（换工具）/ combine_tools（组合多工具）/ read_scope（读报告的 scope 元数据）"}}
+Please distill one **approach that will be useful next time you meet a similar question** and output JSON:
+{{"name": "skill name, in the fixed format 'tool name + what dimension you split it by', e.g. match_summary_report drill down by map",
+  "lesson": "one or two sentences, only the reusable approach: which tool to call, which dimension to split it by, which layer to fetch first and which layer to drill into next. Do not restate the question and do not write concrete values",
+  "defect": "which class of defect this approach solves; pick one of: missing_dimension (a dimension was missed) / wrong_granularity (the granularity is wrong) / tool_uncovered (the tool was never used) / value_form (the value shape is wrong)",
+  "strategy": "the repair strategy; pick one of: drill_down (drill one level deeper) / switch_tool (switch tools) / combine_tools (combine several tools) / read_scope (read the report's scope metadata)"}}
 
-命名规则很重要：同名技能会被覆盖而不是新增，所以名字要稳定、能概括做法，
-不要带轮次、题目原文或具体数值。"""
+The naming rule matters: a skill with the same name overwrites rather than adding, so the name must
+be stable and summarise the approach; do not put the round number, the question text or concrete
+values in it."""
 
 
 def _solution_code(task: Any) -> str:
-    """把 VLML0 的标准解法变成**可学的源码** —— 这就是原版的 `program_code`。
+    """Turn VLML0's standard solution into **learnable source code** —— this is the original's
+    `program_code`.
 
-    原版 `add_new_skill` 存的是 `info["program_code"]`：Voyager 自己写出来的、
-    跑通了的那段 JS。MVE 的 Voyager 不产出代码，但这里有一个原版没有的东西：
-    **VLML0 的标准解法是确定的、已被验证正确的**（服务端 answer_spec + 裁判
-    轨迹）—— 它天然就是"正确的源码"。所以映射关系变成：
+    The original `add_new_skill` stores `info["program_code"]`: the JS Voyager wrote itself and
+    got running. MVE's Voyager produces no code, but here there is something the original does not
+    have: **VLML0's standard solution is deterministic and already verified correct** (the
+    server-side answer_spec + the referee's trajectory) —— it is naturally "correct source code". So
+    the mapping becomes:
 
-        原版：自己写 → 跑通 → 存源码
-        MVE ：判错 → 观摩 VLML0 → 存它的解法源码
+        original: write it myself → get it running → store the source
+        MVE     : judged wrong → observe VLML0 → store its solution source
 
-    脱敏边界（与知识图谱同一条原则：**给口径、给结构，不给答案**）：
-      - SQL 走 `_desensitize`，字符串字面量一律抹成 `'?'`；
-      - 工具调用的实参值同样抹掉，只留参数名与形态。
-    这样模型学到的是"该查哪张表、怎么分层、取第几列 / 取哪条路径"，
-    而不是"答案是多少" —— 数值仍然必须它自己查出来。
+    The desensitization boundary follows the same principle as the knowledge graph:
+    **give conventions and structure, never the answers**:
+      - SQL goes through `_desensitize`, every string literal is wiped to `'?'`;
+      - the argument values of tool calls are wiped too, leaving only parameter names and shapes.
+    So what the model learns is "which table to query, how to layer it, which column / which path to
+    take" rather than "what the answer is" —— the numbers must still be retrieved by itself.
     """
     try:
         from knowledge_graph import _desensitize
@@ -112,12 +124,12 @@ def _solution_code(task: Any) -> str:
         tool = str(getattr(spec, "tool", "") or "")
         if sql:
             body = _desensitize(sql).strip()
-            tail = f"取第 {getattr(spec, 'value_column', 0)} 列"
+            tail = f"take column {getattr(spec, 'value_column', 0)}"
             base = getattr(spec, "base_column", None)
             if base is not None:
-                tail += f"，分母第 {base} 列"
+                tail += f", denominator is column {base}"
             if getattr(spec, "percent", False):
-                tail += "（百分比：num/denom*100）"
+                tail += " (percentage: num/denom*100)"
             lines.append(f"[{dim}] {point}\n    {body}\n    # {tail}")
         elif tool:
             args = getattr(spec, "tool_args", None) or {}
@@ -125,54 +137,59 @@ def _solution_code(task: Any) -> str:
             path = str(getattr(spec, "value_path", "") or "")
             base = str(getattr(spec, "base_path", "") or "")
             if getattr(spec, "percent", False):
-                # 百分比口径必须**同时给分子与分母两条路径**。
-                # 实测踩过：源码里只写了 `...kast.num`，模型照抄 dig 到 109
-                # 就交上来了 —— 它不知道还要除 denom。给一条路径等于让它算一半，
-                # 而这个"一半"看起来完全像个正常的数（不像 None 那样能自证）。
+                # The percentage convention must give **both the numerator and the denominator paths**.
+                # Hit in practice: the source only wrote `...kast.num` and the model copied it, did
+                # dig up 109 and handed that in —— it did not know it still had to divide by denom.
+                # Giving one path amounts to letting it compute half, and that "half" looks exactly
+                # like a normal number (unlike None, it cannot prove itself wrong).
                 num_path = path or base
                 den_path = base or (
                     path[: -len(".num")] + ".denom" if path.endswith(".num") else "")
                 lines.append(
                     f"[{dim}] {point}\n    {tool}({sig})\n"
-                    f"    # 百分比：取两个数再相除\n"
+                    f"    # percentage: fetch two numbers and divide them\n"
                     f"    #   num   = dig(p, \"{num_path}\")\n"
                     f"    #   denom = dig(p, \"{den_path}\")\n"
-                    f"    #   返回 {{\"num\": num, \"denom\": denom}}（不要自己算好再返回）")
+                    f"    #   return {{\"num\": num, \"denom\": denom}} (do not compute it beforehand and return the result)")
             else:
-                # 标量指标。实测踩过一次，必须点破「标量 ≠ num/denom」：
-                #   kast 与 kd 同在 key_metrics.team.consistency 下（kast 是
-                #   {num,denom}，kd 是标量 1.24），长得太像。此前这里只写一句
-                #   「按路径取值」，模型照抄时把上一行 kast 的 num/denom 套路
-                #   套到 kd 上，取成 109/109 = 1.0 —— 连着 48 轮停在 50%。
-                #   只给路径不足以阻止套错，必须显式写清"不要取 .num/.denom"。
+                # Scalar metric. Hit once in practice, so 'scalar ≠ num/denom' must be spelled out:
+                #   kast and kd both live under key_metrics.team.consistency (kast is a
+                #   {num,denom}, kd is the scalar 1.24), and they look far too similar. This used to
+                #   say only "take the value at the path", and when the model copied that it applied
+                #   kast's num/denom pattern to kd and got 109/109 = 1.0 —— stuck at 50% for 48
+                #   rounds straight. A path alone is not enough to prevent mismatching, so it must
+                #   say explicitly "do not take .num/.denom".
                 lines.append(
                     f"[{dim}] {point}\n    {tool}({sig})\n"
-                    f"    # 标量：dig 到的就是最终值，不用再算\n"
+                    f"    # scalar: whatever dig returns is the final value, no arithmetic needed\n"
                     f"    #   value = dig(p, \"{path}\")\n"
-                    f"    #   注意：这个指标**不是** num/denom 结构 ——\n"
-                    f"    #   不要去取 .num / .denom，也不要拿别的指标的\n"
-                    f"    #   num/denom 去除出它，直接返回原值")
+                    f"    #   note: this metric is **not** a num/denom structure ——\n"
+                    f"    #   do not reach for .num / .denom, and do not divide some\n"
+                    f"    #   other metric's num/denom to get it; return the raw value")
     return "\n".join(lines)
 
 
 async def learn_from_referee(topic_id: str, *, force: bool = False) -> dict[str, Any]:
-    """观摩裁判答这道题 → 提炼一条可复用做法 + **存下它的解法源码** → 写进技能库。"""
+    """Observe the referee answering this question → distill one reusable approach + **store its
+    solution source** → write it into the skill library."""
     if topic_id not in TASKS:
-        return {"ok": False, "error": f"未知题目 {topic_id}"}
+        return {"ok": False, "error": f"unknown question {topic_id}"}
     task = TASKS[topic_id]
 
     ref = await vlml0_referee.answer(task, force=force)
     if not getattr(ref, "facts", None):
-        return {"ok": False, "error": "裁判没有产出事实，无从观摩"}
+        return {"ok": False, "error": "the referee produced no facts, nothing to observe"}
 
     dims = [str(f.get("dimension")) for f in ref.facts]
-    # 内部标记不能进技能库：实测 Voyager 会把 "<deterministic-sql>" 当真工具名
+    # Internal markers must not enter the skill library: measured, Voyager takes
+    # "<deterministic-sql>" for a real tool name
     traj = [str(t) for t in (getattr(ref, "trajectory", None) or [])
             if not str(t).startswith("<")]
 
     out = chat_json(
         [
-            {"role": "system", "content": "你是会把标准解法提炼成可复用做法的分析 agent。"},
+            {"role": "system",
+             "content": "You are an analysis agent who distills a standard solution into a reusable approach."},
             {"role": "user", "content": _prompt(task, ref, traj, dims)},
         ],
         temperature=0.2,
@@ -180,7 +197,7 @@ async def learn_from_referee(topic_id: str, *, force: bool = False) -> dict[str,
     name = str(out.get("name") or "").strip()
     lesson = str(out.get("lesson") or "").strip()
     if not lesson:
-        return {"ok": False, "error": "模型没有提炼出做法"}
+        return {"ok": False, "error": "the model did not distill any approach"}
 
     blueprint = {
         "defect": str(out.get("defect") or "").strip(),
@@ -191,19 +208,20 @@ async def learn_from_referee(topic_id: str, *, force: bool = False) -> dict[str,
     }
     code = _solution_code(task)
     action, key = skill_store.add(
-        topic_id, name or f"{topic_id}标准编排", lesson,
+        topic_id, name or f"{topic_id} standard orchestration", lesson,
         source=BYPASS_SOURCE, blueprint=blueprint, code=code,
     )
 
     causal_timeline.append(
         causal_timeline.CONTROL,
         topic_id=topic_id,
-        summary=f"旁路学习：观摩裁判解法 → {action} {name or topic_id}"
-                f"（已存解法源码 {len(code)} 字符）",
+        summary=f"bypass learning: observed the referee's solution → {action} {name or topic_id}"
+                f" (stored {len(code)} characters of solution source)",
         detail={"trajectory": traj, "dimensions": dims, "action": action,
                 "code_len": len(code),
-                # 只记长度不记全文：源码里含服务端配方，落盘即泄题。
-                # 要查全文去技能库看，别在日志里复制一份。
+                # Only the length, never the full text: the source contains server-side recipes and
+                # persisting it would leak the exam. Read the full text in the skill library; do not
+                # keep a copy in the log.
                 "validated_target": False},
     )
     return {
@@ -214,37 +232,47 @@ async def learn_from_referee(topic_id: str, *, force: bool = False) -> dict[str,
     }
 
 
-RETRY_SOURCE = "help"           # 判错后求助 → 掌握度按"借助帮助"计
+RETRY_SOURCE = "help"           # asking for help after a wrong answer → mastery counts it as "with help"
 
-# 讲解的四段结构，直接照伴学 _solution_structure.py:173 的 headings：
-#   题目解析 / 解题过程 / 答案 / 举一反三
-# 注意第三段是**答案** —— 伴学的讲解里答案是可见的
-# （settings 说明写得很直白："仅讲述题目解析、答案和举一反三"）。
+# The four-section structure of the walkthrough, copied from the headings in the study companion's
+# _solution_structure.py:173:
+#   question analysis / solution process / answer / transfer to a similar question
+# Note that the third section is the **answer** —— in the study companion's walkthrough the answer is
+# visible (the settings description puts it plainly: "only the question analysis, the answer and the
+# transfer to a similar question are narrated").
 #
-# 之前我把这里设计成"只讲做法不给数值"，理由是不能泄题。那是把两件事混了：
-#   伴学的「显示提示」(ui.button.show_hint → main.js:3444 置 used_hint)
-#     —— 做题途中点开，内容是方法/知识点（如"记住：180° 等于 π 弧度"），**不含本题答案**
-#   伴学的「讲解」(solution structure，四段含答案)
-#     —— 是**学习环节**，先讲透（含答案）再去练
-# 伴学的默认路径见 onboarding.md:47「从讲解进入练习」—— 先学（答案可见），再练。
-# MVE 只有"做题"一条路，把求助塞进做题中途，于是做成了两头不靠的半截提示：
-# 对解题没帮助（模型还是不知道该取什么值/什么口径），又不像讲解那样能学到东西。
-# 实测后果：corrode_collapse 求助三次，下一轮反而出现"未调用工具"、覆盖率 0%。
-STUDY_SECTIONS = ("题目解析", "解题过程", "答案", "举一反三")
+# I used to design this as "explain the approach but give no values", on the grounds that it would
+# leak the answer. That conflated two different things:
+#   the study companion's "show hint" (ui.button.show_hint → main.js:3444 sets used_hint)
+#     —— opened mid-question, its content is method/knowledge points (e.g. "remember: 180° equals
+#        π radians"), and it does **not** contain this question's answer
+#   the study companion's "walkthrough" (solution structure, four sections including the answer)
+#     —— a **learning stage**: explain it thoroughly (including the answer) first, then practise
+# The study companion's default path is onboarding.md:47 "enter practice from the walkthrough" ——
+# learn first (the answer is visible), then practise.
+# MVE only has the "do questions" path and wedged the help request into the middle of it, which
+# produced a half-help that belonged to neither:
+# it did not help solve the question (the model still did not know which value or which convention
+# to take) and, unlike a walkthrough, taught nothing.
+# Measured consequence: after three help requests on corrode_collapse, the next round instead
+# reported "no tool called" with 0% coverage.
+STUDY_SECTIONS = ("Question analysis", "Solution process", "Answer",
+                  "Transfer to a similar question")
 
 
 def _is_real_tool(name: str) -> bool:
-    """这个工具名是不是 Voyager 真能调的 MCP 工具。
+    """Whether this tool name is an MCP tool Voyager can really call.
 
-    裁判的标准解法里混着它自己的内部工具（vlml0_referee::deterministic 等），
-    那些是裁判算数用的，Voyager 调不到。讲给 Voyager 听之前必须先分清，
-    否则它照着去查一个不存在的表。
+    The referee's standard solution mixes in its own internal tools (vlml0_referee::deterministic
+    and the like); those are what the referee does its arithmetic with and Voyager cannot reach
+    them. They must be told apart before being narrated to Voyager, otherwise it goes off to query
+    a table that does not exist.
     """
     try:
         from action_code import TOOL_NAMES
         return str(name) in TOOL_NAMES
     except Exception:
-        # 拿不到工具名单时退回：至少排除带前缀的内部名
+        # When the tool list cannot be obtained, fall back: at least rule out prefixed internal names
         return "::" not in str(name) and not str(name).startswith("vlml0")
 
 
@@ -252,59 +280,72 @@ def _explain_prompt(task: Any, *, traj: list[str], dims_by_tool: dict[str, list[
                     missing: list[str], my_plan: list[str],
                     facts_text: str, graph_text: str = "") -> str:
     mapping = "\n".join(
-        f"- {tool} → {', '.join(dims) or '（无）'}" for tool, dims in dims_by_tool.items()
-    ) or "（无）"
-    # 讲解的口径必须以知识图谱为准 —— 否则会出现"图谱说 A、讲解说 B"，
-    # 它下一轮不知道听谁的。图谱里没有的维度才由讲解自由发挥。
+        f"- {tool} → {', '.join(dims) or '(none)'}" for tool, dims in dims_by_tool.items()
+    ) or "(none)"
+    # The walkthrough's conventions must follow the knowledge graph —— otherwise you get "the graph
+    # says A, the walkthrough says B" and it does not know next round whom to believe. Dimensions
+    # that are not in the graph are the only ones the walkthrough may improvise on.
     gblock = f"""
-【知识图谱 · 本题的口径】讲解必须与下面一致（这是服务端配方，不是参考意见）：
+[Knowledge graph · the conventions for this question] The walkthrough must agree with the below
+(this is a server-side recipe, not a suggestion):
 {graph_text}
 """ if graph_text else ""
-    return f"""你是一名讲解者，正在给一名刚做错这道题的分析 agent **讲一遍标准解法**。
+    return f"""You are a walkthrough author, explaining the standard solution **once** to an analysis
+agent that just got this question wrong.
 
-题目：{task.question}
+Question: {task.question}
 
-它这次的编排：{' → '.join(my_plan) or '（没调任何工具）'}
-它没拿到的维度：{', '.join(missing) or '（无）'}
+Its orchestration this time: {' → '.join(my_plan) or '(called no tools at all)'}
+The dimensions it did not get: {', '.join(missing) or '(none)'}
 
-标准解法的编排：{' → '.join(traj) or '（无）'}
-每个工具负责哪些维度：
+The standard solution's orchestration: {' → '.join(traj) or '(none)'}
+Which dimensions each tool is responsible for:
 {mapping}
 
-**重要**：编排里凡是被标成「（裁判内部，不是可调工具）」的都是裁判自己算数用的
-内部结构，**它调不到**。讲"解题过程"时必须只提它真能调的工具，
-否则它会照着去查一个不存在的表（实测就栽在这：讲解里写了
-`vlml0_referee.deterministic`，它下一轮真去 FROM 这张表 → Catalog Error）。
+**Important**: anything in the orchestration marked "(internal to the referee, not a callable tool)"
+is an internal structure the referee does its own arithmetic with, and **it cannot call it**. When
+narrating the "solution process" you must mention only tools it can really call, otherwise it goes
+off to query a table that does not exist (this happened in practice: the walkthrough mentioned
+`vlml0_referee.deterministic` and next round it really did FROM that table → Catalog Error).
 
-标准解法取到的**真实数值**（裁判确定性层算出来的，已经验证过，可以直接讲）：
-{facts_text or '（无）'}
+The **real values** the standard solution retrieved (computed by the referee's deterministic layer,
+already verified, safe to narrate directly):
+{facts_text or '(none)'}
 {gblock}
-请按四段讲，输出 JSON：
-{{"analysis": "题目解析：这道题到底在问什么、评分点之间的依赖关系",
-  "process": "解题过程：先调什么、拿到什么、为什么还要再调下一个；尤其讲清**口径**（过滤条件、分组方式、顺序），这正是它做错的地方",
-  "answer": "答案：把上面那些数值按评分点组织好，写清楚每个值是多少",
-  "transfer": "举一反三：下次遇到同类题，一眼该看什么、先动哪个工具"}}
+Please narrate it in four sections and output JSON:
+{{"analysis": "Question analysis: what this question is really asking and how the rubric points depend on each other",
+  "process": "Solution process: what to call first, what you get, and why you still need to call the next one; be especially clear about the **convention** (filter conditions, grouping, ordering), since that is exactly where it went wrong",
+  "answer": "Answer: organise the values above by rubric point and state clearly what each value is",
+  "transfer": "Transfer to a similar question: next time a similar question appears, what to look at first and which tool to reach for first"}}
 
-要求：
-- process 里必须讲清**口径**（怎么过滤、按什么分组、按什么排序），不要只写工具名。
-- 上面给了知识图谱时，口径、列名、取值路径一律**照图谱讲**，不要另写一套。
-- answer 里的数值只能取自上面给定的真实数值，一个都不许自己编。
-- 这是**学习环节**，讲透是目的；它下一轮重做时要自己调工具取证，抄不进去。"""
+Requirements:
+- `process` must make the **convention** clear (how to filter, group by what, sort by what), not just
+  tool names.
+- When the knowledge graph is given above, conventions, column names and value paths must all follow
+  the graph; do not write a second set of your own.
+- The values in `answer` may only come from the real values given above; you may not invent a single
+  one.
+- This is a **learning stage**, so being thorough is the point; when it redoes the question next
+  round it must retrieve the evidence with its own tools and cannot copy this in."""
 
 
 def _graph_text(task: Any) -> str:
-    """本题的知识图谱子图 —— 讲解的口径必须与规划时看到的是同一份。
+    """This question's knowledge graph subgraph —— the walkthrough's conventions must be the very
+    same ones that were visible at planning time.
 
-    为什么连讲解也要带：之前图谱只进规划 prompt，讲解靠裁判轨迹自由发挥，
-    两者可能给出不同口径（"图谱说用 AVG(fb_team_won)、讲解说用 COUNT"）。
-    它下一轮同时看到两份，只能再猜一次。
+    Why the walkthrough has to carry it too: the graph used to go only into the planning prompt and
+    the walkthrough improvised off the referee's trajectory, so the two could give different
+    conventions ("the graph says use AVG(fb_team_won), the walkthrough says use COUNT"). Next round
+    it sees both at once and has to guess a second time.
     """
     try:
         from voyager import graph_context
-        # mode="explain"：讲解/求助环节**不喂易混维度**（confusable / co_occurs）。
-        # 照伴学的 response_mode 分流（knowledge_graph_guidance.py:1302-1310）——
-        # general_explanation 只留 prerequisite/application/supports/extends/confusable，
-        # 讲解时给"容易和什么混"会把求助变成诱导；规划时才需要它当护栏。
+        # mode="explain": the walkthrough / help stage does **not** get fed the confusable
+        # dimensions (confusable / co_occurs). Following the study companion's response_mode split
+        # (knowledge_graph_guidance.py:1302-1310) —— general_explanation keeps only
+        # prerequisite/application/supports/extends/confusable, and during a walkthrough telling it
+        # "what this is easily confused with" turns asking for help into leading it astray; only at
+        # planning time is that needed as a guardrail.
         return graph_context(task, mode="explain")
     except Exception:
         return ""
@@ -316,29 +357,37 @@ async def explain_for_retry(
     my_plan: list[str] | None = None,
     missing: list[str] | None = None,
 ) -> dict[str, Any]:
-    """判错后求助：**先讲一遍标准解法（学习环节），再带着它去重做**。
+    """Asking for help after a wrong answer: **first walk through the standard solution (the learning
+    stage), then let it redo the question carrying that**.
 
-    照伴学的通道分工
+    Following the study companion's channel split
     ----------------
-    伴学把"学到"和"考过"分成两条路（onboarding.md:47「从讲解进入练习」）：
+    The study companion separates "learning" and "passing" into two paths (onboarding.md:47
+    "enter practice from the walkthrough"):
 
-        讲解（学习环节）—— 四段：题目解析 / 解题过程 / **答案** / 举一反三
-                          答案可见，因为目的是学会（`_solution_structure.py:173`）
-        练习（考核环节）—— 自己答，答错才给方法提示（不含答案）；
-                          点过提示就在掌握度上记一笔 used_hint（0.85 折）
+        walkthrough (learning stage) —— four sections: question analysis / solution process /
+                                         **answer** / transfer to a similar question
+                                         the answer is visible, because the purpose is learning
+                                         (`_solution_structure.py:173`)
+        practice (exam stage)        —— answer it yourself; the method hint is given only when you
+                                         get it wrong (no answer inside);
+                                         clicking the hint records a used_hint in mastery (×0.85)
 
-    MVE 的同构：
-        学习环节（本函数）—— 给完整讲解，数值取自裁判的确定性事实，可以讲
-        重做环节（下一轮）—— prompt 只带做法（编排 + 每工具负责哪些维度），
-                          数值不回灌；值还得它自己调工具取
+    MVE's isomorphic version:
+        learning stage (this function) —— the full walkthrough, values taken from the referee's
+                                         deterministic facts, so they can be narrated
+        redo stage (next round)       —— the prompt only carries the approach (orchestration +
+                                         which dimensions each tool is responsible for); values are
+                                         not fed back, and it still has to retrieve them itself
 
-    为什么数值敢给：MVE 有**溯源校验**（`loop_core` 的 hallucination 拦截），
-    抄一个没调工具取来的数，事实溯源不通过，覆盖率照样不涨 ——
-    抄答案占不到便宜，但能真正学到口径（这正是 corrode_collapse 缺的东西）。
+    Why the values are safe to give: MVE has **provenance verification** (loop_core's hallucination
+    interception). Copying a number that was not retrieved with a tool fails the provenance check
+    and coverage still does not climb —— copying the answer buys nothing, while it can genuinely
+    learn the conventions (which is exactly what corrode_collapse was missing).
     """
     ref = await vlml0_referee.answer(task)
     if not getattr(ref, "facts", None):
-        return {"ok": False, "error": "裁判没有产出事实，无从解释"}
+        return {"ok": False, "error": "the referee produced no facts, nothing to explain"}
 
     traj = [str(t) for t in (getattr(ref, "trajectory", None) or [])
             if not str(t).startswith("<")]
@@ -346,12 +395,13 @@ async def explain_for_retry(
     for f in ref.facts:
         src = str((f.get("source") or {}).get("tool") or "")
         tool = src.split("::", 1)[1] if "::" in src else (src or "deterministic-sql")
-        # 裁判的内部工具（如 vlml0_referee::deterministic）**不是** Voyager 能调的
-        # MCP 工具。不标出来，讲解就会把它写成"下一步调它" ——
-        # 实测：模型照着去 FROM vlml0_referee.deterministic → Catalog Error，
-        # 求助反而把这一轮做空。所以这里显式改名 + prompt 里明令禁止。
+        # The referee's internal tools (e.g. vlml0_referee::deterministic) are **not** MCP tools
+        # Voyager can call. Unless they are marked, the walkthrough narrates them as "call this
+        # next" —— measured: the model duly did FROM vlml0_referee.deterministic → Catalog Error,
+        # so asking for help ended up voiding that round. Hence the explicit rename here plus a
+        # flat prohibition in the prompt.
         if not _is_real_tool(tool):
-            tool = f"{tool}（裁判内部，不是可调工具）"
+            tool = f"{tool} (internal to the referee, not a callable tool)"
         dims_by_tool.setdefault(tool, [])
         d = str(f.get("dimension") or "")
         if d and d not in dims_by_tool[tool]:
@@ -360,16 +410,18 @@ async def explain_for_retry(
     my_plan = [str(t) for t in (my_plan or [])]
     missing = [str(m) for m in (missing or [])]
 
-    # 讲解要讲的数值：只取裁判确定性层算出来的真值，不取模型编的
+    # The values the walkthrough narrates: only the true values computed by the referee's
+    # deterministic layer, never the ones the model made up
     facts_text = "\n".join(
         f"- {f.get('dimension')} = {f.get('value')}"
-        + (f"（分母 {f.get('base')}）" if f.get("base") else "")
+        + (f" (denominator {f.get('base')})" if f.get("base") else "")
         for f in ref.facts
     )
     out = chat_json(
         [
             {"role": "system",
-             "content": "你是会把标准解法讲透的讲解者：讲清口径，答案只能引用给定真值。"},
+             "content": "You are a walkthrough author who explains the standard solution thoroughly: "
+                        "make the conventions explicit, and the answer may only cite the given true values."},
             {"role": "user", "content": _explain_prompt(
                 task, traj=traj, dims_by_tool=dims_by_tool,
                 missing=missing, my_plan=my_plan, facts_text=facts_text,
@@ -386,12 +438,12 @@ async def explain_for_retry(
     explain = study["process"] or study["analysis"]
     lesson = study["transfer"]
     if not any(study.values()):
-        return {"ok": False, "error": "模型没有产出讲解"}
+        return {"ok": False, "error": "the model produced no walkthrough"}
 
     causal_timeline.append(
         causal_timeline.REFEREE,
         topic_id=getattr(task, "topic_id", ""),
-        summary=f"学习标准解法（VLML0，含答案）：{explain[:52] or study['answer'][:52]}",
+        summary=f"studied the standard solution (VLML0, answer included): {explain[:52] or study['answer'][:52]}",
         detail={"trajectory": traj, "dims_by_tool": dims_by_tool,
                 "my_plan": my_plan, "missing": missing,
                 "study": study, "with_answer": True,
@@ -400,11 +452,12 @@ async def explain_for_retry(
     return {
         "ok": True,
         "topic_id": getattr(task, "topic_id", ""),
-        # 兼容旧字段：explain / lesson 现在指"解题过程"和"举一反三"
+        # Backward-compatible fields: explain / lesson now mean "solution process" and "transfer to a
+        # similar question"
         "explain": explain, "lesson": lesson,
         "study": study, "sections": list(STUDY_SECTIONS),
         "plan": traj, "dims_by_tool": dims_by_tool,
-        # 重做时**不**回灌这个：值要它自己取
+        # deliberately **not** fed back on the redo: the values must be retrieved by itself
         "facts": [
             {"dimension": f.get("dimension"), "value": f.get("value"),
              "base": f.get("base")}
@@ -414,21 +467,21 @@ async def explain_for_retry(
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="旁路学习：观摩裁判解法积累技能")
-    ap.add_argument("--topic", required=True, help=f"题目 id，可选：{', '.join(TASKS)}")
-    ap.add_argument("--force", action="store_true", help="重跑裁判（忽略缓存）")
+    ap = argparse.ArgumentParser(description="Bypass learning: accumulate skills by observing the referee's solution")
+    ap.add_argument("--topic", required=True, help=f"question id, one of: {', '.join(TASKS)}")
+    ap.add_argument("--force", action="store_true", help="re-run the referee (ignore the cache)")
     args = ap.parse_args()
 
     res = asyncio.run(learn_from_referee(args.topic, force=args.force))
     if not res.get("ok"):
-        print(f"旁路学习失败：{res.get('error')}")
+        print(f"Bypass learning failed: {res.get('error')}")
         return 1
-    print(f"题目      : {res['topic_id']}")
-    print(f"标准编排  : {' → '.join(res['trajectory']) or '（无）'}")
-    print(f"取到维度  : {', '.join(res['dimensions'])}")
-    print(f"技能写入  : {res['action']} · {res['name']}")
-    print(f"          {res['lesson']}")
-    print(f"蓝图      : 缺陷={res['blueprint']['defect']} · 策略={res['blueprint']['strategy']}")
+    print(f"Question     : {res['topic_id']}")
+    print(f"Standard plan: {' → '.join(res['trajectory']) or '(none)'}")
+    print(f"Dimensions   : {', '.join(res['dimensions'])}")
+    print(f"Skill written: {res['action']} · {res['name']}")
+    print(f"              {res['lesson']}")
+    print(f"Blueprint    : defect={res['blueprint']['defect']} · strategy={res['blueprint']['strategy']}")
     return 0
 
 

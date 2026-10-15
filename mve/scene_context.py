@@ -1,36 +1,46 @@
 #!/usr/bin/env python3
-"""MVE 等价「渐进披露初始场景注入」（Task 2，2026-10-12 落地）。
+"""MVE's equivalent of Minecraft's "progressive-disclosure initial scene injection" (Task 2, landed 2026-10-12).
 
-把 Minecraft 的「初始场景注入」（curriculum.py:142 render_observation 取
-biome / nearby_blocks / inventory / chests；warm_up :95-109 渐进披露）翻译成
-MVE 的对应物：
+Minecraft's "initial scene injection" (curriculum.py:142 render_observation reads
+biome / nearby_blocks / inventory / chests; warm_up :95-109 progressive disclosure)
+translated into MVE's counterparts:
 
-  MC 元素               MVE 等价物                      来源
+  MC element              MVE counterpart                             source
   ──────────────────────────────────────────────────────────────────────
-  biome（世界）         数据源身份（vlml_vlr / vlml_rib / 默认库）  db_config
-  nearby_blocks（眼前） 当前可见的「表 + VLML 10 工具」（base 层恒给，
-                         ext_* 层进度够了才给）                        information_schema
-  inventory（背包）     实体可填值（锚点 series/team/map + 目录可选项）
-                        + 已掌握的知识点                               anchor / entity_catalog / 掌握度
-  chests（箱内存货）    技能库图谱（已学会的技能/配方）                 skill_store / 掌握度
+  biome (the world)       data source identity (vlml_vlr / vlml_rib /   db_config
+                          default database)
+  nearby_blocks (in view) the currently visible "tables + the 10 VLML   information_schema
+                          tools" (base tier is always given; the
+                          ext_* tier only once progress is sufficient)
+  inventory (backpack)    the fillable entity values (anchor
+                          series/team/map + catalogue options)          anchor / entity_catalog /
+                          + the already mastered knowledge points        mastery
+  chests (loot)           the skill-library graph (skills/recipes      skill_store / mastery
+                          already learned)
 
-关键：这是「场景层」的渐进披露，**独立于** voyager.py graph_context 的「支架层」
-（full/partial/none）。支架层管"给多少答案骨架"，场景层管"允许看到哪些数据/工具"。
-两层正交：一个新手可能场景全开（看得全库）但支架全给（答案扶到底）；一个老手
-可能场景只给 base 表但支架全撤（自己下钻 ext）。
+The key point: this is progressive disclosure of the **scene layer**, **independent of**
+voyager.py graph_context's "scaffold layer" (full/partial/none). The scaffold layer governs
+"how much answer skeleton to give"; the scene layer governs "which data/tools are allowed
+to be seen". The two layers are orthogonal: a beginner may have the scene fully open
+(seeing the whole database) but the scaffold fully given (the answer carried all the way);
+a veteran may get only the base tables in the scene but have the scaffold fully removed
+(drilling into ext on their own).
 
-为什么必须做（MC 教训）
-------------------------
-MC 的 warm_up 是"随进度放开更多世界状态"——一开始就给全图会让智能体无从下手、
-也测不出它到底会不会用基础工具。MVE 此前把所有表一股脑塞进 prompt，模型跳过
-基础层直接裸写 ext 查询 → 在缺表库上必然 0 分。场景层渐进披露让"基础层没掌握
-就别碰 ext"成为**结构性约束**，而不是靠 prompt 说教。
+Why this must be done (the MC lesson)
+-------------------------------------
+MC's warm_up means "open up more world state as progress advances" —— handing over the full
+map from the start leaves the agent with no entry point, and also makes it impossible to
+measure whether it can use the basic tools at all. MVE previously stuffed every table into
+the prompt at once, so the model skipped the base layer and wrote bare ext queries
+outright → necessarily scoring 0 on databases missing those tables. Progressive disclosure
+in the scene layer makes "do not touch ext before mastering the base layer" a
+**structural constraint** rather than a matter of prompting.
 
-用法
-----
+Usage
+-----
     from scene_context import scene_injection
-    text = scene_injection(topic_id, progress_tier=0)   # 给模型 prompt 用
-    # 或命令行看当前库两档场景：
+    text = scene_injection(topic_id, progress_tier=0)   # for the model's prompt
+    # or inspect the two tiers of the current database from the command line:
     python mve/scene_context.py
 """
 
@@ -44,8 +54,10 @@ from typing import Any
 HERE = Path(__file__).resolve().parent
 DB_CONFIG = HERE / "db_config.json"
 
-# VLML 10 工具 = 跨域基线（用户指定：技能/动作锁定语义层，不写裸 SQL）。
-# 换库只是"该层题有没有数据"，工具集恒定 → 技能可迁移。
+# The 10 VLML tools = the cross-domain baseline (user-specified: skills/actions are locked
+# to the semantic layer, no bare SQL).
+# Swapping databases only affects "does this tier's question have data"; the tool set is
+# constant → skills stay transferable.
 SEMANTIC_TOOLS: list[str] = [
     "match_analysis_report", "match_summary_report", "match_players_report",
     "match_rounds_report", "match_economy_report", "player_profile_report",
@@ -53,16 +65,18 @@ SEMANTIC_TOOLS: list[str] = [
     "query_sql", "get_database_info",
 ]
 
-# 进度档位：0 = 新手（只看 base 表），1 = 已解锁基础层（放开 ext 表）
+# Progress tier: 0 = beginner (base tables only), 1 = base layer unlocked (ext tables opened up)
 TIER_BASE = 0
 TIER_EXT = 1
-# 升到 ext 档需要已解锁几个里程碑。用**里程碑数**而不是掌握度，是因为
-# 掌握度是 VLML 的评分结果 —— 评分只进面板，不能当披露/推进的门槛
-# （用户原话：「评分结果不被任何推进条件读到」）。
+# How many milestones must be unlocked to reach the ext tier. Using the **milestone count**
+# rather than mastery is because mastery is VLML's **scoring result** —— scoring only reaches
+# the dashboard and cannot serve as a gate on disclosure/progression
+# (user's original words: "scoring results are not read by any progression condition").
 TIER_EXT_UNLOCKS = 3
 
-# VLML 已知表（静态回退用）：duckdb 不在时也能给出有意义的"场景"，
-# 不必每次出题都实查库（也避免慢查询）。实查到时以实查为准。
+# VLML's known tables (static fallback): they still yield a meaningful "scene" when duckdb
+# is unavailable, so question generation need not query the database live every time (which
+# also avoids slow queries). When a live query succeeds, the live result wins.
 KNOWN_BASE_TABLES = [
     "series", "games", "rounds", "base_events",
     "agg_team_series_stats", "agg_player_series_stats", "ext_player_game_stats",
@@ -74,35 +88,38 @@ KNOWN_EXT_TABLES = [
 
 
 def data_source_identity() -> str:
-    """biome 等价物：当前用的是哪个数据源（库文件名决定）。"""
+    """The biome counterpart: which data source is in use (decided by the database file name)."""
     try:
         obj = json.loads(DB_CONFIG.read_text(encoding="utf-8"))
         p = str((obj or {}).get("db_path") or "")
     except Exception:
         p = ""
-    # db_path 为空时用的是**默认库**（db_switch.DEFAULT_DB，当前 rib.gg）——
-    # 标签要跟着默认库走，不能再写死 "vlml_events(默认)"（2026-10-13 起因：
-    # 默认库改成 rib 后，这个标签会指着一个没在用的库）。
+    # An empty db_path means the **default database** is in use (db_switch.DEFAULT_DB,
+    # currently rib.gg) —— the label must follow the default database and must no longer be
+    # hardcoded as "vlml_events(default)" (since 2026-10-13: after the default switched to
+    # rib, that label pointed at a database nobody used).
     name = Path(p).stem if p else Path(_default_db()).stem
     if "vlr" in name:
-        return f"{name}（vlr.gg 源：回合级 + 聚合级，无 ext 层）"
+        return f"{name} (vlr.gg source: round-level + aggregate level, no ext layer)"
     if "rib" in name:
-        return f"{name}（rib.gg 源：含首血/经济 ext 层）"
-    return f"{name}（默认库）" if not p else f"{name}（GRID 单场切片）"
+        return f"{name} (rib.gg source: includes first-blood/economy ext layer)"
+    return f"{name} (default database)" if not p else f"{name} (GRID single-match slice)"
 
 
 def _default_db() -> str:
-    """默认库路径（唯一定义在 db_switch，当前 rib.gg）。"""
+    """The default database path (defined solely in db_switch, currently rib.gg)."""
     from db_switch import DEFAULT_DB
     return str(DEFAULT_DB)
 
 
 def _db_path() -> str:
-    """当前库路径。**相对路径按仓库根解析**（与 vlml_env._resolve_db_path 同口径）。
+    """The current database path. **Relative paths resolve against the repository root**
+    (the same rule as vlml_env._resolve_db_path).
 
-    ⚠️ 为什么不原样返回配置值：vlml_env 会把 cwd 切到 `vlml/`，于是相对路径
-       在它那儿会被拼两遍。两边口径必须一致，否则面板显示"已切到 rib 库"、
-       实际连的还是默认库 —— 2026-10-13 在服务器上就是这么栽的。
+    ⚠️ Why not return the configured value verbatim: vlml_env switches cwd to `vlml/`, so a
+       relative path gets concatenated twice there. Both sides must agree, otherwise the
+       dashboard says "switched to the rib database" while it is still connected to the
+       default one —— that is exactly how it went wrong on the server on 2026-10-13.
     """
     try:
         obj = json.loads(DB_CONFIG.read_text(encoding="utf-8"))
@@ -117,13 +134,15 @@ def _db_path() -> str:
 
 
 def available_tables(progress_tier: int = TIER_BASE) -> dict[str, list[str]]:
-    """nearby_blocks 等价物：当前可见的表（按 base / ext 分层）。
+    """The nearby_blocks counterpart: the currently visible tables (layered base / ext).
 
-    progress_tier < 1 时只返回 base 表；>= 1 时才把 ext_* 表一并返回。
-    这是"渐进披露"的核心——新手看不到 ext 层，就无从裸写 ext 查询。
+    With progress_tier < 1 only the base tables are returned; with >= 1 the ext_* tables
+    are returned as well. This is the core of "progressive disclosure" —— a beginner who
+    cannot see the ext layer has no way to write a bare ext query.
 
-    优先实查库（duckdb 在时）；不在则以静态已知表清单回退（按数据源身份
-    决定是否含 ext 层），保证任何环境都有有意义的场景描述。
+    Prefer querying the database live (when duckdb is present); otherwise fall back to the
+    static list of known tables (whether the ext layer is included is decided by the data
+    source identity), so every environment has a meaningful scene description.
     """
     out: dict[str, list[str]] = {"base": [], "ext": [], "source": "static"}
     live: list[str] = []
@@ -146,18 +165,19 @@ def available_tables(progress_tier: int = TIER_BASE) -> dict[str, list[str]]:
         for t in live:
             (out["ext"] if t.startswith("ext_") else out["base"]).append(t)
     else:
-        # 静态回退：vlr/默认库没有 ext 层，rib 库有
+        # Static fallback: the vlr/default database has no ext layer, the rib database does
         name = Path(_db_path()).stem
         has_ext = "rib" in name
         out["base"] = list(KNOWN_BASE_TABLES)
         out["ext"] = list(KNOWN_EXT_TABLES) if has_ext else []
     if progress_tier < TIER_EXT:
-        out["ext"] = []  # 新手档：隐藏 ext 层
+        out["ext"] = []  # beginner tier: hide the ext layer
     return out
 
 
 def entity_fillables() -> dict[str, list[str]]:
-    """inventory 等价物：实体可填值——锚点（当前那场/队/图）+ 目录可选项。"""
+    """The inventory counterpart: the fillable entity values —— the anchor (the current
+    series/team/map) + the catalogue's optional values."""
     inv: dict[str, list[str]] = {"anchor": [], "options": {}}
     try:
         import anchor
@@ -171,14 +191,14 @@ def entity_fillables() -> dict[str, list[str]]:
         for kind in ("series", "team", "map", "player"):
             vals = entity_catalog.options(kind)
             if vals:
-                inv["options"][kind] = vals[:12]  # 下拉预览，截前 12
+                inv["options"][kind] = vals[:12]  # dropdown preview, first 12 only
     except Exception:
         pass
     return inv
 
 
 def _skill_count() -> int:
-    """技能库里现有几条配方（**不含任何评分**）。"""
+    """How many recipes the skill library currently holds (**carries no scoring whatsoever**)."""
     try:
         import skill_store
         return len(skill_store.load())
@@ -187,20 +207,26 @@ def _skill_count() -> int:
 
 
 def panel_only() -> dict[str, Any]:
-    """**只给人看、绝不进模型上下文**的那一半。
+    """The half that is **for humans only and never enters the model's context**.
 
-    用户划的线很明确：
-      进运行时上下文的 —— 解锁里程碑 / 学会技能 / 任务失败 / 任务跳过（带原因）
-                          + 环境反馈（工具成没成、取到几行、图谱变了什么）
-      只进面板的       —— ① 当前实体在库里实际存在哪些取值
-                          ② VLML 跑一遍得到的判定结果（得分 / 覆盖率）
-    为什么 ① 不能进上下文：那是一份答案候选清单，会把它的重心从"把取数做通"
-    拉到"枚举取值凑答案"。
-    为什么 ② 不能进上下文：那是尺子，不是反馈。尺子进了反馈环，它就会去讨好
-    尺子（照覆盖率调 SQL），而不是完成任务 —— 用户原话：「会影响 voyager
-    完成任务的重心」。
+    The line the user drew is very clear:
+      Goes into the runtime context —— unlocked milestones / skills learned / task failures /
+                                       task skips (with reasons)
+                                       + environment feedback (did the tool work, how many
+                                         rows came back, what changed in the graph)
+      Dashboard only               —— ① which values actually exist in the database for the
+                                       current entities
+                                       ② the verdict from running VLML once (score / coverage)
+    Why ① must not enter the context: it is a list of candidate answers, and it would shift
+    its focus from "getting the data retrieval to work" to "enumerating values to make up
+    an answer".
+    Why ② must not enter the context: that is the ruler, not feedback. Once the ruler enters
+    the feedback loop it starts currying favour with the ruler (tuning SQL to the coverage)
+    instead of completing the task —— user's original words: "it would affect the focus
+    with which voyager completes the task".
 
-    面板从这里取数，别自己去 MasteryStore / entity_catalog 里翻。
+    The dashboard reads its numbers from here; do not go digging in MasteryStore /
+    entity_catalog on its own.
     """
     out: dict[str, Any] = {
         "entity_values": {}, "mastery": {}, "skill_count": _skill_count(),
@@ -227,10 +253,11 @@ def panel_only() -> dict[str, Any]:
 
 
 def mastered_skills() -> dict[str, Any]:
-    """chests 等价物：技能库图谱——已掌握的知识点（=已学会的"配方"）。
+    """The chests counterpart: the skill-library graph —— the mastered knowledge points
+    (= the "recipes" already learned).
 
-    ⚠️ **面板专用**：这里读的是掌握度（≥0.8），属「评分结果」，
-    按约定只进面板（`panel_only()`），不进 `scene_injection()`。
+    ⚠️ **Dashboard only**: what this reads is mastery (≥0.8), which is a "scoring result";
+    by convention it only reaches the dashboard (`panel_only()`), never `scene_injection()`.
     """
     out: dict[str, Any] = {"mastered_topics": [], "skill_count": 0}
     try:
@@ -251,12 +278,14 @@ def mastered_skills() -> dict[str, Any]:
 
 
 def unlocked_milestones() -> list[str]:
-    """里程碑等价物：已**完成**（任务跑通）的知识点 = 已解锁的图谱节点。进上下文。
+    """The milestone counterpart: **completed** knowledge points (tasks that ran through)
+    = the unlocked graph nodes. Goes into the context.
 
-    同构原版 curriculum.render_observation 把 completed_tasks 写进 human message
-    —— MVE 的「已完成」就是 topic_graph 的 completed 标记（任务跑通），标进上下文
-    让 agent 知道「哪些里程碑已经拿下了，不用再绕」。这是布尔 completed，**不是
-    掌握度阈值**——评分/掌握度只进面板，不在此处驱动任何逻辑。
+    Isomorphic to the original curriculum.render_observation, which writes completed_tasks
+    into the human message —— MVE's "completed" is topic_graph's completed flag (the task ran
+    through); marking it in the context tells the agent "which milestones are already down,
+    no need to go around them again". This is a boolean completed, **not** a mastery
+    threshold —— scoring/mastery only reaches the dashboard and drives no logic here.
     """
     try:
         from topic_graph import MasteryStore
@@ -267,16 +296,21 @@ def unlocked_milestones() -> list[str]:
 
 
 def milestone_tree() -> dict[str, Any]:
-    """MC 节点里程碑树（进入上下文）。
+    """The MC node milestone tree (enters the context).
 
-    同构原版 Voyager 的「里程碑 = 已完成的任务」+ MC 的「必须先砍树」科技树：
-      · seed    —— 树干起点（无前置），对应 MC 的 Mine 1 wood log；MVE 里是
-                  基础粒度知识点，且出生注入会随机给一个最小单位 (表,列) 作为
-                  真正的「第一块木头」。
-      · trunk   —— 最长前置路径（设计原文「经过节点最多的路径上的节点就是里程碑」）。
-      · milestone —— trunk 上的节点集合。
-      · keystone —— betweenness 最高的节点（「经过路径最多的节点」= 树干最粗处）。
-    返回结构含每个里程碑的 completed 状态，供面板/上下文展示进度。
+    Isomorphic to the original Voyager's "milestone = a completed task" plus MC's
+    "you must fell the tree first" tech tree:
+      · seed    —— the trunk's starting point (no prerequisite), corresponding to MC's
+                  Mine 1 wood log; in MVE it is a base-grain knowledge point, and the
+                  spawn injection randomly grants one minimal unit (table, column) as the
+                  real "first log of wood".
+      · trunk   —— the longest prerequisite path (the design's original wording:
+                  "the nodes on the path through the most nodes are the milestones").
+      · milestone —— the set of nodes on the trunk.
+      · keystone —— the node with the highest betweenness ("the node the most paths pass
+                  through" = the thickest point of the trunk).
+    The returned structure carries each milestone's completed status, for the panel/context
+    to display progress.
     """
     out: dict[str, Any] = {
         "seed": None, "trunk": [], "milestones": [], "keystone": None,
@@ -305,8 +339,9 @@ def milestone_tree() -> dict[str, Any]:
 
 
 def skip_history(limit: int = 8) -> list[dict[str, Any]]:
-    """跳过任务（带原因）等价物：把 stale-skip / 放弃 写进上下文（设计⑨：跳过任务
-    带原因进运行时上下文）。读循环日志无关的节点状态（MasteryStore 的 skips）。
+    """The skipped-task (with reason) counterpart: write stale-skip / give-up into the context
+    (design ⑨: skipped tasks with reasons enter the runtime context). Reads the node state
+    unrelated to the loop log (MasteryStore's skips).
     """
     out: list[dict[str, Any]] = []
     try:
@@ -321,11 +356,13 @@ def skip_history(limit: int = 8) -> list[dict[str, Any]]:
 
 
 def learned_skills(limit: int = 5) -> list[dict[str, Any]]:
-    """学会技能等价物：技能库里已固化的取数配方（SQL 源码）。进上下文，供复用。
+    """The learned-skill counterpart: the data-retrieval recipes (SQL source) already
+    solidified in the skill library. Enters the context, available for reuse.
 
-    同构原版 SkillManager —— chests 里的存货下次能直接调。只列 top（按
-    ok/hits 有效性排序），避免 prompt 膨胀。设计⑦要求技能存的是「可复用代码
-    （SQL）」，不是一两句思路，所以这里给的是 code 片段，不是自然语言。
+    Isomorphic to the original SkillManager —— the loot in chests can be called directly
+    next time. Only the top ones are listed (sorted by ok/hits effectiveness) to avoid
+    bloating the prompt. Design ⑦ requires a skill to store "reusable code (SQL)", not a
+    sentence or two of intuition, so what is given here is a code snippet, not natural language.
     """
     try:
         import skill_store
@@ -340,18 +377,22 @@ def learned_skills(limit: int = 5) -> list[dict[str, Any]]:
 
 
 def failure_history(limit: int = 8) -> list[dict[str, Any]]:
-    """任务失败 / 跳过（带原因）等价物：把 failed tasks 写进上下文（同构原版
-    curriculum.render_observation 的 failed_tasks）。
+    """The task-failure / skip (with reason) counterpart: write failed tasks into the
+    context (isomorphic to the original curriculum.render_observation's failed_tasks).
 
-    设计⑨明确：任务失败、跳过任务（原因…）要进运行时上下文。这里读的是循环日志
-    run_log（循环写的那份），不是面板状态文件——面板只读它、不回写上下文。
-    注意：只给「漏了哪些维度（枚举）」和 verdict，**不给覆盖率数值**（约定⑧）。
+    Design ⑨ is explicit: task failures and skipped tasks (with the reason…) go into the
+    runtime context. What is read here is the loop log run_log (the one the loop writes),
+    not the dashboard's state file —— the dashboard only reads it and never writes back
+    to the context. Note: only "which dimensions were missed (an enumeration)" and the
+    verdict are given, **never the coverage number** (convention ⑧).
 
-    ⚠️ 必须**去重**（2026-10-13 实测）：同一个知识点连着栽 7 次，这里就会吐
-      7 行一模一样的 `vlml_first_blood（wrong）：wrong`。那不是"历史"，是噪声
-      —— 白占上下文预算，而且「带原因」变得名不副实（`wrong` 不是原因）。
-      去重按 (知识点, verdict, 原因) 三元组，保留**最近**那一条并记上次数，
-      「栽过几次」这个信息比重复七遍有用。
+    ⚠️ **Deduplication is mandatory** (measured 2026-10-13): if the same knowledge point
+      fails 7 times in a row, this would otherwise emit 7 identical lines of
+      `vlml_first_blood（wrong）：wrong`. That is not "history", it is noise —— it burns
+      the context budget for nothing, and "with reason" becomes a misnomer (`wrong` is
+      not a reason). Deduplicate on the (knowledge point, verdict, reason) triple, keeping
+      the **most recent** one and recording how many times it happened —— "how many times
+      it failed" is more useful than the same line seven times over.
     """
     out: list[dict[str, Any]] = []
     seen: dict[tuple[str, str, str], dict[str, Any]] = {}
@@ -362,7 +403,7 @@ def failure_history(limit: int = 8) -> list[dict[str, Any]]:
             if v in ("wrong", "dont_know") or r.get("done") is False:
                 tid = r.get("topic_id") or r.get("task") or ""
                 miss = [str(m) for m in (r.get("missing") or [])]
-                reason = "、".join(m.split("(")[0] for m in miss[:3]) or v
+                reason = ", ".join(m.split("(")[0] for m in miss[:3]) or v
                 key = (tid, v, reason)
                 if key in seen:
                     seen[key]["times"] = int(seen[key].get("times") or 1) + 1
@@ -375,12 +416,15 @@ def failure_history(limit: int = 8) -> list[dict[str, Any]]:
 
 
 def random_unit() -> dict[str, Any]:
-    """最小单位 = (表, 列)，随机挑一个，带表名 + 列含义与单位。
+    """The minimal unit = (table, column), picked at random, with the table name + the
+    column's meaning and unit.
 
-    设计⑩：初始注入要「随机给其中一个最小单位」，像 MC 出生环境不写死、可迁移到
-    新世界。先把这个最小单位（一张表的一个列）的取数做通，再向对应里程碑
-    （树干最粗、经过路径最多的节点）推进。列含义/单位从 knowledge_graph 的
-    table 节点 column_desc 取，取不到就只给列名。
+    Design ⑩: the initial injection must "randomly grant one of the minimal units", just
+    like MC's spawn environment is not hardcoded and transfers to a new world. First get
+    the data retrieval for this minimal unit (one column of one table) working, then push
+    towards the corresponding milestone (the thickest point of the trunk, the node the most
+    paths pass through). The column's meaning/unit comes from knowledge_graph's table
+    node column_desc; if unavailable, only the column name is given.
     """
     try:
         tabs = available_tables(TIER_BASE).get("base") or list(KNOWN_BASE_TABLES)
@@ -398,7 +442,7 @@ def random_unit() -> dict[str, Any]:
             cols = {}
         col = random.choice(list(cols.keys())) if cols else ""
         raw = cols.get(col, "") if cols else ""
-        # knowledge_graph 的 column_desc 值可能是 dict（含 desc/type/flag），归一化。
+        # knowledge_graph's column_desc values may be dicts (with desc/type/flag), normalise.
         if isinstance(raw, dict):
             raw = raw.get("desc") or raw.get("type") or ""
         return {"table": tbl, "column": col, "desc": str(raw)}
@@ -407,14 +451,18 @@ def random_unit() -> dict[str, Any]:
 
 
 def scene_injection(topic_id: str = "", *, progress_tier: int | None = None) -> str:
-    """生成给模型 prompt 的「场景注入」文本块（渐进披露，按 progress_tier 收放）。
+    """Generate the "scene injection" text block for the model's prompt (progressive
+    disclosure, tightened or loosened according to progress_tier).
 
-    progress_tier 不传则按**已解锁里程碑数**自动判（≥ TIER_EXT_UNLOCKS → ext 档），
-    这样"基础层没拿下就别碰 ext"是结构性的，不靠说教。
+    When progress_tier is not passed it is decided automatically by the **number of
+    unlocked milestones** (≥ TIER_EXT_UNLOCKS → ext tier), so that "do not touch ext
+    before the base layer is down" is structural rather than a matter of prompting.
 
-    ⚠️ 以前这里读的是「有任何知识点掌握度 ≥0.8」—— 那是把 VLML 的**评分结果**
-       当成披露条件，与设计相悖（用户原话：「评分结果不被任何推进条件读到」）。
-       改成里程碑计数：里程碑是布尔的（这一题跑通了 / 没跑通），不含任何评分。
+    ⚠️ This used to read "does any knowledge point have mastery ≥0.8" —— that treats
+       VLML's **scoring result** as a disclosure condition, contrary to the design
+       (user's original words: "scoring results are not read by any progression
+       condition"). Changed to counting milestones: a milestone is boolean (did this
+       question run through / not), containing no scoring at all.
     """
     if progress_tier is None:
         try:
@@ -426,99 +474,114 @@ def scene_injection(topic_id: str = "", *, progress_tier: int | None = None) -> 
     ds = data_source_identity()
     tabs = available_tables(progress_tier)
     inv = entity_fillables()
-    # ⚠️ 刻意**不读掌握度**：chests 该装的是"已经学会的取数配方"（skill_store 里的
-    #    SQL），不是"评分 ≥0.8 的知识点"。用掌握度当门槛，等于把 VLML 的评分结果
-    #   偷偷读进上下文 —— 而设计规定评分只进面板、不被任何推进/披露条件读到
-    #   （用户原话：「评分结果不被任何推进条件读到」）。
+    # ⚠️ Deliberately **does not read mastery**: what chests should hold is "the data-retrieval
+    #    recipes already learned" (the SQL in skill_store), not "knowledge points scoring ≥0.8".
+    #    Using mastery as the gate is sneakily reading VLML's scoring result into the context ——
+    #    while the design says scoring only reaches the dashboard and is read by no
+    #    progression/disclosure condition (user's original words: "scoring results are not
+    #    read by any progression condition").
     skills = {"skill_count": _skill_count()}
-    src_note = "（静态已知 schema）" if tabs.get("source") != "live" else "（实查）"
+    src_note = (" (static known schema)" if tabs.get("source") != "live" else " (queried live)")
 
     lines: list[str] = []
-    lines.append("【初始场景（数据世界）】")
-    lines.append(f"· 数据源（biome）：{ds}")
+    lines.append("【Initial scene (the data world)】")
+    lines.append(f"· Data source (biome): {ds}")
     lines.append(
-        f"· 可用工具（语义层，恒可用，不要写裸 SQL 之外的取数方式）："
-        + "、".join(SEMANTIC_TOOLS))
-    base_block = "、".join(tabs["base"]) if tabs["base"] else "（无可读 base 表）"
-    lines.append(f"· 可见表（nearby_blocks · base 层{src_note}）：{base_block}")
+        f"· Available tools (semantic layer, always available — do not write any data-retrieval "
+        f"method other than bare SQL):"
+        + ", ".join(SEMANTIC_TOOLS))
+    base_block = ", ".join(tabs["base"]) if tabs["base"] else "(no readable base table)"
+    lines.append(f"· Visible tables (nearby_blocks · base tier{src_note}): {base_block}")
     if progress_tier >= TIER_EXT:
-        ext_block = "、".join(tabs["ext"]) if tabs["ext"] else "（本库无 ext 层）"
-        lines.append(f"· 可见表（nearby_blocks · ext 层，已解锁）：{ext_block}")
+        ext_block = ", ".join(tabs["ext"]) if tabs["ext"] else "(this database has no ext layer)"
+        lines.append(f"· Visible tables (nearby_blocks · ext tier, unlocked): {ext_block}")
     else:
-        # 新手档：明确告诉模型 ext 层被收起，别碰
-        lines.append("· 可见表（ext 层）：**本档未解锁**——base 层没掌握前不要写 ext_* 查询")
+        # Beginner tier: tell the model explicitly that the ext tier is put away, don't touch it
+        lines.append("· Visible tables (ext tier): **not unlocked at this tier**——do not write "
+                     "ext_* queries before the base tier is mastered")
     if inv["anchor"]:
-        lines.append("· 当前实体（inventory · 锚点，出题/作答围绕这些，不要编造）："
-                     + "；".join(inv["anchor"]))
-    # ⚠️ **不给** `inv["options"]`（「series/team/map 在库里各有哪些取值」）。
-    #    用户原话：「当前实体在库里实际存在哪些取值…不允许进反馈，因为会影响
-    #    voyager 完成任务的重心」。理由很实在：那是一份**答案候选清单**，
-    #    等于把选择题的选项一并递过去 —— 它会去"枚举取值凑答案"，而不是
-    #    "把这一题的取数做通"。要看有哪些取值，去面板（panel_only()）。
+        lines.append("· Current entities (inventory · anchors, question generation and answers "
+                     "centre on these, do not invent them):"
+                     + "; ".join(inv["anchor"]))
+    # ⚠️ **Do not give** `inv["options"]` ("which values series/team/map actually have in
+    #    the database"). User's original words: "which values the current entities actually
+    #    have in the database … is not allowed into the feedback, because it would affect the
+    #    focus with which voyager completes the task". The reasoning is very practical: it is a
+    #    **list of candidate answers**, equivalent to handing over the options of a
+    #    multiple-choice question —— it will "enumerate values to make up an answer" instead
+    #    of "getting this question's data retrieval to work". To see which values exist, go to
+    #    the dashboard (panel_only()).
     if skills.get("skill_count"):
         lines.append(
-            f"· 已学会技能（chests）：技能库共 {skills['skill_count']} 条配方，"
-            f"下面列出可直接复用的 SQL 思路")
+            f"· Learned skills (chests): the skill library holds {skills['skill_count']} "
+            f"recipes in total; the directly reusable SQL approaches are listed below")
 
-    # —— 同构会话新增（设计⑨⑩）：进运行时上下文的「学习状态」字段 ——
-    # 这些和上面 biome/nearby_blocks/inventory/chests 正交：上面是「世界长啥样」，
-    # 下面是「我学到哪了 / 栽在哪了」。VLML 判决与覆盖率数值**不在这里**（约定⑧，
-    # 它们只进面板 run_log，不进上下文）。
-    # MC 节点里程碑树（设计：把 VLML 的表理成树状图，树干最粗 = 里程碑）：
+    # —— New isomorphic session fields (design ⑨⑩): the "learning state" fields that enter
+    # the runtime context —— these are orthogonal to the biome/nearby_blocks/inventory/chests
+    # above: those are "what the world looks like", the ones below are "where I have got to /
+    # where I fell over". VLML's verdict and the coverage number are **not** here (convention ⑧,
+    # they only reach the dashboard run_log, never the context).
+    # The MC node milestone tree (the design: arrange VLML's tables into a tree, the thickest
+    # part of the trunk = the milestones):
     mt = milestone_tree()
     if mt.get("trunk"):
         lines.append(
-            f"· MC 里程碑树（树干=最长前置路径，节点最多路径上的节点即里程碑）："
-            f"进度 {mt['progress']}")
-        lines.append(f"    种子（须先拿下，对应 MC 的 Mine 1 wood log）：{mt['seed']}")
+            f"· MC milestone tree (trunk = the longest prerequisite path, the nodes on the path "
+            f"with the most nodes are the milestones):"
+            f"progress {mt['progress']}")
+        lines.append(f"    Seed (must be taken first, corresponding to MC's Mine 1 wood log): "
+                     f"{mt['seed']}")
         lines.append(
-            f"    树干链：{' → '.join(mt['trunk'])}")
+            f"    Trunk chain: {' → '.join(mt['trunk'])}")
         if mt.get("keystone"):
             lines.append(
-                f"    树干最粗处（keystone，经过路径最多）：{mt['keystone']}"
-                f"（betweenness {mt.get('keystone_score')}）")
+                f"    Thickest point of the trunk (keystone, the most paths pass through): "
+                f"{mt['keystone']}"
+                f" (betweenness {mt.get('keystone_score')})")
         if mt.get("completed_list"):
-            lines.append(f"    已解锁里程碑：{', '.join(mt['completed_list'])}")
+            lines.append(f"    Unlocked milestones: {', '.join(mt['completed_list'])}")
     ms_topics = unlocked_milestones()
     if ms_topics:
-        lines.append(f"· 已解锁里程碑（图谱节点·已完成）：{', '.join(ms_topics)}")
+        lines.append(f"· Unlocked milestones (graph nodes · completed): {', '.join(ms_topics)}")
     learned = learned_skills()
     if learned:
-        lines.append("· 已学会技能（chests·可复用取数配方，照抄其 SQL 思路）：")
+        lines.append("· Learned skills (chests · reusable data-retrieval recipes, copy their "
+                     "SQL approach):")
         for s in learned:
             code = (s["code"] or "").strip().replace("\n", " ")
             snippet = (code[:160] + "…") if len(code) > 160 else code
-            lines.append(f"    - [{s['topic']}] {s['name']}：{snippet}")
+            lines.append(f"    - [{s['topic']}] {s['name']}: {snippet}")
     fails = failure_history()
     if fails:
-        lines.append("· 历史失败（带原因，避免重蹈）：")
+        lines.append("· Past failures (with reasons, avoid repeating them):")
         for f in fails:
             times = int(f.get("times") or 1)
             lines.append(
-                f"    - {f['topic']}（{f['verdict']}）：{f['reason']}"
+                f"    - {f['topic']} ({f['verdict']}): {f['reason']}"
                 + (f" ×{times}" if times > 1 else ""))
     skips = skip_history()
     if skips:
-        lines.append("· 历史跳过（带原因，避免重复绕路）：")
+        lines.append("· Past skips (with reasons, avoid going round in circles again):")
         for s in skips:
-            lines.append(f"    - {s['topic']}：{s['reason']}")
+            lines.append(f"    - {s['topic']}: {s['reason']}")
     unit = random_unit()
     if unit.get("table"):
         lines.append(
-            f"· 本次随机出生最小单位（表,列）：{unit['table']}"
-            f".{unit['column'] or '?'}（{unit['desc'] or '列含义/单位未登记'}）")
-        lines.append("    —— 先把这个最小单位的取数做通，再向对应里程碑推进。")
+            f"· This run's random spawn minimal unit (table,column): {unit['table']}"
+            f".{unit['column'] or '?'} ({unit['desc'] or 'column meaning/unit not registered'})")
+        lines.append("    —— First get the data retrieval for this minimal unit working, "
+                     "then push towards the corresponding milestone.")
 
     if topic_id:
-        lines.append(f"· 本次聚焦知识点：{topic_id}")
+        lines.append(f"· Knowledge point in focus this run: {topic_id}")
     return "\n".join(lines)
 
 
 def _main() -> int:
-    print("=== MVE 初始场景注入（两档渐进披露）===\n")
+    print("=== MVE initial scene injection (two tiers of progressive disclosure) ===\n")
     for tier in (TIER_BASE, TIER_EXT):
-        label = "新手档（base 层）" if tier == TIER_BASE else "解锁档（含 ext 层）"
-        print(f"--- 进度档 {tier}：{label} ---")
+        label = "beginner tier (base layer)" if tier == TIER_BASE else "unlocked tier (incl. ext layer)"
+        print(f"--- progress tier {tier}: {label} ---")
         print(scene_injection(progress_tier=tier))
         print()
     return 0

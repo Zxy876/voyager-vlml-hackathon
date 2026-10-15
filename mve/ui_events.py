@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
-"""界面交互事件流。
+"""UI interaction event stream.
 
-为什么单独建这条流：用户要求导出的 md「一定要具体到界面交互（按了什么键，
-然后选了什么难度）」。而现有三条流都不是这个视角：
+Why this stream exists separately: the user requires the exported md to "be concrete about UI interactions (which key was pressed,
+then which difficulty was chosen)". None of the existing three streams takes this view:
 
-  run_log.jsonl       —— Voyager 的作答结果（机器视角）
-  causal_timeline     —— control / attempt 的因果序列（出题器视角）
-  coach_log.jsonl     —— 人导入的问题与解释（内容视角）
+  run_log.jsonl       — Voyager's answer results (machine view)
+  causal_timeline     — the causal sequence of control / attempt (question generator view)
+  coach_log.jsonl     — human-imported questions and explanations (content view)
 
-**没有一条是"人在界面上按了什么"**。没有它，导出的 md 只能写出"覆盖率 45%"，
-写不出"人 02:01 点了启动、选了连续自适应 + 3 轮 + 钉住 pistol_eco_pattern（难度 3）"
-—— 而后者才是复现一次实验真正需要的。
+**None of them records "what the human pressed on the UI"**. Without it, the exported md can only say "coverage 45%",
+not "at 02:01 the human pressed start, chose continuous adaptive + 3 rounds + pinned pistol_eco_pattern (difficulty 3)"
+— and the latter is what is actually needed to reproduce an experiment.
 
-事件落盘成 ui_events.jsonl，导出 md 时排在最前面（照伴学 doc_exporter.py 的
-`## Recent Interactions`，它是 Overview 之后的第一节）。
+Events are persisted as ui_events.jsonl and placed first when exporting md (mirroring the study companion's doc_exporter.py
+`## Recent Interactions`, the first section after Overview).
 
-难度必须记下来：选题下拉里是 topic_id，但人真正关心的是"选了什么难度"，
-所以事件里同时存 topic_id 和 difficulty（"出题器自选"时 difficulty=0 并标注）。
+Difficulty must be recorded: the topic dropdown shows topic_id, but what the human really cares about is "which difficulty was chosen",
+so each event stores both topic_id and difficulty (difficulty=0 and annotated when the question generator auto-selects).
 """
 
 from __future__ import annotations
@@ -30,48 +30,48 @@ from typing import Any
 ROOT = Path(__file__).resolve().parent
 LOG = ROOT / "ui_events.jsonl"
 
-# 事件种类（面板上真正会被按下的东西）
-PILOT_START = "pilot_start"    # 点「启动 Voyager」
-PILOT_STOP = "pilot_stop"      # 点「停止」
-IMPORT = "human_import"        # 人导入一条意图
-TAB = "tab_switch"             # 切分区
-CLEAR_LOG = "clear_log"        # 清空运行日志
-EXPORT = "export_md"           # 导出 md
-DB_PROBE = "db_probe"          # 点「验货」：换库前先看看这个库里有什么
-DB_SWITCH = "db_switch"        # 点「切换」：写 db_config.json（要重启面板才生效）
-RESET = "reset_all"            # 点「清空学习状态」
-PRACTICE_SCOPE_SET = "practice_scope_set"      # 知识图谱页点「练习此知识点」
-PRACTICE_SCOPE_CLEAR = "practice_scope_clear"  # 点「清除范围」
-SUBJECT_ADD = "subject_add"        # 学科登记册：人填一个学科（换数据源后填赛事/战队）
-SUBJECT_SYNC = "subject_sync"      # 点「从数据源同步」：把库里实查到的值登记成学科
-SUBJECT_DEL = "subject_del"        # 删掉一个（人填的）学科
-MC_LEARN = "mc_learn"              # 点「🧠 启动 MC 思路学习 → MVE」（MC 侧学习 + 入库）
-VOYAGER_START = "voyager_start"    # 点「▶ 启动 MC 真实学习」（在 MC 里跑 Voyager 自动课程）
-VOYAGER_STOP = "voyager_stop"      # 点「■ 停止」（Voyager 学习）
-VOYAGER_CLEAR_SKILL = "voyager_clear_skill"    # 点「清库」（删技能库）
-VOYAGER_CLEAR_MEMORY = "voyager_clear_memory"  # 点「清记忆」（删课程进度 + 事件）
+# Event kinds (things actually pressed on the dashboard)
+PILOT_START = "pilot_start"    # pressed "Start Voyager"
+PILOT_STOP = "pilot_stop"      # pressed "Stop"
+IMPORT = "human_import"        # human imports an intent
+TAB = "tab_switch"             # switch tab
+CLEAR_LOG = "clear_log"        # clear the run log
+EXPORT = "export_md"           # export md
+DB_PROBE = "db_probe"          # pressed "Probe": look at what is in this database before switching
+DB_SWITCH = "db_switch"        # pressed "Switch": writes db_config.json (requires a dashboard restart to take effect)
+RESET = "reset_all"            # pressed "Clear learning state"
+PRACTICE_SCOPE_SET = "practice_scope_set"      # pressed "Practice this topic" on the knowledge graph page
+PRACTICE_SCOPE_CLEAR = "practice_scope_clear"  # pressed "Clear scope"
+SUBJECT_ADD = "subject_add"        # entry registry: a human fills in one entry (series/team after switching data source)
+SUBJECT_SYNC = "subject_sync"      # pressed "Sync from data source": registers values probed from the database as entries
+SUBJECT_DEL = "subject_del"        # delete one (human-filled) entry
+MC_LEARN = "mc_learn"              # pressed "🧠 Start MC thinking learning → MVE" (MC-side learning + import)
+VOYAGER_START = "voyager_start"    # pressed "▶ Start MC real learning" (run Voyager's auto curriculum inside MC)
+VOYAGER_STOP = "voyager_stop"      # pressed "■ Stop" (Voyager learning)
+VOYAGER_CLEAR_SKILL = "voyager_clear_skill"    # pressed "Clear library" (delete the skill library)
+VOYAGER_CLEAR_MEMORY = "voyager_clear_memory"  # pressed "Clear memory" (delete curriculum progress + events)
 
-# kind -> 人话（导出 md 里直接显示）
+# kind -> plain language (shown directly in the exported md)
 ACTION_LABEL = {
-    PILOT_START: "点「▶ 启动 Voyager」",
-    PILOT_STOP: "点「■ 停止」",
-    IMPORT: "提交一条人导入意图",
-    TAB: "切换面板分区",
-    CLEAR_LOG: "点「清空日志」",
-    EXPORT: "导出 md",
-    DB_PROBE: "点「验货」（检查新数据库）",
-    DB_SWITCH: "点「切换数据库」",
-    RESET: "点「清空学习状态」",
-    PRACTICE_SCOPE_SET: "点「练习此知识点」（设练习范围）",
-    PRACTICE_SCOPE_CLEAR: "点「清除范围」",
-    SUBJECT_ADD: "登记一个学科（人填）",
-    SUBJECT_SYNC: "点「从数据源同步学科」",
-    SUBJECT_DEL: "删除一个学科",
-    MC_LEARN: "点「🧠 启动 MC 思路学习 → MVE」",
-    VOYAGER_START: "点「▶ 启动 MC 真实学习」",
-    VOYAGER_STOP: "点「■ 停止 MC 真实学习」",
-    VOYAGER_CLEAR_SKILL: "点「清库（删技能库）」",
-    VOYAGER_CLEAR_MEMORY: "点「清记忆（删课程进度 + 事件）」",
+    PILOT_START: "Pressed \"▶ Start Voyager\"",
+    PILOT_STOP: "Pressed \"■ Stop\"",
+    IMPORT: "Submitted a human-import intent",
+    TAB: "Switched dashboard tab",
+    CLEAR_LOG: "Pressed \"Clear log\"",
+    EXPORT: "Exported md",
+    DB_PROBE: "Pressed \"Probe\" (inspected the new database)",
+    DB_SWITCH: "Pressed \"Switch database\"",
+    RESET: "Pressed \"Clear learning state\"",
+    PRACTICE_SCOPE_SET: "Pressed \"Practice this topic\" (set practice scope)",
+    PRACTICE_SCOPE_CLEAR: "Pressed \"Clear scope\"",
+    SUBJECT_ADD: "Registered an entry (human-filled)",
+    SUBJECT_SYNC: "Pressed \"Sync entries from data source\"",
+    SUBJECT_DEL: "Deleted an entry",
+    MC_LEARN: "Pressed \"🧠 Start MC thinking learning → MVE\"",
+    VOYAGER_START: "Pressed \"▶ Start MC real learning\"",
+    VOYAGER_STOP: "Pressed \"■ Stop MC real learning\"",
+    VOYAGER_CLEAR_SKILL: "Pressed \"Clear library (delete skill library)\"",
+    VOYAGER_CLEAR_MEMORY: "Pressed \"Clear memory (delete curriculum progress + events)\"",
 }
 
 
@@ -118,7 +118,7 @@ def load() -> list[dict[str, Any]]:
 
 
 def difficulty_of(topic_id: str) -> int:
-    """topic_id -> 难度。出题器自选时不知道，返回 0。"""
+    """topic_id -> difficulty. Returns 0 when unknown (question generator auto-select)."""
     if not topic_id:
         return 0
     try:
@@ -135,7 +135,7 @@ def recent(limit: int = 50) -> list[dict[str, Any]]:
 def reset() -> None:
     if LOG.exists():
         LOG.unlink()
-    print(f"已清空界面交互事件流：{LOG}")
+    print(f"UI interaction event stream cleared: {LOG}")
 
 
 if __name__ == "__main__":

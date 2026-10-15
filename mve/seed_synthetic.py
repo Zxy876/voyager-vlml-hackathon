@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""合成数据生成器 · 为 MVE 造一个字段与 VLML 真表一致的小型假数据集。
+"""Synthetic data generator · builds a small fake dataset for MVE whose fields match VLML's real tables.
 
-设计原则：
-- 不硬编码任何"答案数字"。指标全部由 VLML 自带的 transformations SQL 从 base_events 算出。
-- 只在事件层植入**模式**（谁拿首血、首血后谁赢），让 agg 表算出来的数字自带故事。
-- 这样 MCP 工具返回的每一个数字都有数据支撑，符合 VLML「不猜测、只查询」的原则。
+Design principles:
+- No "answer numbers" are hard-coded. All metrics are computed from base_events by VLML's own transformations SQL.
+- Patterns are planted only at the event layer (who gets first blood, who wins after first blood), so the numbers the agg tables compute carry a story of their own.
+- This way every number the MCP tools returns is backed by data, in line with VLML's "never guess, only query" principle.
 
-植入的模式（对应真实 Cloud9 vs NRG 那场的结构）：
-- Corrode 图上 Cloud9 首血转换率崩盘 → 惨败
-- OXY 首死次数偏高
+Planted patterns (mirroring the structure of the real Cloud9 vs NRG series):
+- Cloud9's first-blood conversion rate collapses on Corrode → a crushing loss
+- OXY's first-death count runs high
 """
 
 from __future__ import annotations
@@ -34,16 +34,16 @@ ROSTERS = {
     NRG: [("mada", "Raze"), ("brawk", "Omen"), ("skuba", "Cypher"), ("Ethan", "Sova"), ("s0m", "Breach")],
 }
 
-# 首死权重：OXY 最高（植入"entry fragger 太暴露"这个模式）
+# First-death weights: OXY highest (planting the "the entry fragger is too exposed" pattern)
 FD_WEIGHTS = {C9: [6.0, 2.0, 2.0, 1.5, 1.0], NRG: [1.0, 1.5, 1.5, 2.0, 1.5]}
-# 拿首血权重（mada/Ethan 是 NRG 的突破手）
+# First-blood weights (mada/Ethan are NRG's entry fraggers)
 FB_WEIGHTS = {C9: [3.0, 1.5, 1.0, 2.0, 1.0], NRG: [3.0, 2.0, 1.0, 2.5, 1.0]}
 
 WEAPONS = [("Vandal", "rifle"), ("Phantom", "rifle"), ("Sheriff", "pistol"),
            ("Operator", "sniper"), ("Spectre", "smg"), ("Classic", "pistol")]
 
-# 每张图：Cloud9 与 NRG 的「拿到首血后赢下该回合」的概率
-# 三张图的故事：Haven 势均力敌 → Corrode 崩盘 → Lotus 小负
+# Per map: Cloud9's and NRG's probability of "winning the round after getting first blood"
+# The three maps' story: Haven evenly matched → Corrode collapse → Lotus narrow loss
 GAMES = [
     {"game_id": "g-haven", "map": "Haven", "conv": {C9: 0.76, NRG: 0.60}, "fb_p_c9": 0.52},
     {"game_id": "g-corrode", "map": "Corrode", "conv": {C9: 0.28, NRG: 0.88}, "fb_p_c9": 0.32},
@@ -65,7 +65,7 @@ def main() -> None:
     random.seed(20261005)
     con = duckdb.connect(str(DB_PATH))
 
-    # 清掉旧合成数据，保证可重复运行
+    # Clear old synthetic data so runs are reproducible
     for t in ["base_events", "rounds", "games", "series",
               "agg_player_round_stats", "agg_player_game_stats", "agg_player_series_stats",
               "agg_team_round_stats", "agg_team_game_stats", "agg_player_daily_stats",
@@ -73,7 +73,7 @@ def main() -> None:
               "agg_team_round_summary", "agg_team_map_stats", "agg_team_series_stats",
               "agg_player_win_shares"]:
         con.execute(f"DELETE FROM {t}")
-    print("已清空旧数据")
+    print("old data cleared")
 
     base_time = datetime(2025, 8, 29, 18, 0, 0)
     events: list[tuple] = []
@@ -94,17 +94,17 @@ def main() -> None:
             rid = f"{gid}-r{rnd:02d}"
             clock = clock + timedelta(seconds=random.randint(45, 110))
 
-            # 谁拿首血
+            # Who gets first blood
             fb_team = C9 if random.random() < g["fb_p_c9"] else NRG
             fd_team = other(fb_team)
 
-            # 拿首血的一方按该图的转换率赢下回合
+            # The team that got first blood wins the round per that map's conversion rate
             won = random.random() < g["conv"][fb_team]
             winner = fb_team if won else fd_team
             loser = other(winner)
             score[winner] += 1
 
-            # 攻防方（简化：交替）
+            # Attack/defense sides (simplified: alternating)
             atk = C9 if rnd % 2 == 1 else NRG
             def_ = other(atk)
 
@@ -150,14 +150,14 @@ def main() -> None:
                     json.dumps({"synthetic": True}),
                 ))
 
-            # 首血事件
+            # First-blood event
             fb_actor = pick(ROSTERS[fb_team], FB_WEIGHTS[fb_team])
             fd_target = pick(ROSTERS[fd_team], FD_WEIGHTS[fd_team])
             mk_event(etype="kill", actor=fb_actor, actor_team=fb_team,
                      target=fd_target, target_team=fd_team,
                      is_kill=True, is_fb=True, damage=150.0)
 
-            # 后续击杀
+            # Follow-up kills
             for _ in range(random.randint(2, 5)):
                 if random.random() < 0.5:
                     a_team, t_team = winner, loser
@@ -167,7 +167,7 @@ def main() -> None:
                          actor_team=a_team, target=pick(ROSTERS[t_team], FD_WEIGHTS[t_team]),
                          target_team=t_team, is_kill=True, damage=float(random.randint(80, 160)))
 
-            # 下包 / 拆包
+            # Plant / defuse
             if end_reason in ("defused", "detonated", "time") or random.random() < 0.35:
                 mk_event(etype="plant", actor=pick(ROSTERS[atk], FB_WEIGHTS[atk]),
                          actor_team=atk, is_plant=True)
@@ -182,7 +182,7 @@ def main() -> None:
         ))
         total_wins[C9] += score[C9]
         total_wins[NRG] += score[NRG]
-        print(f"  {g['map']:8s}  Cloud9 {score[C9]:2d} - {score[NRG]:2d} NRG   ({rnd} 回合)")
+        print(f"  {g['map']:8s}  Cloud9 {score[C9]:2d} - {score[NRG]:2d} NRG   ({rnd} rounds)")
 
     series_winner = C9 if total_wins[C9] > total_wins[NRG] else NRG
     con.execute(
@@ -197,11 +197,11 @@ def main() -> None:
     con.commit()
 
     print()
-    print(f"series      : {len(game_rows)} 场图写入（总比分 C9 {total_wins[C9]} - {total_wins[NRG]} NRG，胜者 {series_winner}）")
-    print(f"rounds      : {len(round_rows)} 行")
-    print(f"base_events : {len(events)} 行")
+    print(f"series      : {len(game_rows)} maps written (total score C9 {total_wins[C9]} - {total_wins[NRG]} NRG, winner {series_winner})")
+    print(f"rounds      : {len(round_rows)} rows")
+    print(f"base_events : {len(events)} rows")
     print()
-    print("下一步：跑 transformations 生成 agg 表")
+    print("next step: run transformations to generate the agg tables")
     print("  python database/scripts/orchestration/run_transformations.py")
 
 

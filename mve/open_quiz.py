@@ -1,19 +1,25 @@
 #!/usr/bin/env python3
-"""MVE 的开放式出题器（移植自猫娘伴学的 tutor_llm_agent_question_generate）。
+"""MVE's open-ended question generator (ported from the study companion's
+tutor_llm_agent_question_generate).
 
-出题逻辑（移植，不 import 伴学运行时，跨进程只走 HTTP 桥）
+Question generation logic (ported; the companion runtime is not imported, the cross-process path
+goes only through the HTTP bridge)
 ----------------------------------------------------------
-1. 选题由 `topic_graph.TopicGraph.select_next` 负责（有序课程 + 完成门控 + 放弃机制）。
-2. 本题：拿选中的知识点（伴学 build_vlml_seed 的 29 个知识点之一）的
-   `examples`（prompt=问法 / answer_outline=拿表回答步骤）、`typical_misconceptions`
-   （实测踩出来的坑）、`skills`，组装成出题提示。
-3. **题型轮换**（移植 question_type_mapping.select_question_style）：同一知识点多次
-   练习时轮换 declared 的 question_types，且**明确告诉模型"不要和上次的题一样"**
-   —— 这正是解决"重复出一道题"的关键。
-4. 走 HTTP LLM：默认 MVE 自有智谱（llm_client）；env `MVE_QUIZ_BASE_URL` 一拨就
-   切到猫娘 OpenAI 兼容桥（前序画死的"跨进程只走 HTTP 桥，不 fork"）。
+1. Topic selection is `topic_graph.TopicGraph.select_next`'s job (ordered curriculum + completion
+   gating + the give-up mechanism).
+2. For the chosen topic (one of the 29 knowledge points from the companion's build_vlml_seed), take
+   its `examples` (prompt = how it is asked / answer_outline = the steps to answer it from the
+   tables), its `typical_misconceptions` (the pitfalls found in practice) and its `skills`, and
+   assemble them into the question-generation prompt.
+3. **Question-type rotation** (ported from question_type_mapping.select_question_style): while
+   practising the same knowledge point repeatedly, rotate through the declared question_types and
+   **explicitly tell the model "do not produce the same question as last time"** —— this is exactly
+   what solves "it produced the same question again".
+4. Go through the HTTP LLM: by default MVE's own Zhipu (llm_client); setting the env var
+   `MVE_QUIZ_BASE_URL` switches to the study companion's OpenAI-compatible bridge in one move (the
+   previously pinned "cross-process goes only through the HTTP bridge, never fork").
 
-输出归一化（移植 _normalize_question 的形状）
+Output normalization (the shape of the ported _normalize_question)
 -------------------------------------------
 {question, answer, accepted_answers, key_points, solution_steps,
  question_type, math_equivalence_engine, difficulty, topic, screen_type}
@@ -32,10 +38,14 @@ from topic_graph import MasteryStore, TopicGraph
 
 HERE = Path(__file__).resolve().parent
 
-# 可填题型 → 机器题型（移植 question_type_mapping，最小可用版）
+# Fillable question style -> machine question type (ported from question_type_mapping, minimal
+# usable version).
+# The style keys below MUST match the knowledge graph's `question_types` values verbatim
+# (e.g. static/knowledge_seeds/valorant.json, which uses English: "computation"/"interpretation"),
+# otherwise every lookup misses and silently falls back to _DEFAULT_MACHINE.
 _STYLE_TO_MACHINE = {
-    "计算": "math_exact", "判读": "short_answer", "概念": "short_answer",
-    "口径": "short_answer", "跨表": "math_reasoning", "对比": "short_answer",
+    "computation": "math_exact", "interpretation": "short_answer", "concept": "short_answer",
+    "definition": "short_answer", "cross-table": "math_reasoning", "comparison": "short_answer",
 }
 _MACHINE_TYPES = ("short_answer", "math_exact", "math_reasoning")
 _DEFAULT_MACHINE = "short_answer"
@@ -58,7 +68,8 @@ def _as_list(v: Any) -> list[Any]:
 
 
 def _machine_type_of(topic: dict[str, Any], attempt: int) -> tuple[str, str]:
-    """题型轮换：首试取第一个声明题型，之后在声明题型间轮换；重试避开上一题。"""
+    """Question-type rotation: the first attempt takes the first declared type, afterwards it rotates
+    through the declared types; a retry avoids the previous question."""
     styles = [_as_str(s) for s in _as_list(topic.get("question_types")) if _as_str(s)]
     if not styles:
         return _DEFAULT_MACHINE, ""
@@ -67,12 +78,13 @@ def _machine_type_of(topic: dict[str, Any], attempt: int) -> tuple[str, str]:
 
 
 # ---------------------------------------------------------------------------
-# LLM 调用（黑客松支线：统一走 voyager_vlml.llm 网关）
+# LLM calls (hackathon side branch: everything goes through the voyager_vlml.llm gateway)
 # ---------------------------------------------------------------------------
-# ⚠️ 2026-10-14 支线改动：这里原来自带一套智谱/猫娘桥端点逻辑。黑客松规则要求
-#   提交必须跑在 Nebius Token Factory + NVIDIA 开源模型上，所以出题/判分的 LLM
-#   调用也统一委托给 voyager_vlml/llm.py（Nebius 优先，密钥在就走 Nebius）——
-#   全仓库只剩这一个 LLM 出口，「所有调用都跑在 Nebius 上」可在一处验证。
+# ⚠️ 2026-10-14 side-branch change: this used to carry its own Zhipu / study-companion bridge
+#   endpoint logic. The hackathon rules require the submission to run on Nebius Token Factory +
+#   NVIDIA open models, so the LLM calls for question generation and grading are delegated to
+#   voyager_vlml/llm.py as well (Nebius first, keys in place → Nebius) —— this repository now has
+#   exactly one LLM exit point, so "every call runs on Nebius" can be verified in one place.
 def _quiz_http(messages: list[dict[str, str]], *, temperature: float = 0.6,
                max_tokens: int = 1600, timeout: float = 90.0) -> str:
     from voyager_vlml.llm import chat as _llm_chat
@@ -95,7 +107,8 @@ def _quiz_json(messages: list[dict[str, str]], **kw) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# 当前库真实实体（锚点，跟着库走；开源题必须围绕真实存在的实体，否则不可答）
+# Real entities of the current database (anchors that follow the database; open-source questions
+# must revolve around entities that really exist, otherwise they are unanswerable)
 # ---------------------------------------------------------------------------
 def _current_entities() -> dict[str, str]:
     try:
@@ -111,29 +124,33 @@ def _entity_block() -> str:
     if not (s and t):
         return ""
     return (
-        f"\n【当前库真实实体——出题与参考答案必须围绕这些，不要编造其他队/图】\n"
-        f"系列赛={s}｜队伍={t}" + (f"｜代表图={m}" if m else "")
+        f"\n[Real entities in the current database — question generation and the reference answer "
+        f"must revolve around these; do not invent other teams/maps]\n"
+        f"series={s} | team={t}" + (f" | representative map={m}" if m else "")
     )
 
 
 # ---------------------------------------------------------------------------
-# 当前库真实 schema（生成参考 SQL 的唯一事实来源；跟着库走，换库自动更新）
+# The real schema of the current database (the single source of truth for the reference SQL;
+# it follows the database, so swapping the database updates it automatically)
 # ---------------------------------------------------------------------------
 def _active_db() -> Path:
-    cfg = HERE / "db_config.json"   # db_config.json 与 open_quiz.py 同目录（mve/）
+    cfg = HERE / "db_config.json"   # db_config.json sits in the same directory as open_quiz.py (mve/)
     try:
         obj = json.loads(Path(cfg).read_text(encoding="utf-8"))
         p = str(obj.get("db_path") or "")
         if p:
-            # ⚠️ 相对路径按**仓库根**解析，不能原样返回（与 vlml_env /
-            #    anchor / entity_catalog 同口径）：vlml_env 会把 cwd 切到
-            #    vlml/，原样返回会在那儿被拼两遍（2026-10-13 服务器实测）。
+            # ⚠️ A relative path is resolved against the **repository root** and must not be
+            #    returned as-is (same convention as vlml_env / anchor / entity_catalog): vlml_env
+            #    switches cwd to vlml/, so returning it verbatim makes the path get doubled up
+            #    there (measured on the server, 2026-10-13).
             q = Path(p).expanduser()
             return q if q.is_absolute() else (HERE.parent / q).resolve()
     except Exception:
         pass
-    # 兜底走唯一定义处（当前是 rib.gg，用户 2026-10-13 定为默认库）——
-    # 不再各自写 vlml_events.duckdb 字面量。
+    # The fallback goes through the single point of definition (currently rib.gg, the user picked
+    # it as the default database on 2026-10-13) —— no more vlml_events.duckdb literals scattered
+    # around.
     from db_switch import DEFAULT_DB
     return DEFAULT_DB
 
@@ -142,7 +159,8 @@ _SCHEMA_CACHE: str | None = None
 
 
 def _schema_block() -> str:
-    """当前库所有真实表与列（连接库实查；照抄伴学 entity_catalog 的"实查不写死"原则）。"""
+    """Every real table and column of the current database (queried live from the connection;
+    following the study companion's entity_catalog principle of "query it live, never hardcode")."""
     global _SCHEMA_CACHE
     if _SCHEMA_CACHE is not None:
         return _SCHEMA_CACHE
@@ -164,48 +182,53 @@ def _schema_block() -> str:
         con.close()
         block = "\n".join(lines)
     except Exception as e:
-        block = f"（无法读取库 schema：{e}）"
+        block = f"(cannot read the database schema: {e})"
     _SCHEMA_CACHE = block
     return block
 
 
 _SCHEMA_CAVEATS = (
-    "【当前库真实 schema 与常见坑——reference_sql 必须严格遵守】\n"
-    "- 没有名为 `teams` 的表。队伍名散落在：games(team1_name, team2_name, "
-    "winning_team_name)、rounds(winning_team_name, losing_team_name)、"
-    "series(team1_name, team2_name)、各 agg_* 表用 team_name / opponent_team_name / "
-    "winning_team_name / losing_team_name。\n"
-    "- 地图列一律叫 `map_name`（不是 map）。\n"
-    "- `agent_roles` 是静态维表，只有 agent_name / agent_role / is_controller / "
-    "is_duelist / is_initiator / is_sentinel，没有 team / map / player 列——"
-    "只能查\"某特工属于什么位置\"，不能按队/图/选手过滤。\n"
-    "- 要查\"某队在某图用了哪些某位置（Initiator/Sentinel/Duelist/Controller）特工\"，"
-    "用 **agg_player_round_stats**（含 team_name, map_name, agent_name, agent_role）。"
-    "注意 agg_player_game_stats 只有 agent_name、**没有 agent_role 列**，别用错表。\n"
-    "- 选手名：agg_player_* 与 ext_player_* 用 player_name；base_events 用 "
-    "actor_player_name / target_player_name（没有 player_name 列）。\n"
-    "- base_events 的队伍列是 **actor_team_name / target_team_name**（不是 team_name）。\n"
-    "- 多表 JOIN 时，所有**重复列名必须加表前缀**（如 base_events.weapon_name），"
-    "否则报 Ambiguous reference。\n"
-    "- `agg_team_round_stats` **没有 series_id 列**（只有 game_id / round_id）；"
-    "要按系列赛过滤，请先 `JOIN games ON game_id` 拿 series_id，或改用 "
-    "agg_team_game_stats（含 series_id）。\n"
-    "- `agg_post_plant_stats` 的队伍列是 planting_team / defending_team / "
-    "winning_team_name（没有 team_name）。\n"
-    "- 类型别混：series_id 是整数（如 1058），tournament_id 是字符串"
-    "（如 'valorant-champions-2026'）。\"系列赛\"过滤用 series_id，不要拿 1058 去查 "
-    "tournament_id。\n"
-    "- reference_sql 仅一条 SELECT，表名与列名必须来自下方【真实 schema】；"
-    "跑不通的题会被直接淘汰，请务必先核对列名再写。"
+    "[The real schema of the current database and its common pitfalls — reference_sql must follow "
+    "these strictly]\n"
+    "- There is no table named `teams`. Team names are scattered across: games(team1_name, "
+    "team2_name, winning_team_name), rounds(winning_team_name, losing_team_name), "
+    "series(team1_name, team2_name), and the agg_* tables use team_name / opponent_team_name / "
+    "winning_team_name / losing_team_name.\n"
+    "- The map column is always called `map_name` (not map).\n"
+    "- `agent_roles` is a static dimension table with only agent_name / agent_role / "
+    "is_controller / is_duelist / is_initiator / is_sentinel and no team / map / player columns —— "
+    "it can only answer \"what role does a given agent have\", not filter by team/map/player.\n"
+    "- To ask \"which agents in a given role (Initiator/Sentinel/Duelist/Controller) did a given "
+    "team pick on a given map\", use **agg_player_round_stats** (it has team_name, map_name, "
+    "agent_name, agent_role). Note that agg_player_game_stats has only agent_name and "
+    "**no agent_role column** — do not pick the wrong table.\n"
+    "- Player names: agg_player_* and ext_player_* use player_name; base_events uses "
+    "actor_player_name / target_player_name (there is no player_name column).\n"
+    "- The team columns of base_events are **actor_team_name / target_team_name** (not team_name).\n"
+    "- In a multi-table JOIN, every **duplicate column name must be prefixed with its table** "
+    "(e.g. base_events.weapon_name), otherwise it reports an Ambiguous reference.\n"
+    "- `agg_team_round_stats` has **no series_id column** (only game_id / round_id); to filter by "
+    "series, first `JOIN games ON game_id` to get series_id, or use agg_team_game_stats instead "
+    "(it has series_id).\n"
+    "- The team columns of `agg_post_plant_stats` are planting_team / defending_team / "
+    "winning_team_name (there is no team_name).\n"
+    "- Do not mix up the types: series_id is an integer (e.g. 1058) while tournament_id is a string "
+    "(e.g. 'valorant-champions-2026'). Filtering \"by series\" uses series_id; do not query "
+    "tournament_id with 1058.\n"
+    "- reference_sql must be a single SELECT, and the table and column names must come from the "
+    "[real schema] below; questions whose SQL does not run are eliminated outright, so always "
+    "check the column names before writing it.\n"
 )
 
 
 def _validate_sql(sql: str) -> tuple[bool, str]:
-    """直接对当前库跑一次 SELECT，返回 (可执行且返回非空行?, 错误信息)。
-    这是生成题参考 SQL 的硬闸门：跑不通 → 该题没有客观真值（VLML 判不了成功）。"""
+    """Run the SELECT once against the current database and return (does it execute and return a
+    non-empty row set?, the error message). This is the hard gate on a generated question's
+    reference SQL: if it does not run, the question has no objective ground truth (VLML cannot
+    judge it a success)."""
     s = str(sql or "").strip()
     if not s.lower().lstrip().startswith("select"):
-        return False, "reference_sql 不是以 SELECT 开头"
+        return False, "reference_sql does not start with SELECT"
     try:
         import duckdb
         con = duckdb.connect(str(_active_db()), read_only=True)
@@ -214,20 +237,22 @@ def _validate_sql(sql: str) -> tuple[bool, str]:
         finally:
             con.close()
         if not rows:
-            return False, "reference_sql 执行返回 0 行（本题在当前库无解）"
+            return False, "reference_sql returned 0 rows (this question has no answer in the current database)"
         return True, ""
     except Exception as e:
         return False, f"{type(e).__name__}: {e}"
 
 
 # ---------------------------------------------------------------------------
-# 提示组装
+# Prompt assembly
 # ---------------------------------------------------------------------------
 def recall_context(task_text: str, limit: int = 5) -> list[str]:
-    """Task 3：从 mem0 长期记忆召回与本题相关的经验（带记忆系统消费）。
+    """Task 3: recall experience relevant to this question from mem0 long-term memory (with the
+    memory system consumed).
 
-    优雅降级：mem0 未装 / 未 seed / 连不上 → 返回空列表，不阻断出题。
-    记忆内容 = 4 条跨域规划原则 + 失败纠正经验（见 mem0_backend）。
+    Graceful degradation: mem0 not installed / not seeded / unreachable → return an empty list and
+    do not block question generation. The memory content is 4 cross-domain planning principles plus
+    failure-correction experience (see mem0_backend).
     """
     try:
         import mem0_backend
@@ -253,79 +278,100 @@ def _build_messages(topic: dict[str, Any], *, attempt: int, last_question: str =
                 p = _as_str(ex.get("prompt"))
                 ao = _as_list(ex.get("answer_outline"))
                 if p:
-                    lines.append(f"- 问法示例：「{p}」")
+                    lines.append(f"- Example of how it is asked: '{p}'")
                 if ao:
-                    lines.append(f"  拿表回答示意：{' → '.join(_as_str(x) for x in ao[:3])}")
+                    lines.append(f"  How to answer it from the tables: "
+                                 f"{' → '.join(_as_str(x) for x in ao[:3])}")
         ex_block = "\n".join(lines)
 
-    mis_block = "\n".join(f"- {_as_str(x)}" for x in mis[:4]) if mis else "（无特别记录）"
-    skill_block = "\n".join(f"- {_as_str(s)}" for s in skills) if skills else "（无）"
+    mis_block = "\n".join(f"- {_as_str(x)}" for x in mis[:4]) if mis else "(nothing recorded)"
+    skill_block = "\n".join(f"- {_as_str(s)}" for s in skills) if skills else "(none)"
 
     machine_type, style = _machine_type_of(topic, attempt)
-    style_hint = f"本次题型风格：{style}（机器题型 {machine_type}）" if style else f"机器题型：{machine_type}"
+    # The style name comes from the knowledge graph's own `question_types` value and is therefore
+    # deliberately shown verbatim, so the model can see which declared type this attempt rotates to.
+    style_hint = (f"question type style for this attempt: {style} (machine question type "
+                  f"{machine_type})") if style else f"machine question type: {machine_type}"
 
-    # 口径锁定：防止出题器跨粒度串味（实测：grain_game 被出成「多少个回合」的
-    # round 题——因为 scene/实体上下文带进了上一题 grain_round 的措辞与实体，
-    # 模型沿用了上一题的计数粒度）。粒度标记取自知识点名里的括号（rounds/games/
-    # series/first_blood/economy…），并强制 question 锁定本粒度。
+    # Convention lock: prevents the generator from bleeding across granularities (measured:
+    # grain_game was generated as a round-counting question ("how many rounds") —— because the
+    # scene/entity context carried in the wording and entities of the previous grain_round question,
+    # and the model kept the previous question's counting granularity). The granularity marker is
+    # taken from the parentheses in the knowledge point name (rounds/games/series/first_blood/
+    # economy…), and the question is forced to lock onto this granularity.
     gran = ""
     _gm = re.search(r"[（(]([^（）()]+)[）)]", name)
     if _gm:
         gran = _gm.group(1).strip()
-    # 粒度标记本身往往就是表名（rounds / games / series / base_events /
-    # agg_tournament_stats…），直接当取数锚点点名，比只说"锁定粒度"更硬：
-    # 模型对抽象的"粒度"不敏感，但对"不许 FROM 某张表"这类具体约束敏感
-    # （实测：只说锁定粒度时 grain_series 仍被出成 FROM rounds 的回合题）。
+    # The granularity marker is often itself a table name (rounds / games / series / base_events /
+    # agg_tournament_stats…), so naming it directly as the data-retrieval anchor is stricter than
+    # merely saying "lock the granularity": the model is insensitive to an abstract "granularity"
+    # but is sensitive to concrete constraints like "you may not FROM this table" (measured: when
+    # only the granularity lock was mentioned, grain_series was still generated as a round question
+    # doing FROM rounds).
     gran_hint = ""
     if gran:
         gran_hint = (
-            f"\n  本题粒度标记是 `{gran}`：reference_sql 必须围绕 `{gran}` 取数"
-            f"（若该粒度对应的是报告工具，则以 series_id 等入口参数调用它）；"
-            f"**严禁**用与 `{gran}` 粒度不符的表做计数——例如粒度不是 rounds 就"
-            f"不要写 FROM rounds，不是 games 就不要写 FROM games。"
+            f"\n  The granularity marker of this question is `{gran}`: reference_sql must retrieve "
+            f"data around `{gran}` (if that granularity corresponds to a reporting tool, call it "
+            f"with an entry parameter such as series_id); you are **strictly forbidden** to count "
+            f"with tables whose granularity differs from `{gran}` —— for example if the granularity "
+            f"is not rounds, do not write FROM rounds, and if it is not games, do not write FROM "
+            f"games."
         )
     gran_lock = (
-        f"\n【口径锁定】本题知识点是「{name}」"
-        + (f"，粒度标记为 {gran}" if gran else "")
-        + "。你出的 question 的**计数/分析对象必须严格锁定本知识点粒度**"
-        "（务必参照上方『问法示例』的口径，例如数图/数局/数系列赛/数回合/首血/"
-        "经济，不要混用）。严禁把其它粒度的问法（如本粒度是『图/局』却去问『多少个"
-        "回合』、本粒度是『回合』却去问『几张图』）套到本题；也不要照搬上一题的措辞。"
+        f"\n[Convention lock] The knowledge point of this question is '{name}'"
+        + (f", and its granularity marker is {gran}" if gran else "")
+        + ". The **counting / analysis target of the question you produce must lock strictly onto "
+        "this knowledge point's granularity (follow the conventions in the [example of how it is "
+        "asked] above, e.g. counting maps / games / series / rounds / first blood / economy — do "
+        "not mix them). It is strictly forbidden to graft another granularity's phrasing onto this "
+        "question (e.g. when this granularity is 'map/game' ask 'how many rounds', or when it is "
+        "'round' ask 'how many maps'), and do not copy the previous question's wording."
         + gran_hint
     )
 
     repeat_guard = ""
     if last_question:
         repeat_guard = (
-            f"\n⚠️ 上次练过的题是：「{last_question}」\n"
-            "请务必**换一个角度 / 换一张地图 / 换一个实体 / 切换计数粒度**出题，"
-            "不要和上次雷同（尤其不要沿用上一题在数什么）。"
+            f"\n⚠️ The question practised last time was: '{last_question}'\n"
+            "You must **change the angle / change the map / change the entity / switch the counting "
+            "granularity**, and must not duplicate last time (in particular, do not keep counting "
+            "what the previous question counted)."
         )
 
     system = (
-        "你是 Valorant 电竞数据分析的陪练教练。给定【知识点】，出【一道】练习题，"
-        "让学生用 VLML 的数据（表 agg_* / rounds / base_events 等）去回答。"
-        "你必须返回一个 JSON 对象，字段：\n"
-        "  question: 题目（自然语言，说清口径，例如'哪张图''哪个队'）\n"
-        "  answer: 参考答案（简洁）\n"
-        "  accepted_answers: 可接受答案列表（含等价表述/关键数值）\n"
-        "  key_points: 评分要点列表（判分用）\n"
-        "  solution_steps: 解题步骤列表（先确认粒度→选表→写 SQL/调工具→报数）\n"
-        "  question_type: 机器题型（short_answer / math_exact / math_reasoning）\n"
-        "  difficulty: 1-5 整数\n"
-        "  reference_sql: 一条 SELECT 语句，返回本题**目标数值**（必须在当前库可执行，"
-        "SELECT 开头；只允许查真实存在的表与列）。这是给「VLML0 裁判」独立跑出标准答案用的——"
-        "数值由数据库算，绝不是你编的，你只负责写出能取到该数的查询\n"
-        "  dimension: 指标维度短标识（英文，如 event_count / win_rate / kill_count）\n"
-        "  subject: 实体字典，如 {\"series\":\"2843069\",\"team\":\"NRG\",\"map\":\"Lotus\"}"
-        "（从当前库真实实体取，不要编造；键只能用 series/team/map）\n"
-        "  value_column: 目标数值在结果第几列（从 0 开始，默认 0）\n"
-        "  numeric_tolerance: 数值容差（默认 0.5）\n"
-        "不要编造不存在的表或列；口径必须可验证；reference_sql 必须能跑通。"
+        "You are the practice coach for Valorant esports data analysis. Given a [knowledge point], "
+        "produce **one** practice question that the student answers using VLML data (tables agg_* / "
+        "rounds / base_events and the like). You must return a JSON object with these fields:\n"
+        "  question: the question (natural language, stating the convention clearly, e.g. 'which "
+        "map' / 'which team')\n"
+        "  answer: the reference answer (concise)\n"
+        "  accepted_answers: a list of acceptable answers (including equivalent phrasings / key "
+        "numbers)\n"
+        "  key_points: a list of scoring points (used for grading)\n"
+        "  solution_steps: a list of solution steps (confirm the granularity first → pick the table "
+        "→ write SQL / call a tool → report the number)\n"
+        "  question_type: the machine question type (short_answer / math_exact / math_reasoning)\n"
+        "  difficulty: an integer 1-5\n"
+        "  reference_sql: a single SELECT statement returning this question's **target value** (it "
+        "must run in the current database, start with SELECT, and may only query tables and columns "
+        "that really exist). It exists so the 'VLML0 referee' can independently compute the gold "
+        "answer —— the number is computed by the database and is never one you made up; you are only "
+        "responsible for writing a query that can retrieve it\n"
+        "  dimension: a short identifier for the metric dimension (in English, e.g. event_count / "
+        "win_rate / kill_count)\n"
+        "  subject: a dictionary of entities, e.g. {\"series\":\"2843069\",\"team\":\"NRG\","
+        "\"map\":\"Lotus\"} (take it from the real entities of the current database, do not invent "
+        "any; the keys may only be series/team/map)\n"
+        "  value_column: which column of the result holds the target value (0-based, default 0)\n"
+        "  numeric_tolerance: the numeric tolerance (default 0.5)\n"
+        "Do not invent tables or columns that do not exist; the convention must be verifiable; "
+        "reference_sql must actually run."
     )
     system += (
-        "\n\n【真实 schema——reference_sql 的表名/列名只能从这里选】\n"
-        f"{_schema_block()}\n\n"
+        "\n\n[The real schema — the table/column names for reference_sql may only be chosen from "
+        f"here]\n{_schema_block()}\n\n"
         f"{_SCHEMA_CAVEATS}"
     )
     scene_line = ""
@@ -334,23 +380,26 @@ def _build_messages(topic: dict[str, Any], *, attempt: int, last_question: str =
     sql_err_line = ""
     if sql_error:
         sql_err_line = (
-            f"\n\n⚠️ 上一轮生成的 reference_sql 在当前库执行报错，**请修正后重新出一道题**"
-            f"（可换问法），确保新 SQL 能在当前库跑通：\n{sql_error}\n"
+            f"\n\n⚠️ The reference_sql generated in the previous round raised an error when executed "
+            f"against the current database. **Please fix it and produce a new question** (you may "
+            f"change the phrasing), making sure the new SQL runs in the current database:\n{sql_error}\n"
         )
     user = (
-        f"【知识点】{name}（章节：{chapter}）\n"
+        f"[Knowledge point] {name} (chapter: {chapter})\n"
         f"{style_hint}\n"
-        f"\n【技能要求】\n{skill_block}\n"
-        f"\n【问法与拿表回答示意（参考，不要照抄原题）】\n{ex_block}\n"
-        f"\n【实测常见误区（出题时埋下陷阱或明确警示）】\n{mis_block}\n"
-        f"\n难度建议：{topic.get('difficulty')}"
+        f"\n[Skill requirements]\n{skill_block}\n"
+        f"\n[Phrasing and how to answer it from the tables (a reference, do not copy the original "
+        f"question)]\n{ex_block}\n"
+        f"\n[Common pitfalls found in practice (bake a trap into the question, or warn explicitly)]\n"
+        f"{mis_block}\n"
+        f"\nSuggested difficulty: {topic.get('difficulty')}"
         f"{scene_line}"
         f"{gran_lock}"
         f"{_entity_block()}"
         f"{repeat_guard}"
         f"{sql_err_line}"
         + (_memory_block(memories) if memories else "")
-        + "\n请返回 JSON。"
+        + "\nPlease return JSON."
     )
     return [
         {"role": "system", "content": system},
@@ -359,12 +408,12 @@ def _build_messages(topic: dict[str, Any], *, attempt: int, last_question: str =
 
 
 # ---------------------------------------------------------------------------
-# 归一化（移植 _normalize_question 的形状）
+# Normalization (the shape of the ported _normalize_question)
 # ---------------------------------------------------------------------------
 def _normalize(raw: dict[str, Any], topic: dict[str, Any], *, attempt: int) -> dict[str, Any]:
     question = _as_str(raw.get("question")) or _as_str(raw.get("prompt"))
     if not question:
-        raise ValueError("模型未返回 question")
+        raise ValueError("the model returned no question")
     machine_type, style = _machine_type_of(topic, attempt)
     answer = _as_str(raw.get("answer")) or _as_str(raw.get("reference_answer"))
     accepted = [_as_str(x) for x in _as_list(raw.get("accepted_answers")) if _as_str(x)]
@@ -408,7 +457,8 @@ def _memory_block(memories: list[str] | None) -> str:
         return ""
     bullets = "\n".join(f"  - {m}" for m in memories[:6])
     return (
-        f"\n\n【既往经验记忆（mem0 召回，出题时可参考其取数思路/避坑）】\n"
+        f"\n\n[Experience recalled from past memory (mem0 recall; you may refer to its data-retrieval "
+        f"ideas and pitfalls when generating the question)]\n"
         f"{bullets}"
     )
 
@@ -416,18 +466,21 @@ def _memory_block(memories: list[str] | None) -> str:
 def generate_for(topic_id: str, *, attempt: int = 0, last_question: str = "",
                  memories: bool = True, scene: bool = True,
                  sql_error: str = "") -> dict[str, Any]:
-    """为某个知识点生成一道开放式题。失败抛异常，由调用方降级。
+    """Generate one open-ended question for a knowledge point. Raises on failure; the caller
+    degrades.
 
-    memories=True 时，先按知识点文本从 mem0 召回既往经验注入出题 prompt
-    （Task 3：技能消费带记忆系统——人消费路径也接记忆）。
-    scene=True 时，注入「初始场景（数据世界）」块（Task 2：渐进披露——
-    模型只能看到当前进度档允许看到的表/工具）。
-    sql_error：上一轮参考 SQL 执行报错时回灌，让模型带错重试（见 generate_validated）。
+    With memories=True, past experience is first recalled from mem0 by the knowledge point's text
+    and injected into the question-generation prompt (Task 3: skill consumption with a memory
+    system —— the human consumption path also gets memory).
+    With scene=True, the "initial scene (data world)" block is injected (Task 2: progressive
+    disclosure —— the model only sees the tables/tools the current progress tier allows).
+    sql_error: fed back when the previous round's reference SQL raised an error, so the model
+    retries carrying its mistake (see generate_validated).
     """
     graph = TopicGraph()
     topic = graph.topics.get(topic_id)
     if topic is None:
-        raise ValueError(f"未知知识点 {topic_id}")
+        raise ValueError(f"unknown knowledge point {topic_id}")
     mem = recall_context(_memory_query(topic)) if memories else []
     scene_text = ""
     if scene:
@@ -440,14 +493,15 @@ def generate_for(topic_id: str, *, attempt: int = 0, last_question: str = "",
                                memories=mem, scene_text=scene_text, sql_error=sql_error)
     raw = _quiz_json(messages)
     if not raw:
-        raise ValueError("出题 LLM 返回空/非 JSON")
+        raise ValueError("the question-generation LLM returned empty / non-JSON output")
     q = _normalize(raw, topic, attempt=attempt)
     q["memories_recalled"] = len(mem)
     return q
 
 
 def _real_tables() -> set[str]:
-    """从 _schema_block 解析当前库真实表名（复用缓存，不重复连库）。"""
+    """Parse the real table names of the current database out of _schema_block (reuses the cache, does
+    not reconnect to the database)."""
     tabs: set[str] = set()
     for line in _schema_block().splitlines():
         line = line.strip()
@@ -457,10 +511,12 @@ def _real_tables() -> set[str]:
 
 
 def _gran_table(topic: dict[str, Any]) -> str:
-    """本题粒度对应的**取数表**；粒度标记本身就是真实表名时才返回它，否则空串。
+    """The **data-retrieval table** corresponding to this question's granularity; returns it only
+    when the granularity marker really is a table name, otherwise an empty string.
 
-    数据驱动、不硬编码：粒度标记来自知识点名括号（rounds / games / series /
-    base_events / agg_tournament_stats…），是否真是一张表由当前库 schema 判定。
+    Data-driven, never hardcoded: the granularity marker comes from the parentheses in the knowledge
+    point name (rounds / games / series / base_events / agg_tournament_stats…), and whether it is
+    genuinely a table is decided by the current database's schema.
     """
     name = _as_str(topic.get("name"), topic.get("id", ""))
     m = re.search(r"[（(]([^（）()]+)[）)]", name)
@@ -471,7 +527,8 @@ def _gran_table(topic: dict[str, Any]) -> str:
 
 
 def _sql_tables(sql: str) -> set[str]:
-    """提取 reference_sql 的 FROM / JOIN 主表名，用于粒度闸门比对。"""
+    """Extract the FROM / JOIN main table names of reference_sql, for the granularity gate's
+    comparison."""
     out: set[str] = set()
     for m in re.finditer(r"\b(?:FROM|JOIN)\s+([A-Za-z_][A-Za-z0-9_]*)",
                          str(sql or ""), re.I):
@@ -482,16 +539,19 @@ def _sql_tables(sql: str) -> set[str]:
 def generate_validated(topic_id: str, *, max_tries: int = 3, attempt: int = 0,
                        last_question: str = "", memories: bool = True,
                        scene: bool = True) -> tuple[dict[str, Any], str | None]:
-    """出题 + 参考 SQL 自检：生成题后立刻拿真实库校验 reference_sql，
-    跑不通就把**具体 SQL 错误**回灌给模型重试（最多 max_tries 次）。
+    """Question generation + a self-check on the reference SQL: right after generating a question,
+    validate its reference_sql against the real database, and if it does not run, feed the
+    **specific SQL error** back to the model for a retry (at most max_tries times).
 
-    返回 (q, error)：error 为 None 表示 reference_sql 已可执行；
-    否则为最后一条错误（调用方应淘汰换题）。这样客观裁判永远拿得到真值，
-    不会出现"题出得对但 SQL 跑不通 → 裁判 unjudgeable → 永远 0% 学会"的死循环。
+    Returns (q, error): error is None when reference_sql is already executable; otherwise it is the
+    last error (the caller should drop the question and pick another). This way the objective
+    referee can always obtain a ground truth, so there is no "the question was right but the SQL did
+    not run → the referee cannot judge → forever 0% and never learns" deadlock.
     """
     sql_error = ""
     last_q: dict[str, Any] = {}
-    # 粒度闸门：本题粒度标记若是一张真实表，就要求 reference_sql 必须落在它上面
+    # Granularity gate: if this question's granularity marker is a real table, reference_sql must
+    # land on it
     try:
         topic = TopicGraph().topics.get(topic_id) or {}
     except Exception:
@@ -505,43 +565,50 @@ def generate_validated(topic_id: str, *, max_tries: int = 3, attempt: int = 0,
             err = f"{type(e).__name__}: {e}"
             if i == max_tries - 1:
                 return {}, err
-            sql_error = f"上一轮出题本身失败：{err}"
+            sql_error = f"the previous round's question generation itself failed: {err}"
             continue
         last_q = q
         sql = str(q.get("reference_sql") or "").strip()
         if not sql:
-            # 明确没给 SQL：留给调用方按"无参考 SQL"处理，这里不重试
-            return q, "无 reference_sql"
+            # Explicitly no SQL: leave it to the caller to handle as "no reference SQL", no retry here
+            return q, "no reference_sql"
         ok, err = _validate_sql(sql)
         if ok:
-            # —— 粒度闸门：SQL 能跑通还不够，取数层必须落在本题粒度上 ——
-            # 实测：grain_series 的 SQL 可执行却查的是 rounds（回合粒度），
-            # 于是题面与知识点错位 → 裁判按 series 口径判 → 必然 coverage=0%。
-            # 提示词层约束不住（模型对"锁定粒度"不敏感），必须在运行时拦下重试。
+            # —— Granularity gate: the SQL running is not enough, the data-retrieval layer must land
+            # on this question's granularity ——
+            # measured: grain_series's SQL executed but queried rounds (round granularity), so the
+            # question text and the knowledge point were mismatched → the referee graded by the
+            # series convention → coverage=0% for certain. The prompt layer cannot hold this (the
+            # model is insensitive to "lock the granularity"), so it must be caught at runtime and
+            # retried.
             if gran_tbl:
                 used = _sql_tables(sql)
                 if gran_tbl not in used:
                     sql_error = (
-                        f"上一次的 reference_sql 能跑通，但**取数粒度与本题知识点不符**"
-                        f"（本题粒度表应为 `{gran_tbl}`，你实际查的是 "
-                        f"{sorted(used) or '未知'}）。请重写：question 与 reference_sql "
-                        f"都必须落在 `{gran_tbl}` 这一层计数，不要借用其它粒度的表。\n"
-                        f"错误 SQL：{sql}"
+                        f"The previous reference_sql ran fine, but the **data-retrieval granularity "
+                        f"did not match this question's knowledge point** (the granularity table "
+                        f"for this question should be `{gran_tbl}`, but you actually queried "
+                        f"{sorted(used) or 'unknown'}). Please rewrite it: both question and "
+                        f"reference_sql must count at the `{gran_tbl}` level, and must not borrow "
+                        f"tables from another granularity.\n"
+                        f"The wrong SQL: {sql}"
                     )
-                    print(f"  （出题自检 {topic_id} 第{i+1}次粒度不符："
-                          f"应为 {gran_tbl}，实为 {sorted(used)} → 重试）")
+                    print(f"  (question self-check {topic_id} attempt {i+1}: granularity mismatch — "
+                          f"expected {gran_tbl}, got {sorted(used)} → retry)")
                     continue
             return q, None
         sql_error = (
-            f"上一次生成的 reference_sql 执行报错，请修正后重出：\n{sql}\n"
-            f"报错：{err}"
+            f"The reference_sql generated last time raised an error when executed; please fix it "
+            f"and generate a new one:\n{sql}\n"
+            f"The error: {err}"
         )
-        print(f"  （出题自检 {topic_id} 第{i+1}次参考 SQL 不通：{err} → 重试）")
-    return last_q, sql_error or "参考 SQL 多次尝试仍不可执行"
+        print(f"  (question self-check {topic_id} attempt {i+1}: reference SQL does not run: "
+              f"{err} → retry)")
+    return last_q, sql_error or "the reference SQL is still not executable after several attempts"
 
 
 def _memory_query(topic: dict[str, Any]) -> str:
-    """拼一条用于语义召回的任务文本（知识点名 + 技能要求）。"""
+    """Assemble the task text used for semantic recall (knowledge point name + skill requirements)."""
     name = _as_str(topic.get("name"), topic.get("id", ""))
     skills = "；".join(_as_str(s) for s in _as_list(topic.get("skills"))[:4])
     return f"{name}｜{skills}" if skills else name
@@ -550,16 +617,19 @@ def _memory_query(topic: dict[str, Any]) -> str:
 def generate_next(*, scope: dict[str, Any] | None = None, explicit: str | None = None,
                   last_question: str = "", memories: bool = True,
                   scene: bool = True) -> dict[str, Any]:
-    """选下一知识点并出题，一并返回选题依据。"""
+    """Pick the next knowledge point and generate a question for it, returning the selection
+    rationale alongside."""
     graph = TopicGraph()
     sel = graph.select_next(scope=scope, explicit=explicit)
-    # 范围内无「可拿下」任务（设计：应由调用方生成新任务）→ 直接返回选题依据，
-    # 不调 generate_for（否则 tid="" 会抛错）。
+    # No "can be taken" task left within the scope (by design the caller should generate new tasks)
+    # → return the selection rationale directly without calling generate_for (otherwise tid=""
+    # would raise).
     if sel.get("exhausted"):
         return {"selection": sel, "exhausted": True,
                 "question": "", "reference_sql": "", "topic": ""}
     tid = sel["topic_id"]
-    # attempt 数 = 该知识点已尝试次数（用于题型轮换）
+    # attempt count = how many times this knowledge point has been tried (used for question-type
+    # rotation)
     mrow = graph.mastery.get(tid)
     attempt = int((mrow or {}).get("attempts", 0))
     q = generate_for(tid, attempt=attempt, last_question=last_question,
@@ -570,12 +640,14 @@ def generate_next(*, scope: dict[str, Any] | None = None, explicit: str | None =
 
 def record_correction_on_failure(topic_id: str, *, user_answer: str = "",
                                  grade: dict[str, Any] | None = None) -> int:
-    """Task 3：人消费路径的失败→纠正闭环。答错（score<0.6）时把本题的
-    「常见误区 + 漏掉要点」写成 mem0 纠正记忆，下次出题/作答可召回。
+    """Task 3: the failure → correction loop of the human consumption path. When the answer is
+    wrong (score<0.6), write this question's "common pitfalls + missed points" as a mem0 correction
+    memory, which later question generation / answering can recall.
 
-    优雅降级：mem0 未装/未 seed → 返回 0，不阻断主流程。
-    与 failure_correction_loop 的区别：那里记的是「模型自己写错的 SQL 异常」
-    （取证闭环），这里记的是「人答错暴露的知识点误区」（人消费闭环）。
+    Graceful degradation: mem0 not installed / not seeded → return 0 and do not block the main flow.
+    The difference from failure_correction_loop: that one records "the SQL exception the model wrote
+    by itself" (the evidence-retrieval loop), while this one records "the knowledge point pitfall
+    the human's wrong answer exposed" (the human consumption loop).
     """
     score = float((grade or {}).get("score", 1.0))
     if score >= 0.6:
@@ -591,10 +663,10 @@ def record_correction_on_failure(topic_id: str, *, user_answer: str = "",
     if not (mis or misses):
         return 0
     entries = [{
-        "error": f"人答错知识点 {topic_id}（得分 {score:.2f}）："
-                 + (_as_str(user_answer)[:60] or "未作答"),
-        "fix": "本题关键：" + "；".join([*mis, *misses]),
-        "condition": f"涉及 {topic_id} 的出题/作答",
+        "error": f"the human answered knowledge point {topic_id} wrong (score {score:.2f}): "
+                 + (_as_str(user_answer)[:60] or "no answer given"),
+        "fix": "the key to this question: " + "; ".join([*mis, *misses]),
+        "condition": f"involves question generation / answering for {topic_id}",
         "verified": True,
     }]
     try:
@@ -605,47 +677,51 @@ def record_correction_on_failure(topic_id: str, *, user_answer: str = "",
 
 
 def record_result(topic_id: str, *, score: float) -> dict[str, Any]:
-    """记录一次作答得分（0-1），更新掌握度。"""
+    """Record one answering score (0-1) and update mastery."""
     graph = TopicGraph()
     return graph.mastery.update(topic_id, score=score)
 
 
 # ---------------------------------------------------------------------------
-# 判分（accepted_answers + key_points 语义判分，移植伴学的 accepted_answers 思路）
+# Grading (semantic grading over accepted_answers + key_points, porting the study companion's
+# accepted_answers idea)
 # ---------------------------------------------------------------------------
 def grade_answer(question_payload: dict[str, Any], user_answer: str) -> dict[str, Any]:
-    """用 LLM 判分：返回 {score(0-1), feedback, hits, misses}。
+    """Grade with the LLM: returns {score(0-1), feedback, hits, misses}.
 
-    对 math_exact 且 accepted_answers 含数值的题，先做数值容差快判（强信号，
-    不污染失败→纠正闭环）；其余走语义判分。
+    For math_exact questions whose accepted_answers contain numbers, a numeric-tolerance fast path
+    runs first (a strong signal that does not pollute the failure → correction loop); everything
+    else goes to semantic grading.
     """
     q_text = _as_str(question_payload.get("question"))
     accepted = _as_list(question_payload.get("accepted_answers"))
     key_points = _as_list(question_payload.get("key_points"))
     ua = _as_str(user_answer)
     if not ua:
-        return {"score": 0.0, "feedback": "未作答", "hits": [], "misses": key_points}
+        return {"score": 0.0, "feedback": "no answer given", "hits": [], "misses": key_points}
 
-    # 数值快判（math_exact）
+    # Numeric fast path (math_exact)
     if str(question_payload.get("question_type")) == "math_exact":
         nums = [n for a in accepted for n in _extract_numbers(a)]
         unum = _extract_numbers(ua)
         if nums and unum:
             if any(abs(n - u) <= max(0.5, abs(n) * 0.05) for n in nums for u in unum):
-                return {"score": 1.0, "feedback": "数值正确", "hits": ["数值"], "misses": []}
+                return {"score": 1.0, "feedback": "the number is correct",
+                        "hits": ["number"], "misses": []}
 
     messages = [
         {"role": "system", "content": (
-            "你是严格的阅卷人。根据【题目】【参考答案/可接受答案】【评分要点】评判"
-            "【学生作答】。返回 JSON：{score: 0到1 的小数, feedback: 简短点评, "
-            "hits: 命中的要点, misses: 漏掉/错的要点}。"
+            "You are a strict grader. Judge [the student's answer] against [the question] "
+            "[the reference answer / accepted answers] [the scoring points]. Return JSON: "
+            "{score: a decimal from 0 to 1, feedback: a brief comment, "
+            "hits: the points that were hit, misses: the points that were missed or wrong}."
         )},
         {"role": "user", "content": (
-            f"【题目】{q_text}\n"
-            f"【可接受答案】{json.dumps(accepted, ensure_ascii=False)}\n"
-            f"【评分要点】{json.dumps(key_points, ensure_ascii=False)}\n"
-            f"【学生作答】{ua}\n"
-            "请返回 JSON。"
+            f"[Question] {q_text}\n"
+            f"[Accepted answers] {json.dumps(accepted, ensure_ascii=False)}\n"
+            f"[Scoring points] {json.dumps(key_points, ensure_ascii=False)}\n"
+            f"[The student's answer] {ua}\n"
+            "Please return JSON."
         )},
     ]
     raw = _quiz_json(messages, temperature=0.2)
@@ -656,7 +732,7 @@ def grade_answer(question_payload: dict[str, Any], user_answer: str) -> dict[str
     score = max(0.0, min(1.0, score))
     return {
         "score": round(score, 3),
-        "feedback": _as_str(raw.get("feedback")) or ("通过" if score >= 0.6 else "未通过"),
+        "feedback": _as_str(raw.get("feedback")) or ("pass" if score >= 0.6 else "fail"),
         "hits": _as_list(raw.get("hits")),
         "misses": _as_list(raw.get("misses")),
     }
@@ -674,7 +750,8 @@ def _extract_numbers(text: str) -> list[float]:
 
 def attempt(topic_id: str, user_answer: str, *, attempt: int = 0,
             last_question: str = "") -> dict[str, Any]:
-    """选/出一道题 → 判分 → 记录掌握度，一步到位。返回完整结果。"""
+    """Pick / generate a question → grade it → record mastery, all in one step. Returns the full
+    result."""
     q = generate_for(topic_id, attempt=attempt, last_question=last_question)
     g = grade_answer(q, user_answer)
     q["grade"] = g
@@ -690,4 +767,4 @@ if __name__ == "__main__":
         q = generate_for(tid, attempt=0)
         print(json.dumps(q, ensure_ascii=False, indent=2))
     except Exception as e:
-        print("出题失败：", e)
+        print("Question generation failed: ", e)

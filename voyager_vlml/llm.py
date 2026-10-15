@@ -1,14 +1,15 @@
-"""voyager_vlml 的 LLM 调用（黑客松支线：Nebius Token Factory 优先，env 可切回）。
+"""LLM calls for voyager_vlml (hackathon side-track: Nebius Token Factory preferred, env can fall back).
 
-后端优先级（密钥在就走哪条）：
-  1. NEBIUS_API_KEY                                    → Nebius Token Factory（NVIDIA 开源模型）
-  2. MVE_QUIZ_BASE_URL / MVE_QUIZ_API_KEY / MVE_QUIZ_MODEL → 猫娘桥（OpenAI 兼容）
-  3. ZHIPU_API_KEY / ZHIPU_BASE_URL / ZHIPU_MODEL      → MVE 自有智谱
+Backend priority (whichever key is present wins):
+  1. NEBIUS_API_KEY                                    → Nebius Token Factory (NVIDIA open models)
+  2. MVE_QUIZ_BASE_URL / MVE_QUIZ_API_KEY / MVE_QUIZ_MODEL → Neko bridge (OpenAI-compatible)
+  3. ZHIPU_API_KEY / ZHIPU_BASE_URL / ZHIPU_MODEL      → MVE's own Zhipu
 
-⚠️ 黑客松规则要求提交必须跑在 Nebius Token Factory / AI Cloud 且用至少一个
-NVIDIA 开源模型 —— 没配 NEBIUS_API_KEY 时这里会**每次调用都大声警告**，
-防止演示悄悄回退到智谱（那等于提交不符合规则的项目，比跑不起来更糟）。
-走 HTTP 不走 SDK（宿主内禁止 fork，HTTP 无此问题）。
+⚠️ Hackathon rules require submissions to run on Nebius Token Factory / AI Cloud using at least one
+NVIDIA open model — when NEBIUS_API_KEY is unset, this module **warns loudly on every call**,
+to prevent the demo from silently falling back to Zhipu (which would make the submission non-compliant,
+worse than failing to run at all).
+Uses HTTP, not an SDK (the host forbids fork; HTTP avoids that issue).
 """
 
 from __future__ import annotations
@@ -23,9 +24,37 @@ from typing import Any
 
 _WARNED_FALLBACK = False
 
+# Force-English rule injected at the gateway so every LLM call (Chinese or English prompt)
+# returns English prose, while preserving code/SQL/JSON/identifiers and any keyword/value
+# options the code hands the model (skill names, question-type keys, etc.) so coupling keys
+# never desync. Reversible: set MVE_FORCE_ENGLISH=0/off/false to disable.
+_ENGLISH_RULE = (
+    "LANGUAGE RULE: Whenever you write natural-language explanations, summaries, critiques, "
+    "or any prose, write it in English. Do NOT translate and MUST output exactly as given: "
+    "code, SQL, JSON, identifiers, file paths, model names, and any specific keyword / label / "
+    "value / option supplied to you (for example a value chosen from a provided list)."
+)
+
+
+def _enforce_english(messages: list[dict[str, str]]) -> list[dict[str, str]]:
+    flag = os.getenv("MVE_FORCE_ENGLISH", "1").strip().lower()
+    if flag in ("0", "false", "off", "no"):
+        return messages
+    if not messages:
+        return messages
+    out = [dict(m) for m in messages]  # copy: never mutate the caller's history list
+    for i, m in enumerate(out):
+        if m.get("role") == "system":
+            content = m.get("content") or ""
+            if _ENGLISH_RULE not in content:
+                out[i] = {"role": "system", "content": content + "\n\n" + _ENGLISH_RULE}
+            return out
+    # no system message present -> prepend one
+    return [{"role": "system", "content": _ENGLISH_RULE}] + out
+
 
 def _warn_no_nebius() -> None:
-    """回退到非 Nebius 后端前警告一次（防止演示悄悄违规）。"""
+    """Warn once before falling back to a non-Nebius backend (prevents the demo from silently violating the rules)."""
     global _WARNED_FALLBACK
     if _WARNED_FALLBACK:
         return
@@ -39,9 +68,10 @@ def _warn_no_nebius() -> None:
 
 
 def _load_env_once() -> None:
-    """密钥兜底：从 mve/.env 读（照 mve/llm_client.load_env 的做法）。
+    """Key fallback: read from mve/.env (following the approach in mve/llm_client.load_env).
 
-    pilot 起的子进程不一定带上密钥，新后端要能自己拿到。
+    Child processes spawned by the pilot may not inherit the keys, so the new backend must be
+    able to fetch them itself.
     """
     env = Path(__file__).resolve().parents[1] / "mve" / ".env"
     try:
@@ -59,7 +89,7 @@ def _load_env_once() -> None:
 
 def _endpoint() -> tuple[str, str, str]:
     _load_env_once()
-    # 1) Nebius Token Factory（OpenAI 兼容；NVIDIA 开源模型）
+    # 1) Nebius Token Factory (OpenAI-compatible; NVIDIA open models)
     nebius_key = os.getenv("NEBIUS_API_KEY", "").strip()
     if nebius_key:
         base = os.getenv(
@@ -70,7 +100,7 @@ def _endpoint() -> tuple[str, str, str]:
             os.getenv("NEBIUS_MODEL", "nvidia/nemotron-3-super-120b-a12b"),
         )
     _warn_no_nebius()
-    # 2) 猫娘桥（OpenAI 兼容）
+    # 2) Neko bridge (OpenAI-compatible)
     base = os.getenv("MVE_QUIZ_BASE_URL", "").strip()
     if base:
         return (
@@ -78,7 +108,7 @@ def _endpoint() -> tuple[str, str, str]:
             os.getenv("MVE_QUIZ_API_KEY", ""),
             os.getenv("MVE_QUIZ_MODEL", "glm-4-flash"),
         )
-    # 3) MVE 自有智谱
+    # 3) MVE's own Zhipu
     base_u = os.getenv("ZHIPU_BASE_URL", "https://open.bigmodel.cn/api/paas/v4")
     return (
         base_u.rstrip("/") + "/chat/completions",
@@ -95,9 +125,10 @@ def chat(
     timeout: float = 90.0,
     retries: int = 3,
 ) -> str:
-    """发一轮对话，返回模型文本。"""
+    """Send one chat turn and return the model text."""
     import httpx
 
+    messages = _enforce_english(messages)
     url, key, model = _endpoint()
     if not key:
         raise RuntimeError("No LLM key configured (NEBIUS_API_KEY, MVE_QUIZ_API_KEY, or ZHIPU_API_KEY)")
@@ -137,7 +168,7 @@ def chat(
 
 
 def chat_json(messages: list[dict[str, str]], **kw: Any) -> dict:
-    """要模型回 JSON；宽容提取（```json 围栏 / 裸对象）。"""
+    """Ask the model for JSON; tolerant extraction (```json fence / bare object)."""
     text = chat(messages, **kw)
     m = re.search(r"```(?:json)?\s*(\{.*\})\s*```", text, re.S)
     raw = m.group(1) if m else text
@@ -151,12 +182,13 @@ def chat_json(messages: list[dict[str, str]], **kw: Any) -> dict:
 
 
 def embed(texts: list[str]) -> list[list[float]] | None:
-    """Embedding 出口 —— 照原版 SkillManager 的向量检索思路（skill.py:43-47），
-    但 embedding 也走 Nebius（Qwen3-Embedding-8B，实见于 /v1/models 清单），
-    全栈不出 Token Factory；不引 Chroma 重依赖，向量由调用方自存自算余弦。
+    """Embedding endpoint — follows the original SkillManager's vector-retrieval idea (skill.py:43-47),
+    but embeddings also go through Nebius (Qwen3-Embedding-8B, confirmed present in the /v1/models list),
+    keeping the whole stack inside the Token Factory; no heavy Chroma dependency — the caller stores
+    the vectors and computes cosine similarity itself.
 
-    一批文本一次调用；任何失败返回 None（调用方降级到词面相似度，
-    检索可用性不依赖 embedding 通不通）。
+    One call per batch of texts; any failure returns None (caller degrades to surface-form similarity,
+    so retrieval availability does not depend on whether embeddings work).
     """
     if not texts:
         return []

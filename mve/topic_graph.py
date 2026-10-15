@@ -1,26 +1,26 @@
 #!/usr/bin/env python3
-"""MVE 的教学图谱 + 科学选题器（移植自猫娘伴学的 store_topics / graph_read_model）。
+"""MVE's teaching graph + scientific topic selector (ported from the study companion's store_topics / graph_read_model).
 
-为什么是这一层（不是 knowledge_graph.py）
+Why this layer (not knowledge_graph.py)
 ----------------------------------------
-`knowledge_graph.py` 是**判分侧**子图：节点是 数据维度/工具/表，只为
-answer_spec 判分服务（"这个维度该调哪个工具"）。
+`knowledge_graph.py` is the **scoring-side** subgraph: its nodes are data dimensions/tools/tables, serving only
+answer_spec scoring ("which tool should this dimension call").
 
-本文件是**教学侧**图谱：节点是伴学 `build_vlml_seed.py` 产出的 29 个 VLML
-知识点（你亲手加的那个图谱），每个带 depth / difficulty / prerequisites
-（含 required_mastery 门槛）/ related / skills / typical_misconceptions /
-examples。它回答"下一步该学/练哪个知识点"。
+This file is the **teaching-side** graph: its nodes are the 29 VLML
+topics produced by the study companion's `build_vlml_seed.py` (the graph you added by hand), each carrying depth / difficulty / prerequisites
+(with required_mastery thresholds) / related / skills / typical_misconceptions /
+examples. It answers "which topic should be learned/practiced next".
 
-选题逻辑（伴学的"科学"核心，已取证）
+Selection logic (the study companion's "scientific" core, evidence-backed)
 ------------------------------------
-1. **前置门控**：一个知识点只有在其所有前置的掌握度 ≥ required_mastery 时才
-   可被推送（伴学 `required_mastery` 门控，knowledge_tracker.py:2066 同款思路）。
-   没达标就推，是"不科学"的典型——学员在没地基的指标上打转。
-2. **薄弱优先**：掌握度越低越优先；从未练过（None）视为最薄弱，优先开新坑。
-3. **难度梯度**：在可选题里挑离全局目标难度最近的（伴学 `_by_gradient`）。
-4. **scope 过滤**：练习范围（stage/subject/chapter）像伴学 list_topics 一样筛。
+1. **Prerequisite gating**: a topic can only be pushed once all its prerequisites have mastery ≥ required_mastery
+   (the study companion's `required_mastery` gate, same approach as knowledge_tracker.py:2066).
+   Pushing before the threshold is met is a typical case of being "unscientific" — the learner spins on metrics with no foundation.
+2. **Weak-first**: lower mastery means higher priority; never practiced (None) counts as weakest, prioritizing new ground.
+3. **Difficulty gradient**: among selectable topics pick the one closest to the global target difficulty (the study companion's `_by_gradient`).
+4. **scope filtering**: the practice scope (stage/subject/chapter) filters like the study companion's list_topics.
 
-掌握度存在 `topic_mastery.jsonl`（与 TASKS 的覆盖率解耦——知识点 ≠ 考题）。
+Mastery is stored in `topic_mastery.jsonl` (decoupled from TASKS' coverage — topics ≠ exam questions).
 """
 
 from __future__ import annotations
@@ -38,19 +38,19 @@ MASTERY_PATH = HERE / "topic_mastery.jsonl"
 DEFAULT_REQUIRED_MASTERY = 0.5
 
 # ---------------------------------------------------------------------------
-# Voyager 课程机制（替换/增强 MVE 出题器，2026-10-12 落地）
+# Voyager curriculum mechanism (replaces/enhances MVE's question generator, landed 2026-10-12)
 # ---------------------------------------------------------------------------
-# 1) 放弃机制（堵 MC 161 轮死循环）：一个知识点练够 MAX_ATTEMPTS_PER_TOPIC 次
-#    （初试 + 重试，设计指定 = 3）仍没跑通 → 标记 stale，select_next 强制跳过换题。
-#    绝不在一个知识点上无限打转（MC 实测 161 轮不换题=从不干净失败）。
-#    ⚠️ 设计硬约束：放弃判定只看「次数够不够」，不读掌握度/覆盖率
-#    （评分/掌握度只进面板展示，绝不被任何推进条件读到）。
+# 1) Give-up mechanism (plugs the MC 161-round infinite loop): a topic practiced MAX_ATTEMPTS_PER_TOPIC times
+#    (first attempt + retries, design-specified = 3) without success → mark stale, and select_next forcibly skips to another topic.
+#    Never spin forever on one topic (MC observed 161 rounds without switching = never failing cleanly).
+#    ⚠️ Hard design constraint: the give-up decision only looks at "enough attempts", never reading mastery/coverage
+#    (scores/mastery go to dashboard display only, and are never read by any advancement condition).
 MAX_ATTEMPTS_PER_TOPIC = 3
-STALE_MASTERY = 0.6   # 仅留作面板"是否达标"展示，不再参与放弃/选题判定
+STALE_MASTERY = 0.6   # Kept only for the dashboard's "threshold met?" display; no longer part of give-up/selection decisions
 
-# 2) 跨域基线（用户指定：技能/动作锁定 VLML 10 工具/语义层，不写裸 SQL）。
-#    这些知识点依赖 ext_* 表（首血 / 经济局），换到没有 ext 表的库（vlml_vlr）
-#    时不可答 → 出题器把它们降权，等换到有 ext 表的库（vlml_rib）再放开。
+# 2) Cross-domain baseline (user-specified: skills/actions lock to VLML's 10 tools / semantic layer, no raw SQL).
+#    These topics depend on ext_* tables (first blood / economy rounds); when switching to a database without ext tables (vlml_vlr)
+#    they are unanswerable → the question generator deprioritizes them, and releases them once switched to a database with ext tables (vlml_rib).
 EXT_TOPICS = {
     "vlml_first_blood", "vlml_fb_conversion", "vlml_post_plant", "vlml_economy",
     "vlml_trade", "vlml_opening_duel", "vlml_grain_trap", "vlml_sample_size",
@@ -58,12 +58,12 @@ EXT_TOPICS = {
 
 
 # ---------------------------------------------------------------------------
-# 掌握度存储（按知识点，独立于一题一判的覆盖率）
+# Mastery storage (per topic, independent of per-question coverage)
 # ---------------------------------------------------------------------------
 class MasteryStore:
-    """每个知识点一行：{topic_id, mastery, attempts, correct, last_at}。
+    """One row per topic: {topic_id, mastery, attempts, correct, last_at}.
 
-    掌握度 = 近期正确率的指数滑动平均（与伴学 mastery_v2 同思路，简单版）。
+    Mastery = exponential moving average of recent accuracy (same idea as the study companion's mastery_v2, simplified).
     """
 
     def __init__(self, path: Path = MASTERY_PATH):
@@ -84,11 +84,11 @@ class MasteryStore:
                 continue
             if isinstance(row.get("topic_id"), str):
                 row.setdefault("completed", False)
-                # —— MVE 节点状态（同构原版 curriculum 的 completed/failed + skill）——
-                # 每个图谱节点聚合：已积累技能指针 / 任务失败 / 跳过（带原因）。
-                # 设计：「技能库和图谱是同一份存储——voyager 按图谱节点解锁里程碑，
-                # 每个节点可以积累技能」。节点状态即里程碑账本，技能 SQL 体仍在
-                # skill_store（按 topic::name 寻址），节点只存指针，避免重复落库。
+                # —— MVE node state (isomorphic to the original curriculum's completed/failed + skill) ——
+                # Each graph node aggregates: accumulated skill pointers / task failures / skips (with reasons).
+                # Design: "the skill library and the graph are the same storage — voyager unlocks milestones by graph node,
+                # and each node can accumulate skills". Node state is the milestone ledger; skill SQL bodies still live in
+                # skill_store (addressed by topic::name); nodes store only pointers, avoiding duplicate persistence.
                 row.setdefault("skills", [])
                 row.setdefault("failures", [])
                 row.setdefault("skips", [])
@@ -106,19 +106,19 @@ class MasteryStore:
 
     def update(self, topic_id: str, *, score: float, commit: bool = True,
                count_attempt: bool = True) -> dict[str, Any]:
-        """score ∈ [0,1]：本次作答得分。更新滑动平均掌握度。
+        """score ∈ [0,1]: this attempt's score. Updates the moving-average mastery.
 
-        `count_attempt=False`（**消费通路**用）：只更新分数，不递增 attempts、
-        不置 stale。
-        为什么必须分开：练习侧 stale 是按「练了几次」判的（MAX_ATTEMPTS_PER_TOPIC=3，
-        练够就放弃换题）。人导入是**消费**，不是练习 —— 同一个人连问三次同一道题，
-        就会把该节点标记成 stale，练习时再也不选它。那是把两条线的账本混了：
-        消费的次数不该吃掉练习的尝试预算。
+        `count_attempt=False` (used by the **consumption path**): updates the score only, without incrementing attempts
+        or setting stale.
+        Why they must be separate: practice-side stale is judged by "how many times practiced" (MAX_ATTEMPTS_PER_TOPIC=3,
+        give up and switch once enough). A human import is **consumption**, not practice — the same person asking the same question three times in a row
+        would mark that node stale, and practice would never select it again. That mixes the two ledgers:
+        consumption counts should not eat into the practice attempt budget.
 
-        额外维护两个 Voyager 课程要用的字段：
-          streak_wrong —— 连续答错次数（连错触发加支架，见 difficulty.py）；
-          stale       —— 放弃标记：练够次数仍不达标 → 出题器强制换题
-                        （堵 MC 161 轮死循环：从不干净失败=永不换题）。
+        Two extra fields maintained for Voyager's curriculum:
+          streak_wrong — consecutive wrong answers (a wrong streak triggers added scaffolding; see difficulty.py);
+          stale       — give-up marker: enough attempts without meeting the bar → the question generator forcibly switches topics
+                        (plugs the MC 161-round infinite loop: never failing cleanly = never switching).
         """
         row = self._rows.get(topic_id) or {
             "topic_id": topic_id, "mastery": None, "attempts": 0,
@@ -128,19 +128,19 @@ class MasteryStore:
         if count_attempt:
             row["attempts"] = int(row.get("attempts", 0)) + 1
         row["correct"] = int(row.get("correct", 0)) + (1 if score >= 0.6 else 0)
-        # 连错计数：答对清零，答错 +1（difficulty.py 的连错两题加支架读它）
+        # Wrong-streak count: reset on correct, +1 on wrong (read by difficulty.py's two-wrongs-add-scaffolding rule)
         row["streak_wrong"] = 0 if score >= 0.6 else int(row.get("streak_wrong", 0)) + 1
         prev = row.get("mastery")
         if prev is None:
             row["mastery"] = float(score)
         else:
-            # 指数滑动平均：新样本权重 0.4
+            # Exponential moving average: new sample weight 0.4
             row["mastery"] = round(prev * 0.6 + score * 0.4, 4)
         row["last_at"] = int(time.time())
-        # 放弃机制：练够 MAX_ATTEMPTS_PER_TOPIC 次 → 标记 stale（设计指定 = 3）。
-        # ⚠️ 设计硬约束：放弃判定**只看次数**，不读掌握度/覆盖率——
-        # 评分结果不被任何推进条件读到（决定跳过、下一题、整轮结束都不读它）。
-        # "刚好最后一次蒙对"不会刷掉标记：次数到了就是到了。
+        # Give-up mechanism: MAX_ATTEMPTS_PER_TOPIC attempts → mark stale (design-specified = 3).
+        # ⚠️ Hard design constraint: the give-up decision **only looks at the count**, never reading mastery/coverage —
+        # scores are never read by any advancement condition (skip, next topic, and round-end decisions never read it).
+        # "Happening to guess right on the last attempt" does not clear the marker: enough is enough.
         if count_attempt:
             row["stale"] = bool(row["attempts"] >= MAX_ATTEMPTS_PER_TOPIC)
         self._rows[topic_id] = row
@@ -153,18 +153,18 @@ class MasteryStore:
 
     def unstale(self, topic_id: str = "", *, reset_attempts: bool = True,
                 commit: bool = True) -> list[str]:
-        """把「放弃换题」标记清掉（给了 topic_id 就只清那一题，不给就全清）。
+        """Clear the "give up and switch" marker (with topic_id, only that topic; without it, all).
 
-        为什么需要这个口子（2026-10-13 实测）：stale 一旦置位就**永久**从课程里
-        排除，而图谱一共只有 29 个节点 —— 8 个 stale + 9 个前置未达成之后，
-        `select_next` 每次都返回 exhausted → 每轮都去生成新题，课程形同虚设。
+        Why this escape hatch is needed (observed 2026-10-13): once stale is set the topic is **permanently** excluded from the curriculum,
+        and the graph has only 29 nodes total — after 8 stale + 9 unmet prerequisites,
+        `select_next` returns exhausted every time → every round generates new questions, and the curriculum is effectively void.
 
-        更糟的是 attempts 会被**旧后端污染**：实测 `vlml_agent_role` attempts=732。
-        那不是"练了 732 次还没学会"，是旧后端每轮都 `update(count_attempt=True)`
-        累加出来的（那时 consume 与 practice 的账本没分开、stale 也是死代码）。
-        所以清理时必须能一并重置 attempts，否则清完 stale 下一轮又立刻置回去。
+        Worse, attempts gets **polluted by the old backend**: observed `vlml_agent_role` attempts=732.
+        That is not "practiced 732 times and still not learned", but the old backend accumulating `update(count_attempt=True)`
+        every round (back then consume and practice ledgers were not separated, and stale was dead code).
+        So cleanup must be able to reset attempts too, otherwise stale is set again immediately the next round after clearing.
 
-        返回被清理的 topic_id 列表。
+        Returns the list of cleaned topic_ids.
         """
         touched: list[str] = []
         for tid, row in self._rows.items():
@@ -183,34 +183,34 @@ class MasteryStore:
 
     def mark_completed(self, topic_id: str, *, commit: bool = True,
                        source: str = "practice") -> dict[str, Any]:
-        """标 `completed`（+ `completed_source`）两个位。
+        """Set the two bits `completed` (+ `completed_source`).
 
-        与 mastery（展示用）解耦：completed 是布尔「做没做过」，mastery 是
-        「做得怎么样」（只进面板）。select_next 据此排除已完成的节点，不重规划。
+        Decoupled from mastery (display-only): completed is the boolean "was it done", mastery is
+        "how well it was done" (dashboard-only). select_next excludes completed nodes on this basis, without re-planning.
 
-        ⚠️ 语义挤位（2026-10-13 实测发现，本参数就是为了拆开它）：
-          `completed` 原本只有**一个**意思 —— 「这个节点规划过了，`select_next`
-          别再规划它」，是个**去重位**，跟"做得怎么样"无关。
-          后来消费线（`voyager_vlml/consume.py`）把它**借**来当"掌握"用，
-          于是同一个布尔上挤了两种语义，写方有三个：
+        ⚠️ Semantic collision (found in observation 2026-10-13; this parameter exists to pull them apart):
+          `completed` originally had **one** meaning only — "this node has been planned, `select_next`
+          should not plan it again", a **dedup bit**, unrelated to "how well it was done".
+          Later the consumption line (`voyager_vlml/consume.py`) **borrowed** it to mean "mastered",
+          so two semantics crowded onto the same boolean, with three writers:
 
-            · `voyager_vlml/agents/curriculum.py` 练习循环成功 → 别再规划
-            · `mve/run_mve.py`（已冻结的旧后端）ev.success → 别再规划
-            · `voyager_vlml/consume.py` 人问一句、答出来了 → 这题我会了
+            · `voyager_vlml/agents/curriculum.py` practice loop success → do not plan again
+            · `mve/run_mve.py` (the frozen old backend) ev.success → do not plan again
+            · `voyager_vlml/consume.py` human asked and it answered → I know this one now
 
-          面板的掌握度分子去数 `completed` 时，练习线那 29 条 `runtime_*` 就
-          混进来了 —— 服务器实测 58/45 = **129%**，分子比分母大。
+          When the dashboard's mastery numerator counts `completed`, the practice line's 29 `runtime_*` entries
+          mix in — observed on the server as 58/45 = **129%**, numerator bigger than denominator.
 
-          `completed_source` 把两者分开：
-            `"practice"` = 练习循环标（去重位，**不代表能力**）
-            `"consume"`  = 消费线标（人问一句答出来了，**这才是能力**）
+          `completed_source` separates the two:
+            `"practice"` = marked by the practice loop (dedup bit, **not capability**)
+            `"consume"`  = marked by the consumption line (human asked and it answered, **this is capability**)
 
-          照原版 Voyager（`voyager/agents/curriculum.py:339` 只在成功时 append，
-          `:135` 学习曲线 = `len(completed_tasks)`）：**学习时不计入** ——
-          练习跑通只推进课程规划，不算"能力变大了"；能力只从消费那侧长。
+          Following the original Voyager (`voyager/agents/curriculum.py:339` appends only on success,
+          `:135` learning curve = `len(completed_tasks)`): **learning does not count** —
+          a practice success only advances curriculum planning, and does not count as "capability grew"; capability only grows from the consumption side.
 
-        升级规则：practice → consume 单向。练习先标过、后来消费答出来了 → 升级成
-        consume；消费先标过、练习再跑这道题 → **不降级**（掌握的事实不能被抹掉）。
+          Upgrade rule: practice → consume one-way. Practice marked it first, then consumption answered it → upgrade to
+          consume; consumption marked it first, then practice ran this topic → **no downgrade** (the fact of mastery cannot be erased).
         """
         row = self._rows.get(topic_id) or {
             "topic_id": topic_id, "mastery": None, "attempts": 0,
@@ -225,13 +225,13 @@ class MasteryStore:
             self._persist()
         return row
 
-    # ---- 节点状态：每个图谱节点累积的技能 / 失败 / 跳过（设计：技能库与图谱同一份
-    #      存储，每节点积累技能；任务失败/跳过带原因进上下文）----
+    # ---- Node state: skills / failures / skips accumulated per graph node (design: skill library and graph are the same
+    #      storage, each node accumulating skills; task failures/skips carry reasons into context) ----
     def node_skills(self, topic_id: str) -> list[str]:
         return list((self._rows.get(topic_id) or {}).get("skills") or [])
 
     def add_skill(self, topic_id: str, skill_key: str, *, commit: bool = True) -> None:
-        """技能落库成功后，把技能指针挂到对应图谱节点（每节点积累技能）。"""
+        """After a skill is persisted, hang its pointer on the corresponding graph node (each node accumulates skills)."""
         if not skill_key:
             return
         row = self._rows.get(topic_id) or {
@@ -249,15 +249,15 @@ class MasteryStore:
 
     def add_failure(self, topic_id: str, verdict: str, reason: str, *,
                     commit: bool = True) -> None:
-        """记录一次任务失败（带原因），进上下文让观察者分辨「没学会」vs「链路没跑通」。
+        """Record a task failure (with reason), into context so observers can tell "not learned" vs "pipeline not working".
 
-        同时**递增 attempts 并在够 3 次时置 stale** —— 这是「重试 ≥3 跳过」这条
-        设计约束唯一的落点。
-        ⚠️ 实测踩过：stale 原先只在 `update(score=...)` 里置位，而新后端
-        （voyager_vlml）根本不走打分通道，只走 add_failure → attempts 永远是 0
-        → stale 永远 False → select_next 每轮都把同一道拿不下的题再选一遍
-        （实测连跑 3 轮全是 vlml_kd，进度卡死不动）。失败也必须计数，
-        否则「放弃换题」在没打分的后端里是条死代码。
+        Also **increments attempts and sets stale at 3** — this is the only landing point of the "retry ≥3 skip"
+        design constraint.
+        ⚠️ Observed pitfall: stale used to be set only inside `update(score=...)`, while the new backend
+        (voyager_vlml) never goes through the scoring channel, only add_failure → attempts stays 0 forever
+        → stale stays False forever → select_next picks the same unwinnable question every round
+        (observed 3 consecutive rounds all vlml_kd, progress frozen). Failures must also be counted,
+        or "give up and switch" is dead code in a backend that does not score.
         """
         row = self._rows.get(topic_id) or {
             "topic_id": topic_id, "mastery": None, "attempts": 0,
@@ -270,7 +270,7 @@ class MasteryStore:
         row["failures"] = fails[-20:]
         row["attempts"] = int(row.get("attempts", 0)) + 1
         row["last_at"] = int(time.time())
-        # 放弃判定只看次数，不读掌握度/覆盖率（设计硬约束）
+        # Give-up decision only looks at the count, never reading mastery/coverage (hard design constraint)
         row["stale"] = bool(row["attempts"] >= MAX_ATTEMPTS_PER_TOPIC)
         self._rows[topic_id] = row
         if commit:
@@ -278,7 +278,7 @@ class MasteryStore:
         return row
 
     def add_skip(self, topic_id: str, reason: str, *, commit: bool = True) -> None:
-        """记录一次跳过（带原因），进上下文。"""
+        """Record a skip (with reason), into context."""
         row = self._rows.get(topic_id) or {
             "topic_id": topic_id, "mastery": None, "attempts": 0,
             "correct": 0, "last_at": 0, "streak_wrong": 0, "stale": False,
@@ -303,7 +303,7 @@ class MasteryStore:
 
 
 # ---------------------------------------------------------------------------
-# 教学图谱
+# Teaching graph
 # ---------------------------------------------------------------------------
 class TopicGraph:
     def __init__(self, seed_path: Path = SEED_PATH, mastery: MasteryStore | None = None):
@@ -333,7 +333,7 @@ class TopicGraph:
                     "required_mastery": None,
                 })
 
-    # ---- scope / 过滤 ----
+    # ---- scope / filtering ----
     @staticmethod
     def _scope_val(field: str, value: object) -> str:
         v = "" if value is None else str(value)
@@ -355,13 +355,13 @@ class TopicGraph:
     def topics_in_scope(self, scope: dict[str, Any] | None = None) -> list[dict[str, Any]]:
         return [t for t in self.topics.values() if self.scope_matches(t, scope)]
 
-    # ---- MC 节点里程碑模型（设计：把 VLML 的表理成树状图，树干最粗 = 里程碑）----
-    # 同构原版 Voyager 的「里程碑 = 已完成的任务」+ MC 的「必须先砍树」科技树：
-    #   · 前置 DAG（prerequisite 边）就是 VLML 的树；trunk = 最长前置路径
-    #     （设计原文「经过节点最多的路径上的节点就是里程碑」）。
-    #   · keystone = betweenness 最高的节点（「经过路径最多的节点」= 树干最粗处）。
-    #   · seed = 树干起点（无前置），对应 MC 的 Mine 1 wood log——必须先把
-    #     基础单位（随机 (表,列)）做通，才解锁整条树干。
+    # ---- MC node milestone model (design: arrange VLML's tables into a tree, thickest trunk = milestone) ----
+    # Isomorphic to the original Voyager's "milestone = completed tasks" + MC's "must chop trees first" tech tree:
+    #   · The prerequisite DAG (prerequisite edges) is VLML's tree; trunk = the longest prerequisite path
+    #     (design's exact words "nodes on the path through the most nodes are milestones").
+    #   · keystone = the node with the highest betweenness ("the node through which the most paths pass" = the thickest trunk point).
+    #   · seed = the trunk's starting point (no prerequisites), corresponding to MC's Mine 1 wood log — the basic unit
+    #     (random (table, column)) must be completed first to unlock the entire trunk.
     def _prereq_adj(self) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
         parents: dict[str, list[str]] = defaultdict(list)
         children: dict[str, list[str]] = defaultdict(list)
@@ -377,7 +377,7 @@ class TopicGraph:
             return self._mc_cache
         parents, children = self._prereq_adj()
 
-        # 最长前置路径（DP：从每个根向下找最长链）
+        # Longest prerequisite path (DP: find the longest chain down from each root)
         memo: dict[str, tuple[int, list[str]]] = {}
 
         def longest(node: str) -> tuple[int, list[str]]:
@@ -402,8 +402,8 @@ class TopicGraph:
         milestones = set(trunk)
         seed = trunk[0] if trunk else None
 
-        # betweenness（keystone）：对每个节点统计 (祖先, 后代) 路径经过它的对数。
-        # 祖先 / 后代用 DAG 上溯/下溯。
+        # betweenness (keystone): for each node, count the (ancestor, descendant) path pairs passing through it.
+        # Ancestors / descendants are walked up/down the DAG.
         def ancestors(n: str) -> set[str]:
             out: set[str] = set()
             stack = list(parents.get(n, []))
@@ -438,17 +438,17 @@ class TopicGraph:
         return self._mc_cache
 
     def milestone_info(self) -> dict[str, Any]:
-        """给面板/上下文消费：树干、里程碑集合、种子、keystone。"""
+        """For dashboard/context consumption: trunk, milestone set, seed, keystone."""
         c = self._milestone_cache()
         return {
             "trunk": list(c["trunk"]),
             "milestones": sorted(c["milestones"]),
             "seed": c["seed"],
             "keystone": c["keystone"],
-            # keystone_score = betweenness（祖先数 × 后代数）= 有多少条前置路径
-            # 从它身上过。面板要显示"为什么它是树干最粗处"，光给名字不够。
+            # keystone_score = betweenness (ancestor count × descendant count) = how many prerequisite paths
+            # pass through it. The dashboard needs to show "why it is the thickest trunk point", so a name alone is not enough.
             "keystone_score": c.get("keystone_score"),
-            "seed_unit": None,  # 种子单位（随机 (表,列)）由 scene_context 注入
+            "seed_unit": None,  # The seed unit (random (table, column)) is injected by scene_context
         }
 
     def trunk_milestones(self) -> set[str]:
@@ -460,45 +460,45 @@ class TopicGraph:
     def is_trunk(self, topic_id: str) -> bool:
         return topic_id in set(self._milestone_cache()["trunk"])
 
-    # ---- 前置门控 ----
+    # ---- Prerequisite gating ----
     def prerequisites_of(self, topic_id: str) -> list[dict[str, Any]]:
         return [e for e in self.edges if e["to"] == topic_id and e["relation"] == "prerequisite"]
 
     def prereq_ok(self, topic: dict[str, Any]) -> bool:
-        """前置门控：前置节点**已完成**（任务跑通）才解锁。
+        """Prerequisite gate: unlocked only when prerequisite nodes are **completed** (task ran through).
 
-        ⚠️ 设计硬约束：门控只看「前置节点是否 completed（布尔）」，
-        不读掌握度/覆盖率——评分结果不被任何推进条件读到。
-        有序课程（比赛→队伍→队员）由 completion 驱动，不是由分数驱动。
+        ⚠️ Hard design constraint: the gate only looks at "whether prerequisite nodes are completed (boolean)",
+        never reading mastery/coverage — scores are never read by any advancement condition.
+        The ordered curriculum (match → team → player) is driven by completion, not by scores.
 
-        ⚠️ 2026-10-13 补一条（实测死锁，必须补）：前置**已被放弃（stale）**时
-        不再挡住后继。stale 的含义是"练够次数仍跑通不了，放弃换题"，
-        而 `select_next` 会把它永久排除 —— 于是后继等的是一个**永远不会被
-        完成的前置**，整条链一起陪葬。实测的传染规模：
+        ⚠️ One addition on 2026-10-13 (an observed deadlock that had to be fixed): when a prerequisite is **already given up (stale)**,
+        it no longer blocks successors. stale means "enough attempts and still cannot run through, give up and switch",
+        and `select_next` excludes it permanently — so successors wait on a prerequisite that will **never be
+        completed**, and the whole chain goes down with it. Observed contagion scale:
 
-            vlml_round_result 卡死 → first_blood / post_plant / clutch / streak 全卡
-            vlml_first_blood  被卡 → fb_conversion / trade / opening_duel 再卡一层
-            vlml_half_split   卡死 → side_conversion 卡
-            vlml_agent_role   卡死（attempts=732，旧后端污染）
+            vlml_round_result stuck → first_blood / post_plant / clutch / streak all stuck
+            vlml_first_blood  stuck → fb_conversion / trade / opening_duel stuck one more layer
+            vlml_half_split   stuck → side_conversion stuck
+            vlml_agent_role   stuck (attempts=732, old-backend pollution)
 
-        4 个卡死堵死 9 个后继，29 个节点**一个都选不出来** → 每轮 exhausted
-        → 每轮去生成新题，课程形同虚设。"等一个被放弃的前置"没有意义 ——
-        而且原版 Voyager 根本没有前置概念，这是照搬伴学带来的副作用。
+        4 stuck nodes blocked 9 successors, and **not one of the 29 nodes** could be selected → exhausted every
+        round → new questions generated every round, the curriculum effectively void. "Waiting on a given-up prerequisite" is pointless —
+        and the original Voyager has no prerequisite concept at all; this is a side effect of copying the study companion.
         """
         for e in self.prerequisites_of(topic["id"]):
             pid = str(e.get("from") or "")
             if not pid or self.mastery.is_completed(pid):
                 continue
             if self.mastery.is_stale(pid):
-                continue          # 前置已被放弃 → 不再挡路
+                continue          # Prerequisite already given up → no longer blocks
             return False
         return True
 
     def blocked_by(self, topic: dict[str, Any]) -> list[str]:
-        """返回**还在练**但没完成的前置 id（用于解释为什么这道题还没解锁）。
+        """Return prerequisite ids that are **still being practiced** but not completed (used to explain why this question is not unlocked yet).
 
-        与 `prereq_ok` 保持同一口径：已放弃（stale）的前置不再算作"卡着它的原因"，
-        否则解释会说"前置未完成"，而门控其实已经放行了 —— 自相矛盾。
+        Same convention as `prereq_ok`: given-up (stale) prerequisites no longer count as "the reason it is blocked",
+        otherwise the explanation would say "prerequisite incomplete" while the gate has actually let it through — self-contradictory.
         """
         out = []
         for e in self.prerequisites_of(topic["id"]):
@@ -510,24 +510,24 @@ class TopicGraph:
             out.append(pid)
         return out
 
-    # ---- 全局目标难度（照伴学 _global_target：已掌握越多，目标越高）----
+    # ---- Global target difficulty (mirrors the study companion's _global_target: the more mastered, the higher the target) ----
     def global_target(self) -> tuple[int, str]:
         rows = self.mastery.all()
         known = [r for r in rows.values() if r.get("mastery") is not None]
         total = len(self.topics)
         if not known:
-            return 1, "尚未开始任何知识点 → 目标难度 1（从地基打起）"
+            return 1, "No topics started yet → target difficulty 1 (build from the foundation)"
         mastered = sum(1 for r in known if float(r["mastery"]) >= 0.8)
         avg = sum(float(r["mastery"]) for r in known) / len(known)
         target = min(4, max(1, 1 + mastered))
         return target, (
-            f"已练 {len(known)}/{total} 知识点 · 平均掌握 {avg:.0%} · "
-            f"已掌握 {mastered} 个 → 目标难度 {target}"
+            f"Practiced {len(known)}/{total} topics · average mastery {avg:.0%} · "
+            f"{mastered} mastered → target difficulty {target}"
         )
 
-    # ---- 课程顺序（设计：有序规划课程，比赛→队伍→队员）----
+    # ---- Curriculum order (design: ordered curriculum planning, match → team → player) ----
     def _chapter_rank(self, topic: dict[str, Any]) -> int:
-        """章节在种子里的出现顺序 = 课程顺序（不读掌握度/覆盖率）。"""
+        """Chapters' order of appearance in the seed = curriculum order (never reading mastery/coverage)."""
         if not hasattr(self, "_chapter_order"):
             order: dict[str, int] = {}
             n = 0
@@ -539,28 +539,28 @@ class TopicGraph:
             self._chapter_order = order
         return self._chapter_order.get(str(topic.get("chapter") or ""), 999)
 
-    # ---- 核心：选下一题（Voyager 课程驱动）----
+    # ---- Core: select the next question (Voyager curriculum-driven) ----
     def select_next(
         self, *, scope: dict[str, Any] | None = None, explicit: str | None = None,
         ext_available: bool | None = None,
     ) -> dict[str, Any]:
-        """返回 {topic_id, reason, explanation, blocked, hint, difficulty_target,
-        novelty, stale_skipped, ext_deprioritized, exhausted}。
+        """Returns {topic_id, reason, explanation, blocked, hint, difficulty_target,
+        novelty, stale_skipped, ext_deprioritized, exhausted}.
 
-        ⚠️ 设计硬约束（评分/掌握度不被任何推进条件读）：
-          · 选下一题 = **有序课程**（章节顺序 × 深度），**不读掌握度/覆盖率**。
-          · 已完成节点（任务跑通）直接排除——「不重复规划」。
-          · 放弃机制：练够 3 次仍没跑通 → stale，强制跳过换题。
-          · 前置门控：前置节点 completed 才解锁（由 completion 驱动，非分数）。
-          · 范围内无「可拿下」任务（全完成 / 全卡死）→ 返回 exhausted=True，
-            由调用方「不断生成新任务」继续（设计：整轮不结束）。
+        ⚠️ Hard design constraint (scores/mastery are never read by any advancement condition):
+          · Next topic = **ordered curriculum** (chapter order × depth), **never reading mastery/coverage**.
+          · Completed nodes (task ran through) are excluded directly — "no re-planning".
+          · Give-up mechanism: 3 attempts without success → stale, forcibly skip and switch topics.
+          · Prerequisite gate: unlocked only when prerequisite nodes are completed (driven by completion, not scores).
+          · No "winnable" task in scope (all completed / all stuck) → returns exhausted=True,
+            and the caller "keeps generating new tasks" (design: the round does not end).
         """
         if explicit and explicit in self.topics:
             t = self.topics[explicit]
             return {
                 "topic_id": explicit, "blocked": False, "hint": "",
                 "difficulty_target": self.global_target()[0],
-                "reason": "explicit", "explanation": f"已钉住知识点 {explicit}",
+                "reason": "explicit", "explanation": f"Topic {explicit} pinned",
                 "novelty": 0.0, "stale_skipped": 0, "ext_deprioritized": False,
                 "exhausted": False,
             }
@@ -570,7 +570,7 @@ class TopicGraph:
 
         pool = self.topics_in_scope(scope)
 
-        # —— 候选 = 在范围内、未标记完成、前置已完成、未 stale ——
+        # —— Candidates = in scope, not marked completed, prerequisites completed, not stale ——
         stale_ids = [t["id"] for t in pool if self.mastery.is_stale(t["id"])]
         selectable = [
             t for t in pool
@@ -580,7 +580,7 @@ class TopicGraph:
         ]
 
         if not selectable:
-            # 范围内没有「可拿下」的任务 → 信号 exhausted，由调用方生成新任务。
+            # No "winnable" task in scope → signal exhausted, and the caller generates new tasks.
             done_n = sum(1 for t in pool if self.mastery.is_completed(t["id"]))
             blocked_n = sum(
                 1 for t in pool
@@ -592,16 +592,16 @@ class TopicGraph:
                 "difficulty_target": self.global_target()[0],
                 "reason": "exhausted",
                 "explanation": (
-                    f"范围内无「可拿下」任务（完成 {done_n} / 卡死 {len(stale_ids)} "
-                    f"/ 前置未达成 {blocked_n}）→ 应由调用方生成新任务"),
+                    f"No \"winnable\" task in scope (completed {done_n} / stuck {len(stale_ids)} "
+                    f"/ prerequisites unmet {blocked_n}) → the caller should generate new tasks"),
                 "novelty": 0.0, "stale_skipped": len(stale_ids),
                 "ext_deprioritized": False, "exhausted": True,
             }
 
-        # —— 有序课程：树干（里程碑）优先 × 章节顺序 × 深度（不读掌握度/覆盖率）——
-        # 设计「树干最粗 = 里程碑」：trunk 节点（最长前置路径）先于分支节点选，
-        # 使「先问比赛→再问队伍→再问队员」结构化为树干优先，而非仅靠章节顺序。
-        # 缺 ext 表时，依赖 ext 的知识点降权到末尾，但仍排在已完成节点之后。
+        # —— Ordered curriculum: trunk (milestones) first × chapter order × depth (never reading mastery/coverage) ——
+        # Design "thickest trunk = milestone": trunk nodes (longest prerequisite path) are chosen before branch nodes,
+        # structuring "ask about the match first → then the team → then the player" as trunk-first, rather than relying on chapter order alone.
+        # When ext tables are missing, ext-dependent topics are deprioritized to the end, but still after completed nodes.
         milestones = self.trunk_milestones()
         ext_blocked = {t["id"] for t in selectable
                        if (not ext_available) and t["id"] in EXT_TOPICS}
@@ -615,19 +615,19 @@ class TopicGraph:
         chosen = min(selectable, key=key)
         cid = chosen["id"]
         m = self.mastery.mastery_of(cid)
-        mtxt = "未练过" if m is None else f"{m:.0%}"
+        mtxt = "not practiced" if m is None else f"{m:.0%}"
         blocked = self.blocked_by(chosen)
-        # 新奇分仅作展示（不驱动选题）：从未练过 = 1.0，练过但掌握度低 = 中等。
+        # Novelty score is display-only (does not drive selection): never practiced = 1.0, practiced but low mastery = medium.
         novelty = 1.0 if m is None else max(0.0, 0.6 - (m or 0))
         target, why_target = self.global_target()
         return {
             "topic_id": cid,
             "reason": "curriculum_order",
             "explanation": (
-                f"{cid}：有序课程（章节 {chosen.get('chapter')} · 深度 "
-                f"{chosen.get('depth')}）｜当前掌握 {mtxt}（仅展示，不驱动选题）"
-                f"{('；前置未达成：' + ','.join(blocked)) if blocked else ''}"
-                f"｜{why_target}"
+                f"{cid}: ordered curriculum (chapter {chosen.get('chapter')} · depth "
+                f"{chosen.get('depth')}) | current mastery {mtxt} (display only, does not drive selection)"
+                f"{('; prerequisites unmet: ' + ','.join(blocked)) if blocked else ''}"
+                f"| {why_target}"
             ),
             "blocked": bool(blocked),
             "hint": self._hint_for(chosen),
@@ -639,23 +639,23 @@ class TopicGraph:
         }
 
     def _hint_for(self, topic: dict[str, Any]) -> str:
-        """把知识点的误区/例题浓缩成给模型的提示（避免它踩已知坑）。"""
+        """Condense the topic's misconceptions/examples into a hint for the model (so it avoids known pitfalls)."""
         mis = topic.get("typical_misconceptions") or []
         ex = topic.get("examples") or []
         parts = []
         if mis:
-            parts.append("常见误区：" + "；".join(mis[:3]))
+            parts.append("Common misconceptions: " + "; ".join(mis[:3]))
         if ex:
             first = ex[0]
             if isinstance(first, dict) and first.get("answer_outline"):
-                parts.append("拿表回答示意：" + " → ".join(first["answer_outline"][:3]))
+                parts.append("Example answer with tables: " + " → ".join(first["answer_outline"][:3]))
         return "｜".join(parts)
 
-    # ---- 给面板用：四层结构 + 边 + 掌握度叠加 ----
+    # ---- For the dashboard: four-layer structure + edges + mastery overlay ----
     def to_graph_payload(self) -> dict[str, Any]:
         target, _ = self.global_target()
-        # 每个节点的技能数（设计：技能库与图谱按 topic_id 一一对应、面板同屏展示
-        # 里程碑与累计技能——"同一份存储"在节点粒度落地）。
+        # Skill count per node (design: skill library and graph correspond one-to-one by topic_id, with the dashboard showing
+        # milestones and accumulated skills on the same screen — "the same storage" landing at node granularity).
         skill_counts: dict[str, int] = {}
         try:
             import skill_store
@@ -713,12 +713,12 @@ _GRAPH: TopicGraph | None = None
 
 
 def ext_tables_present(db_path: str | None = None) -> bool:
-    """当前库有没有 ext_* 表（首血/经济局等 rib.gg 专属层）。
+    """Does the current database have ext_* tables (the rib.gg-exclusive layer for first blood / economy rounds, etc.)?
 
-    这是「场景条件化」的判据：没有 ext 表时，依赖 ext 的知识点（EXT_TOPICS）
-    在出题器里被降权，因为裸 ext 查询在缺表库上必然跑不出数。换到 vlml_rib
-    这类带 ext 表的库就放开 —— 技能仍只描述「调哪个工具/取哪类事实」，不写
-    裸 SQL，所以换库只是"该层的题有没有数据"，技能本身可迁移。
+    This is the criterion for "scene conditioning": without ext tables, ext-dependent topics (EXT_TOPICS)
+    are deprioritized in the question generator, because a bare ext query necessarily finds no data on a database missing the tables. Switching to a database
+    like vlml_rib with ext tables releases them — skills still only describe "which tool to call / which kind of fact to fetch", never writing
+    raw SQL, so a database swap only changes "whether that layer's questions have data"; the skills themselves transfer.
     """
     try:
         import json as _json

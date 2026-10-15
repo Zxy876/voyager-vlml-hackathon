@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-"""数据库切换：把 VLML 指向另一个 .duckdb 文件。
+"""Database switching: point VLML at another .duckdb file.
 
-为什么要有这个：题目注册表里的 SERIES / 队伍名是**写死**的（tasks.py 的
-SERIES='2843069'、C9='Cloud9'），换一个库这些常量就全失效。
-所以本模块不假装"换库即换题"，而是：
+Why this exists: SERIES / team names in the task registry are **hard-coded** (tasks.py's
+SERIES='2843069', C9='Cloud9'), so swapping databases invalidates all those constants.
+So this module does not pretend "swapping the database swaps the questions"; instead:
 
-  1. 换库后**立即体检**：能打开吗、几张表、几条事件、
-     原题目依赖的那场 series 还在不在。
-  2. 体检结果如实报给面板，由人决定要不要顺带清档重来。
+  1. **Health-check immediately** after a swap: can it open, how many tables, how many events,
+     and is the series the original questions depend on still there.
+  2. Report the health-check result honestly to the dashboard, and let the human decide whether to also wipe and restart.
 
-体检必须做在切换**之前**——切过去才发现是空库/错库，人已经不知道刚才的数据
-去哪了。所以流程是：先 probe(path) 验货 → 人确认 → 才写 db_config.json。
+The health check must happen **before** the switch — discovering an empty/wrong database only after switching leaves the human wondering where the previous data
+went. So the flow is: probe(path) first → human confirms → then write db_config.json.
 """
 
 from __future__ import annotations
@@ -21,24 +21,24 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parent
 CONFIG = ROOT / "db_config.json"
-# 默认库 = rib.gg（用户 2026-10-13 定：「接回 rib.gg，并设置为默认的库」）。
-# 理由：rib 库带 ext_ 层（首血 roundStats / 经济 roundEconomy / 攻防 sideStats），
-# 可分析轴比 GRID 单场切片多；GRID 切片 `vlml_events.duckdb` 保留为可选项。
+# Default database = rib.gg (decided by the user on 2026-10-13: "reconnect rib.gg and set it as the default database").
+# Rationale: the rib database carries the ext_ layer (first-blood roundStats / economy roundEconomy / sideStats),
+# giving more analyzable axes than a single GRID slice; the GRID slice `vlml_events.duckdb` remains an option.
 #
-# ⚠️ 这个常量是**唯一**的默认库定义。以前 `vlml_env` / `anchor` /
-# `entity_catalog` / `open_quiz` / `scene_context` 各自写一份
-# `vlml/data/vlml_events.duckdb` 字面量 —— 那正是"db_path 一空就悄悄换库"
-# 那类 bug 的土壤（2026-10-13 服务器实测：配置被切空，六个模块里五个
-# 静默落回 GRID，只有面板显示还停在 rib）。所以那些兜底全部 import 本常量，
-# 不要再各自写死。要换默认库，只改这一行。
+# ⚠️ This constant is the **only** definition of the default database. Previously `vlml_env` / `anchor` /
+# `entity_catalog` / `open_quiz` / `scene_context` each wrote their own
+# `vlml/data/vlml_events.duckdb` literal — that is the breeding ground for bugs like "an empty db_path silently swaps the database"
+# (observed on the server on 2026-10-13: the config was blanked, five of six modules silently
+# fell back to GRID, and only the dashboard display still pointed at rib). So all those fallbacks import this constant;
+# do not hard-code it again. To change the default database, edit only this line.
 DEFAULT_DB = ROOT.parent / "vlml" / "data" / "vlml_rib.duckdb"
 
 
 def _abs(p: str) -> str:
-    """相对路径按仓库根解析（与 vlml_env / anchor / entity_catalog 同口径）。
+    """Relative paths resolve against the repo root (same convention as vlml_env / anchor / entity_catalog).
 
-    ⚠️ 不能按 cwd 解析：`vlml_env` 会把 cwd 切到 `vlml/`，相对路径会被拼两遍
-       （2026-10-13 服务器实测：配了 rib 却连不上，报 database does not exist）。
+    ⚠️ Must not resolve against cwd: `vlml_env` switches cwd to `vlml/`, and a relative path gets joined twice
+       (observed on the server on 2026-10-13: rib was configured but unreachable, erroring "database does not exist").
     """
     q = Path(p or "").expanduser()
     return str(q if q.is_absolute() else (ROOT.parent / q).resolve())
@@ -61,14 +61,14 @@ def is_default() -> bool:
 
 
 def write(path: str) -> dict[str, Any]:
-    """切换数据库。**只写配置**，不校验 —— 校验走 probe()。
+    """Switch database. **Writes config only**, no validation — validation goes through probe().
 
-    两个必须守住的点：
-    1. **存绝对路径**。相对路径在不同 cwd 下会指向不同的文件（vlml_env 会把
-       cwd 切到 vlml/），从源头存绝对就不再有歧义。
-    2. **保留配置里的其它字段**。以前是 `{"db_path": p}` 整体覆盖，会把同一份
-       配置里的 `anchor`（当前 series/team/map 锚点）连带抹掉 —— 换一次库，
-       锚点就得重设一次。
+    Two points that must hold:
+    1. **Store absolute paths**. A relative path points at different files under different cwds (vlml_env switches
+       cwd to vlml/), so storing absolute from the source removes all ambiguity.
+    2. **Preserve other fields in the config**. Previously `{"db_path": p}` overwrote the whole thing, wiping
+       `anchor` (the current series/team/map anchor) in the same config — every database swap,
+       the anchor had to be re-set once.
     """
     p = str(path or "").strip()
     stored = _abs(p) if p else ""
@@ -83,69 +83,69 @@ def write(path: str) -> dict[str, Any]:
         json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8"
     )
 
-    # ⚠️ 锚点必须跟着库一起走 —— 而且要用 refresh()（"在库里就沿用"），
-    #   不是保留原值。
-    #   保留原值那版（2026-10-13 修的）是为了治「整体覆盖会把 anchor 抹掉」，
-    #   但它治过头了：anchor 留在旧库上，于是
+    # ⚠️ The anchor must follow the database — and via refresh() ("keep it if it exists in the database"),
+    #    not by preserving the old value.
+    #    The preserve-the-old-value version (fixed 2026-10-13) was meant to cure "the wholesale overwrite wipes anchor",
+    #    but it over-corrected: the anchor stayed on the old database, so
     #
-    #     db_path = ""                        → GRID 库（只有 Cloud9 / NRG）
-    #     anchor  = 1058 / Nongshim RedForce  → rib.gg 的实体
+    #     db_path = ""                        → GRID database (only Cloud9 / NRG)
+    #     anchor  = 1058 / Nongshim RedForce  → rib.gg entities
     #
-    #   服务器实测后果（2026-10-14）：消费记录里模型原话 ——
-    #     "Voyager 计算的是 Cloud9 的回合赢得情况，
-    #      而 VLML 计算的是 Nongshim RedForce 的回合赢得情况"
-    #   连 schema 探针都被它带崩：`_default_args` 取 SERIES/C9（来自 anchor），
-    #   拿 rib 的 1058 去问 GRID 库 → "No data found for series 1058"，
-    #   6/10 个工具只探回一条 error。
+    #    Observed consequence on the server (2026-10-14): the model's own words in a consumption record —
+    #     "Voyager computes Cloud9's round win situation,
+    #       while VLML computes Nongshim RedForce's round win situation"
+    #    It even crashed the schema probe: `_default_args` takes SERIES/C9 (from anchor),
+    #    asking the GRID database about rib's 1058 → "No data found for series 1058",
+    #    6/10 tools probed back only an error.
     #
-    #   `anchor.refresh()` 的语义正好两头都照顾到：`pick(path, prefer=旧锚点)`
-    #   —— 旧锚点在新库里**还在**就沿用（换库不无谓改题面），不在就按
-    #   "回合数最多的那场/队/图"重挑。所以这里无条件 refresh。
+    #    `anchor.refresh()` semantics cover both sides: `pick(path, prefer=old anchor)`
+    #    — if the old anchor is **still present** in the new database, keep it (a swap should not needlessly change the question); if not, re-pick by
+    #    "the series/team/map with the most rounds". So refresh unconditionally here.
     anchor_note = ""
     try:
         import anchor
         before = dict(obj.get("anchor") or {})
         new_anchor = anchor.refresh(stored or str(DEFAULT_DB))
-        # ⚠️ 必须**分字段**说，不能一句"旧锚点查不到"带过（2026-10-14 实测）：
-        #   切到 rib 时 series 1058 在库里被沿用了、只有 team 变了
-        #   （Nongshim RedForce → Karmine Corp，因为 pick 按"该 series 里
-        #   回合数最多的队"挑）。整句说成"旧锚点查不到"会让人以为全没沿用，
-        #   下次排查就照着错的线索走。
+        # ⚠️ Must report **per field**, not dismiss it with one line "old anchor not found" (observed 2026-10-14):
+        #    when switching to rib, series 1058 was kept from the database and only team changed
+        #    (Nongshim RedForce → Karmine Corp, because pick chooses by "the team with the most rounds
+        #    in that series"). Saying the whole thing as "old anchor not found" makes people think nothing was kept,
+        #    and the next investigation follows the wrong lead.
         keys = ("series", "team", "map")
         changed = [k for k in keys
                    if str(before.get(k) or "") != str(new_anchor.get(k) or "")]
         kept = [k for k in keys if k not in changed and str(before.get(k) or "")]
         if not changed:
-            anchor_note = "锚点在新库里仍然有效，全部沿用"
+            anchor_note = "The anchor is still valid in the new database; all fields kept"
         else:
-            anchor_note = (f"锚点已跟着新库重算：{'/'.join(changed)} 变了"
-                           f"（{before.get(changed[0])} → {new_anchor.get(changed[0])}）")
+            anchor_note = (f"Anchor recomputed for the new database: {'/'.join(changed)} changed"
+                           f" ({before.get(changed[0])} → {new_anchor.get(changed[0])})")
             if kept:
-                anchor_note += f"；{'/'.join(kept)} 在新库里仍在，已沿用"
+                anchor_note += f"; {'/'.join(kept)} still present in the new database, kept"
     except Exception as e:
-        anchor_note = f"锚点重算失败（{type(e).__name__}），请手动跑 python mve/anchor.py --refresh"
+        anchor_note = f"Anchor recompute failed ({type(e).__name__}); run python mve/anchor.py --refresh manually"
 
     return {"ok": True, "db_path": stored or str(DEFAULT_DB),
             "is_default": not bool(stored), "anchor_note": anchor_note}
 
 
 def probe(path: str) -> dict[str, Any]:
-    """验货：这个库能不能用、里面有什么。切换前必须先跑这个。"""
+    """Probe: is this database usable, and what is inside. Must run this before switching."""
     p = str(path or "").strip() or str(DEFAULT_DB)
     out: dict[str, Any] = {"path": p, "ok": False, "is_default": not bool(path)}
     f = Path(p)
     if not f.exists():
-        out["error"] = "文件不存在"
+        out["error"] = "File does not exist"
         return out
     if f.suffix.lower() not in (".duckdb", ".db", ".ddb"):
-        out["error"] = f"扩展名 {f.suffix} 不像 DuckDB 库（.duckdb / .db / .ddb）"
+        out["error"] = f"Extension {f.suffix} does not look like a DuckDB database (.duckdb / .db / .ddb)"
         return out
 
     try:
         import duckdb
         con = duckdb.connect(str(f), read_only=True)
     except Exception as e:
-        out["error"] = f"打不开：{type(e).__name__}: {e}"[:200]
+        out["error"] = f"Cannot open: {type(e).__name__}: {e}"[:200]
         return out
 
     try:
@@ -153,7 +153,7 @@ def probe(path: str) -> dict[str, Any]:
             "SELECT table_name FROM information_schema.tables "
             "WHERE table_schema='main' ORDER BY table_name").fetchall()]
         out["tables"] = tables
-        # 事件量：不同 schema 下表名不同，两个都试
+        # Event count: table names differ across schemas, so try both
         events = None
         for t in ("base_events", "events"):
             if t in tables:
@@ -164,7 +164,7 @@ def probe(path: str) -> dict[str, Any]:
                     continue
         out["events"] = events
 
-        # 关键的兼容性检查：题目依赖的那场 series 还在不在
+        # The critical compatibility check: is the series the questions depend on still there
         series_ids: list[str] = []
         try:
             from tasks import SERIES
@@ -192,11 +192,11 @@ def probe(path: str) -> dict[str, Any]:
         out["warning"] = ""
         if want and series_ids and want not in series_ids:
             out["warning"] = (
-                f"原题依赖的 series {want} 不在这个库里（现有 {', '.join(series_ids[:5])}）"
-                " —— 换库后题目里的 series/队伍常量要重配，否则所有题都查不到数据"
+                f"The series {want} that the original questions depend on is not in this database (present: {', '.join(series_ids[:5])})"
+                " — after a database swap the series/team constants in the questions must be reconfigured, or every question will find no data"
             )
         elif want and not series_ids:
-            out["warning"] = "没找到任何 series_id 列，无法判断题目的 series 是否还在"
+            out["warning"] = "No series_id column found at all; cannot tell whether the questions' series is still present"
     finally:
         try:
             con.close()
@@ -206,27 +206,27 @@ def probe(path: str) -> dict[str, Any]:
 
 
 def anchor_status() -> dict[str, Any]:
-    """锚点（series / team / map）跟**当前库**对不对得上。
+    """Does the anchor (series / team / map) line up with the **current database**?
 
-    ⚠️ 为什么单开这个函数（2026-10-14 服务器实测）：
-      `db_config.json` 里 `anchor` 和 `db_path` 是**两个独立字段**，
-      切库时只写 `db_path`，`anchor` 原样留着。于是会稳定复现这种状态：
+    ⚠️ Why this function exists separately (observed on the server 2026-10-14):
+      In `db_config.json`, `anchor` and `db_path` are **two independent fields**;
+      a database switch only writes `db_path`, leaving `anchor` as-is. So this state reproduces reliably:
 
-        db_path = ""                       → 退回 GRID 默认库
-                                             （里面只有 Cloud9 / NRG，
-                                              Haven / Corrode / Lotus）
+        db_path = ""                       → falls back to the GRID default database
+                                             (which contains only Cloud9 / NRG,
+                                              Haven / Corrode / Lotus)
         anchor  = {series: "1058",
                    team: "Nongshim RedForce",
-                   map: "Sunset"}          → 这三个全是 **rib.gg 库**的实体
+                   map: "Sunset"}          → all three are **rib.gg database** entities
 
-      后果不是报错，而是**悄悄答错**：题目照 anchor 问「Nongshim RedForce」，
-      SQL 却在 GRID 库里查。消费记录里模型的原话就是证据：
+      The consequence is not an error but a **silently wrong answer**: the question asks about "Nongshim RedForce" per the anchor,
+      while the SQL queries the GRID database. The model's own words in a consumption record are the evidence:
 
-        "Voyager 计算的是 Cloud9 的回合赢得情况，
-         而 VLML 计算的是 Nongshim RedForce 的回合赢得情况"
+        "Voyager computes Cloud9's round win situation,
+         while VLML computes Nongshim RedForce's round win situation"
 
-      所以切库 / 清库之后必须把 anchor 的归属算出来给人看，由人决定重不重设。
-      这里**不自动删 anchor** —— 那是人的配置，静默清掉是另一种自欺。
+      So after a database swap / wipe, the anchor's allegiance must be computed and shown to the human, who decides whether to re-set it.
+      This **never auto-deletes anchor** — that is the human's config; silently clearing it is another form of self-deception.
     """
     out: dict[str, Any] = {"anchor": {}, "checked": False, "stale": False,
                            "hint": ""}
@@ -244,7 +244,7 @@ def anchor_status() -> dict[str, Any]:
         import duckdb
         con = duckdb.connect(path, read_only=True)
     except Exception as e:
-        out["hint"] = f"连不上当前库，无法核对锚点：{type(e).__name__}: {e}"
+        out["hint"] = f"Cannot reach the current database; cannot verify the anchor: {type(e).__name__}: {e}"
         return out
 
     try:
@@ -253,11 +253,11 @@ def anchor_status() -> dict[str, Any]:
             "WHERE table_schema='main'").fetchall()]
     except Exception as e:
         con.close()
-        out["hint"] = f"读表清单失败：{type(e).__name__}"
+        out["hint"] = f"Failed to read the table list: {type(e).__name__}"
         return out
 
     def _has(cols_needed: tuple[str, ...], value: str) -> bool | None:
-        """库里存不存在这个值。`None` = 没有可核对的列（查不了，不等于没有）。"""
+        """Does this value exist in the database. `None` = no column to check against (cannot query, does not mean absent)."""
         val = str(value or "").strip()
         if not val:
             return None
@@ -290,20 +290,20 @@ def anchor_status() -> dict[str, Any]:
         out["series_in_db"] = series_in
         out["team_in_db"] = team_in
         out["map_in_db"] = map_in
-        # 只对"查得到结论"的字段判陈旧：None（没列可查）不算陈旧
+        # Only judge staleness for fields with a conclusive answer: None (no column to query) does not count as stale
         judged = [v for v in (series_in, team_in, map_in) if v is not None]
         out["stale"] = bool(judged) and not any(judged)
         if out["stale"]:
             out["hint"] = (
-                f"锚点 {anchor.get('team')} / {anchor.get('map')} / series "
-                f"{anchor.get('series')} 在当前库里都查不到 —— "
-                "题目会照锚点问，SQL 却在空库里查，答案是 0 而不是报错。"
-                "请重设锚点（面板「数据源与数据库」）或切回对应的库。"
+                f"Anchor {anchor.get('team')} / {anchor.get('map')} / series "
+                f"{anchor.get('series')} are all missing from the current database — "
+                "the question will be asked per the anchor while the SQL queries an empty database; the answer is 0 rather than an error."
+                "Please re-set the anchor (dashboard \"Data source & database\") or switch back to the matching database."
             )
         elif judged and not all(judged):
             miss = [k for k, v in (("series", series_in), ("team", team_in),
                                    ("map", map_in)) if v is False]
-            out["hint"] = "锚点部分对不上（查不到：" + "、".join(miss) + "）"
+            out["hint"] = "Anchor partially mismatched (not found: " + ", ".join(miss) + ")"
     finally:
         con.close()
     return out

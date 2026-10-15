@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-"""出题器 + 练习范围（照猫娘伴学的 practice_scope）。
+"""Question generator + practice scope (mirrors the study companion's practice_scope).
 
-伴学的两条机制，这里是同构实现：
+The study companion's two mechanisms, implemented isomorphically here:
 
-1. PracticeScope（practice_scope.py:12）：mode = explicit_scope | explicit_topic
-   —— 面板上既能选一个范围（多题轮着来），也能钉住一道题。
+1. PracticeScope (practice_scope.py:12): mode = explicit_scope | explicit_topic
+   —— on the dashboard you can either pick a scope (rotate through multiple questions) or pin one question.
 
-2. ordered_scope_topics（practice_scope.py:248-268）：下一题怎么挑
-   排序键 = (attempted, depth, difficulty, id)
-   —— 没做过的排前面，做过的排后面，同档按难度升序。
-   再加上 filter_question_params_to_scope 里的 retry_wrong_questions 优先：
-   错题排最前。
+2. ordered_scope_topics (practice_scope.py:248-268): how the next question is picked
+   sort key = (attempted, depth, difficulty, id)
+   —— unattempted first, attempted last, same tier sorted by difficulty ascending.
+   Plus retry_wrong_questions from filter_question_params_to_scope:
+   wrong questions come first.
 
-本文件不 import vlml_env（避免面板启动时把整个 VLML 拉起来）。
+This file does not import vlml_env (to avoid pulling up the whole VLML when the dashboard starts).
 """
 
 from __future__ import annotations
@@ -22,9 +22,10 @@ from typing import Any
 
 from loop_core import AnswerSpec, RubricPoint, Task  # noqa: E402
 
-# ⚠️ 不再写死：换库（GRID → vlr.gg → rib.gg）后 2843069 / Cloud9 在新库里
-# **根本不存在** —— 实测 rib 库上种子题 17 个评分点 **0 个跑得出数**。
-# 锚点跟着库走，从库实查（见 anchor.py）。旧库挑出来的仍是这两个值。
+# ⚠️ No longer hardcoded: after the database swap (GRID → vlr.gg → rib.gg), 2843069 / Cloud9
+# **do not exist at all** in the new database —— on the rib database, 0 of the seed questions'
+# 17 rubric points actually yielded data.
+# The anchor follows the database, queried live from the database (see anchor.py). The old database still picked these two values.
 try:
     import anchor as _anchor
     SERIES = _anchor.series()
@@ -35,7 +36,7 @@ except Exception:                                        # pragma: no cover
 
 
 def _fb_sql(where: str) -> str:
-    """首血类指标的确定性 SQL：返回 (转换率%, 分母)。"""
+    """Deterministic SQL for first-blood metrics: returns (conversion %, denominator)."""
     return (
         "SELECT ROUND(AVG(fb_team_won)*100, 1) AS conv, COUNT(*) AS n "
         f"FROM agg_first_blood_stats WHERE {where}"
@@ -43,13 +44,13 @@ def _fb_sql(where: str) -> str:
 
 
 def _streak_sql(map_name: str, team: str = C9) -> str:
-    """最长连败的确定性 SQL（gaps-and-islands）。
+    """Deterministic SQL for the longest losing streak (gaps-and-islands).
 
-    实测踩过的两个坑，顺序不能反：
-    1. 过滤必须放在编号**之后**——先对全序列编号，再筛目标队输的那些回合，
-       否则整段被当成一整块（实测算出 13 而不是 8）。
-    2. 起始回合要取「最长那一段」的起点，不能直接 MIN——
-       否则拿到的是全组最小值（实测算出 R1 而不是 R7）。
+    Two pitfalls hit in practice, the order cannot be swapped:
+    1. The filter must go **after** the numbering —— number the full sequence first, then filter the rounds the target team lost,
+       otherwise the whole stretch is treated as one block (measured 13 instead of 8).
+    2. The starting round must be the start of "the longest block", not a direct MIN ——
+       otherwise you get the group-wide minimum (measured R1 instead of R7).
     """
     return (
         "SELECT cnt AS max_streak, start_round FROM ("
@@ -66,18 +67,18 @@ def _streak_sql(map_name: str, team: str = C9) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 题目注册表
+# Question registry
 # ---------------------------------------------------------------------------
 
 TASK = Task(
     topic_id="fb_conversion_analysis",
-    question="Cloud9 输掉这个 series，首血转换上出了什么问题？",
+    question="What went wrong with first-blood conversion for Cloud9 in the series they lost?",
     difficulty=3,
     min_base=20,
     requires_tools=["match_summary_report", "query_sql"],
     rubric=[
         RubricPoint(
-            point="整体首血次数",
+            point="Overall first-blood count",
             subject={"series": SERIES, "team": C9},
             dimension="opening_duels.fb",
             weight=25,
@@ -89,7 +90,7 @@ TASK = Task(
             ),
         ),
         RubricPoint(
-            point="整体首血转换率",
+            point="Overall first-blood conversion rate",
             subject={"series": SERIES, "team": C9},
             dimension="conversion.fb_conv",
             weight=25,
@@ -100,7 +101,7 @@ TASK = Task(
             ),
         ),
         RubricPoint(
-            point="Corrode 图首血转换率",
+            point="First-blood conversion rate on Corrode",
             subject={"series": SERIES, "map": "Corrode", "team": C9},
             dimension="map_fb_conv",
             weight=30,
@@ -111,7 +112,7 @@ TASK = Task(
             ),
         ),
         RubricPoint(
-            point="Haven 图首血转换率",
+            point="First-blood conversion rate on Haven",
             subject={"series": SERIES, "map": "Haven", "team": C9},
             dimension="map_fb_conv",
             weight=20,
@@ -126,23 +127,25 @@ TASK = Task(
 
 
 TASK_HARD = Task(
-    # 口径必须写进题干：实测 18 轮全 0%，模型算出 max_losing_streak=14/13、裁判是 8，
-    # streak_start_round 算出 1/6、裁判是 7 —— 它调了工具也调对了工具，
-    # 错的是**连败怎么算**。而裁判的口径藏在 _streak_sql 里（gaps-and-islands），
-    # 题干一个字没提，模型只能猜。猜不中的题，跑多少轮都是 0%。
+    # The convention must be written into the question text: in practice all 18 rounds were 0%, the model
+    # computed max_losing_streak=14/13 while the referee says 8,
+    # streak_start_round computed 1/6 while the referee says 7 —— it called the tools and called them
+    # correctly; what was wrong is **how a losing streak is counted**. But the referee's convention hides
+    # inside _streak_sql (gaps-and-islands), with not a word of it in the question text,
+    # so the model can only guess. A question it can't guess right scores 0% no matter how many rounds run.
     topic_id="corrode_collapse",
-    question="Cloud9 在这场 series 里，单张图上最长的一段连续丢分发生在哪张图？"
-             "这一段一共有多少回合、从哪个回合号开始？"
-             "（连败口径：**只在同一张图内**按回合号顺序计算，"
-             "中间只要赢下一回合就算断开；不按半场重置，"
-             "也不是「全场一共输了多少回合」。）"
-             "另外给出 Cloud9 在这张图上的首血转换率。",
+    question="In this series, on which single map did Cloud9's longest continuous stretch of lost rounds happen?"
+             "How many rounds were in that stretch, and at which round number did it start?"
+             "(Losing-streak convention: **counted within the same map only** in round-number order;"
+             "winning a single round breaks the streak; no reset at halftime,"
+             "and it is not 'the total number of rounds lost across the whole match'.)"
+             "Also give Cloud9's first-blood conversion rate on that map.",
     difficulty=4,
     min_base=1,
     requires_tools=["query_sql"],
     rubric=[
         RubricPoint(
-            point="失分最严重那张图的首血转换率（subject 里指出是哪张图）",
+            point="First-blood conversion rate on the map with the worst losses (the map named in subject)",
             subject={"series": SERIES, "map": "Corrode", "team": C9},
             dimension="map_fb_conv",
             weight=20,
@@ -153,7 +156,7 @@ TASK_HARD = Task(
             ),
         ),
         RubricPoint(
-            point="最长连败回合数（同图内按回合号连续，赢一回合即断开，不按半场重置）",
+            point="Longest losing-streak round count (consecutive by round number within the same map, broken by winning one round, no halftime reset)",
             subject={"series": SERIES, "map": "Corrode", "team": C9},
             dimension="max_losing_streak",
             weight=40,
@@ -164,7 +167,7 @@ TASK_HARD = Task(
             ),
         ),
         RubricPoint(
-            point="连败起始回合号（最长那一段的第一个回合号，不是全场最小回合号）",
+            point="Losing-streak starting round number (the first round number of the longest block, not the minimum round number of the whole match)",
             subject={"series": SERIES, "map": "Corrode", "team": C9},
             dimension="streak_start_round",
             weight=40,
@@ -178,16 +181,16 @@ TASK_HARD = Task(
 )
 
 
-# 第三题：介于两者之间——只考验「按图下钻」，不需要窗口函数
+# Third question: in between the two —— only tests "drill down by map", no window functions needed
 TASK_MID = Task(
     topic_id="map_rounds_split",
-    question="三张图各自打了多少回合？Cloud9 在每张图上的胜率分别是多少？",
+    question="How many rounds were played on each of the three maps? What is Cloud9's win rate on each map?",
     difficulty=2,
     min_base=1,
     requires_tools=["query_sql"],
     rubric=[
         RubricPoint(
-            point="Corrode 回合数",
+            point="Corrode round count",
             subject={"series": SERIES, "map": "Corrode"},
             dimension="map_rounds",
             weight=20,
@@ -198,7 +201,7 @@ TASK_MID = Task(
             ),
         ),
         RubricPoint(
-            point="Haven 回合数",
+            point="Haven round count",
             subject={"series": SERIES, "map": "Haven"},
             dimension="map_rounds",
             weight=20,
@@ -209,7 +212,7 @@ TASK_MID = Task(
             ),
         ),
         RubricPoint(
-            point="Lotus 回合数",
+            point="Lotus round count",
             subject={"series": SERIES, "map": "Lotus"},
             dimension="map_rounds",
             weight=20,
@@ -220,7 +223,7 @@ TASK_MID = Task(
             ),
         ),
         RubricPoint(
-            point="Corrode 上 Cloud9 的胜率",
+            point="Cloud9's win rate on Corrode",
             subject={"series": SERIES, "map": "Corrode", "team": C9},
             dimension="map_win_rate",
             weight=20,
@@ -232,7 +235,7 @@ TASK_MID = Task(
             ),
         ),
         RubricPoint(
-            point="Haven 上 Cloud9 的胜率",
+            point="Cloud9's win rate on Haven",
             subject={"series": SERIES, "map": "Haven", "team": C9},
             dimension="map_win_rate",
             weight=20,
@@ -247,22 +250,22 @@ TASK_MID = Task(
 )
 
 
-# 第四题：唯一能考出「用没用 pattern_detection_report」的题
+# Fourth question: the only one that can detect "did it use pattern_detection_report"
 #
-# 设计要点：pistol / eco 这些指标用 query_sql 从 agg_team_round_stats 也能算出来，
-# 所以它们**区分不出** Voyager 到底用了哪个工具。真正只有 pattern_detection_report
-# 会给的是 `scope.confidence`（置信度标签，阈值 100/50/20）—— 于是把它设成权重
-# 最高的评分点：拿到它 = 确实用了这个工具，拿不到 = 绕过去了。
+# Design notes: pistol / eco metrics can also be computed with query_sql from agg_team_round_stats,
+# so they **cannot distinguish** which tool Voyager actually used. What only pattern_detection_report
+# provides is `scope.confidence` (confidence label, thresholds 100/50/20) —— so it is made the
+# highest-weighted rubric point: getting it = the tool was really used, missing it = it went around.
 TASK_PATTERN = Task(
     topic_id="pistol_eco_pattern",
-    question="Cloud9 的手枪局（pistol round）和 eco 局表现怎么样？"
-             "另外，就现有数据量而言，这个结论的置信度是多少？",
+    question="How did Cloud9 perform in pistol rounds and eco rounds?"
+             "Also, given the current sample size, what is the confidence in this conclusion?",
     difficulty=3,
     min_base=1,
     requires_tools=["pattern_detection_report"],
     rubric=[
         RubricPoint(
-            point="手枪局胜率（0-100 的百分比数值，如 50.0）",
+            point="Pistol-round win rate (percentage value 0-100, e.g. 50.0)",
             subject={"series": SERIES, "team": C9},
             dimension="pistol_win_rate",
             weight=25,
@@ -276,7 +279,7 @@ TASK_PATTERN = Task(
             ),
         ),
         RubricPoint(
-            point="eco 局胜率（0-100 的百分比数值，如 42.9）",
+            point="Eco-round win rate (percentage value 0-100, e.g. 42.9)",
             subject={"series": SERIES, "team": C9},
             dimension="eco_win_rate",
             weight=20,
@@ -290,7 +293,7 @@ TASK_PATTERN = Task(
             ),
         ),
         RubricPoint(
-            point="支撑这个结论的样本回合数（整数）",
+            point="Sample round count supporting this conclusion (integer)",
             subject={"series": SERIES, "team": C9},
             dimension="pattern_rounds",
             weight=25,
@@ -303,7 +306,7 @@ TASK_PATTERN = Task(
             ),
         ),
         RubricPoint(
-            point="置信度标签（只填 moderate / strong / weak / insufficient 之一，原样取自工具返回的 scope.confidence）",
+            point="Confidence label (fill in exactly one of moderate / strong / weak / insufficient, taken as-is from the tool's scope.confidence)",
             subject={"series": SERIES, "team": C9},
             dimension="pattern_confidence",
             weight=30,
@@ -319,25 +322,27 @@ TASK_PATTERN = Task(
 )
 
 
-# 第一题：难度 1 —— 难度阶梯的起点
+# First question: difficulty 1 —— the start of the difficulty ladder
 #
-# 为什么要专门注册一道难度 1 的题：实测 45 轮里 corrode_collapse（难度 4）
-# 错 12 次、覆盖率全 0%，planner 的 wrong_retry 又是无限优先，别的题永远轮不到
-# —— 难度阶梯断在最底下，Voyager 一直在"没有成功经验"的题上打转。
-# 这道题只需要一次单表聚合就能全对，作用是让 Voyager 拿到**第一个 correct**，
-# 掌握度序列从 None 变成有值，之后的渐进才有起点。
+# Why a difficulty-1 question must be registered: in practice, over 45 rounds, corrode_collapse (difficulty 4)
+# failed 12 times with coverage at 0%, and the planner's wrong_retry has infinite priority, so other
+# questions never got a turn —— the difficulty ladder was broken at the very bottom, and Voyager kept
+# circling questions with "no successful experience". This question needs just one single-table
+# aggregation to be fully correct; its role is to let Voyager get its **first correct**,
+# so the mastery series goes from None to having a value, and later progression has a starting point.
 #
-# 注意：人导入**不能创建新题**（导入的只是指向注册题的意图，control fact 里
-# 存的是 topic_id），所以难度阶梯必须从题目注册表这边补。
+# Note: human import **cannot create new questions** (imports are only intentions pointing at registered
+# questions; the control fact stores a topic_id), so the difficulty ladder must be filled in from the
+# question-registry side.
 TASK_EASY = Task(
     topic_id="series_totals",
-    question="Cloud9 这场比赛总共打了多少个回合？其中赢下了多少个回合？",
+    question="How many rounds did Cloud9 play in total in this match? How many of those rounds did they win?",
     difficulty=1,
     min_base=1,
     requires_tools=["query_sql"],
     rubric=[
         RubricPoint(
-            point="全场总回合数（一个整数）",
+            point="Total rounds across the match (an integer)",
             subject={"series": SERIES},
             dimension="total_rounds",
             weight=50,
@@ -348,7 +353,7 @@ TASK_EASY = Task(
             ),
         ),
         RubricPoint(
-            point="Cloud9 赢下的回合数（一个整数）",
+            point="Rounds Cloud9 won (an integer)",
             subject={"series": SERIES, "team": C9},
             dimension="rounds_won",
             weight=50,
@@ -364,33 +369,34 @@ TASK_EASY = Task(
 
 
 # --------------------------------------------------------------------------
-# 「从未出过的新题」—— 用来验证种子层
+# "A brand-new question never asked before" —— used to validate the seed layer
 # --------------------------------------------------------------------------
-# 存在的唯一理由：图谱的维度节点全部从 TASKS[].rubric 派生，所以**出过题的
-# 才进图**。这一道题**故意不重建图谱**（它的维度 kast_pct / adr_value 不在
-# knowledge_graph.json 里），于是老路径 render_for_prompt(topic_id) 返回空串，
-# 只有种子层（按题干匹配 212 个独立于题目的事实）能给它图谱。
-# 它是"图谱到底是不是所有题都能用"的判别题：没有它，任何新题都拿不到图谱，
-# 而旧题本来就饱和（100%），根本测不出来。
+# The only reason it exists: the knowledge graph's dimension nodes all derive from TASKS[].rubric, so only
+# questions that have been asked **enter the graph**. This question deliberately **does not rebuild the graph**
+# (its dimensions kast_pct / adr_value are not in knowledge_graph.json), so the old path
+# render_for_prompt(topic_id) returns an empty string, and only the seed layer (matching 212
+# question-independent facts) can give it a knowledge graph.
+# It is the discriminating question for "is the knowledge graph really usable by every question": without it,
+# no new question can get a knowledge graph, while old questions are already saturated (100%), so nothing could be measured.
 TASK_NEW = Task(
     topic_id="kast_adr_check",
-    question="Cloud9 这场比赛的 KAST 和 K/D 各是多少？"
-             "（口径：**队伍整体**，取 match_analysis_report 的 team 段，"
-             "不是 opponent，也不是某个选手。）",
+    question="What are Cloud9's KAST and K/D in this match?"
+             "(Convention: **team overall**, taken from match_analysis_report's team section,"
+             "not opponent, and not a specific player.)",
     difficulty=2,
     min_base=1,
     requires_tools=["match_analysis_report"],
     rubric=[
         RubricPoint(
-            point="KAST（0-100 的百分比，如 100.0）",
+            point="KAST (percentage 0-100, e.g. 100.0)",
             subject={"series": SERIES, "team": C9},
             dimension="kast_pct",
             weight=50,
             min_base=1,
-            # percent 口径照 pistol 那道题：**必须指到 .num**，另配 base_path
-            # 指到 .denom。第一版我写成 `...kast`（少了 .num），裁判取到的是
-            # 整个 {num,denom} 字典，于是 got=100.0 与 ref={...} 永远不可比 ——
-            # 两组 A/B 都是 0%，但错的是题不是模型（模型答的 100.0 是对的）。
+            # percent convention follows the pistol question: **must point at .num**, paired with base_path
+            # pointing at .denom. The first version I wrote as `...kast` (missing .num), and the referee got
+            # the whole {num,denom} dictionary, so got=100.0 vs ref={...} were never comparable ——
+            # both A/B groups scored 0%, but the question was wrong, not the model (the model's 100.0 was correct).
             answer_spec=AnswerSpec(
                 tool="match_analysis_report",
                 tool_args={"series_id": SERIES},
@@ -400,12 +406,12 @@ TASK_NEW = Task(
             ),
         ),
         RubricPoint(
-            point="K/D（比值，如 1.24）",
+            point="K/D (ratio, e.g. 1.24)",
             subject={"series": SERIES, "team": C9},
             dimension="kd_ratio",
             weight=50,
             min_base=1,
-            # 标量指标（不是 num/denom 对）：直接指到它，不要 percent。
+            # Scalar metric (not a num/denom pair): point directly at it, no percent.
             answer_spec=AnswerSpec(
                 tool="match_analysis_report",
                 tool_args={"series_id": SERIES},
@@ -426,21 +432,21 @@ TASKS: dict[str, Task] = {
     TASK_NEW.topic_id: TASK_NEW,
 }
 
-# **种子题** = 写死在 tasks.py 里的这几道。伴学的同构物是
-# `static/knowledge_seeds/*.json`：知识点由**作者声明**，先于题目存在、
-# 不随做题/出题增长。只有种子的 rubric 有权在图谱里派生维度节点。
+# **Seed questions** = these hardcoded ones in tasks.py. The study companion's isomorphic counterpart is
+# `static/knowledge_seeds/*.json`: knowledge points are **declared by the author**, existing before questions do
+# and not growing with practice/question generation. Only a seed's rubric has the right to derive dimension nodes in the knowledge graph.
 SEED_TOPICS: set[str] = set(TASKS.keys())
 
 
 def _merge_generated() -> int:
-    """把 `question_gen` 验过的题并入 TASKS。
+    """Merge questions validated by `question_gen` into TASKS.
 
-    为什么必须在这里合：图谱的维度节点全部从 `TASKS[].rubric` 派生
-    （tasks.py:360），不合进来的话，自动生成的题既进不了掌握度、也进不了图谱，
-    等于生成了个寂寞。
+    Why it must be merged here: the knowledge graph's dimension nodes all derive from `TASKS[].rubric`
+    (tasks.py:360); without merging, auto-generated questions enter neither mastery nor the knowledge
+    graph, equivalent to generating nothing.
 
-    默认 `validated_target=False` —— 照伴学：只有 validated 的题才计分，
-    **生成 ≠ 生效**，先要能被裁判跑通并被确认口径。
+    Default `validated_target=False` —— per the study companion: only validated questions count,
+    **generated ≠ active**; they must first be runnable by the referee and have their convention confirmed.
     """
     try:
         import question_gen
@@ -451,11 +457,12 @@ def _merge_generated() -> int:
         topic = str(rec.get("topic_id") or "").strip()
         if not topic or topic in TASKS:
             continue
-        # 复核判废的题不进题库（见 `question_gen.revalidate_store`）。
-        # 为什么需要这道闸：验题规则是**后来才补**的，而题是先入库的 ——
-        # 实测 `max_losing_streak_map` 的 value_column 指到了 map_name
-        # （真值是地图名 'Lotus'），连跑 5 轮全 0%、critique 一字不变。
-        # 那种不是"学不会"，是题坏了；坏题混在库里会把学习曲线画成平的。
+        # Questions rejected on re-check do not enter the question bank (see `question_gen.revalidate_store`).
+        # Why this gate is needed: the validation rules were **added later**, while the questions were
+        # already in the bank —— in practice `max_losing_streak_map`'s value_column pointed at map_name
+        # (the true value is the map name 'Lotus'), scoring 0% for 5 straight rounds with the critique
+        # unchanged. That is not "can't learn", it is a broken question; broken questions mixed into the
+        # bank will flatten the learning curve.
         if rec.get("invalid"):
             continue
         try:
@@ -471,18 +478,21 @@ def _merge_generated() -> int:
 
 GENERATED_COUNT = _merge_generated()
 
-# **运行期题** = 出题器/人导入跑出来、验题通过后被采纳的题。它们与种子题的
-# 关键区别：**它们的 rubric 没有权限在图谱里派生维度节点**。
-# 照伴学 `knowledge_tracker.py:1555`：运行期新建的知识点
-# （`_ensure_topic` 解析不到已有知识点时才建的那个）不进答题记录、不参与
-# 掌握度，只进待审候选队列。MVE 把这条规矩收得更紧 —— 连空壳节点都不建，
-# 运行期的新维度一律落在**边**上（`knowledge_graph.link_import`）。
-# 不这么做的话，每采纳一道新题维度层就多一个节点，等于"题目派生图谱"。
+# **Runtime questions** = questions produced by the question generator / human import and adopted after
+# passing validation. Their key difference from seed questions: **their rubric has no right to
+# derive dimension nodes in the knowledge graph**.
+# Per the study companion `knowledge_tracker.py:1555`: knowledge points created at runtime
+# (the one created only when `_ensure_topic` cannot resolve an existing knowledge point) do not enter
+# answer records, do not participate in mastery, and only enter the pending-review candidate queue.
+# MVE tightens this rule further —— not even empty shell nodes are created;
+# all runtime new dimensions land on **edges** (`knowledge_graph.link_import`).
+# Without this, every adopted new question adds a node to the dimension layer, equivalent to
+# "questions derive the knowledge graph".
 RUNTIME_TOPICS: set[str] = set(TASKS.keys()) - SEED_TOPICS
 
 
 # ---------------------------------------------------------------------------
-# 练习范围与下一题（照 practice_scope.ordered_scope_topics）
+# Practice scope and next question (mirrors practice_scope.ordered_scope_topics)
 # ---------------------------------------------------------------------------
 
 def next_topic(
@@ -493,15 +503,16 @@ def next_topic(
     mode: str = "explicit_scope",
     only: list[str] | None = None,
 ) -> str:
-    """挑下一题。
+    """Pick the next question.
 
-    排序照伴学 ordered_scope_topics（practice_scope.py:260-267）：
-        (已做过?, 错题?, 难度, id)
-    另加伴学 filter_question_params_to_scope 的规矩：错题（retry_wrong_questions）优先。
+    Sorting mirrors the study companion's ordered_scope_topics (practice_scope.py:260-267):
+        (attempted?, wrong?, difficulty, id)
+    Plus the study companion's filter_question_params_to_scope rule: wrong questions (retry_wrong_questions) come first.
 
-    only —— 练习范围（practice_scope.py）。人在知识图谱上点一个维度把它设成范围，
-    出题器就只在这个范围里出题；给了 only 就**不**退化成全库（范围里实在没题了
-    才退回全库，那说明范围本身失效，practice_scope 已经标 invalidated 了）。
+    only —— practice scope (practice_scope.py). A human clicks a dimension on the knowledge graph to set it as the scope,
+    and the question generator only produces questions within that scope; given `only`, it does **not** degrade to the full bank
+    (it falls back to the full bank only when the scope truly has no questions left, which means the scope itself
+    is invalidated, and practice_scope has already marked it invalidated).
     """
     if mode == "explicit_topic" and current in TASKS:
         return current
@@ -511,9 +522,9 @@ def next_topic(
         done = topic_id in attempted
         wrong = topic_id in failed
         return (
-            not wrong,       # 错题优先（retry_wrong_questions）
-            done,            # 没做过的优先（ordered_scope_topics 的 attempted 键）
-            task.difficulty,  # 难度升序
+            not wrong,       # wrong questions first (retry_wrong_questions)
+            done,            # unattempted first (ordered_scope_topics' attempted key)
+            task.difficulty,  # difficulty ascending
             topic_id,
         )
 
@@ -524,7 +535,7 @@ def next_topic(
 
 
 def task_brief(task: Task) -> dict[str, Any]:
-    """面板上题目卡片的字段（不泄露 answer_spec —— 那是服务端私有）。"""
+    """Fields for the question card on the dashboard (answer_spec not exposed —— that is server-side private)."""
     return {
         "topic_id": task.topic_id,
         "question": task.question,
@@ -542,65 +553,74 @@ def all_briefs() -> list[dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
-# 人导入的问题归到哪一题
+# Which question a human-imported question routes to
 # ---------------------------------------------------------------------------
 #
-# 为什么必须有这一步：出题器的 weak_topic / human_focus 分支是按 topic_id 读
-# 因果时间线的（`causal_timeline.counts_by_topic()` 会跳过 topic_id 为空的行）。
-# 人从面板上随手打一句话，不可能要求他先背下 topic_id —— 于是必须把自然语言
-# 归到某一题上。归不上就诚实地留空，并在面板上写明「这条不驱动出题」，
-# 而不是悄悄塞一个默认值。
+# Why this step is necessary: the question generator's weak_topic / human_focus branches read the
+# causal timeline by topic_id (`causal_timeline.counts_by_topic()` skips rows with an empty topic_id).
+# A human types a sentence on the dashboard at random, and we cannot ask them to memorize topic_ids
+# first —— so natural language must be routed to a question. When routing fails, honestly leave it empty
+# and state on the dashboard "this one does not drive question generation",
+# rather than quietly stuffing in a default value.
 #
-# 打分用「命中词的长度」而不是「命中个数」：长词（首血转换、置信度）比
-# 短词（图、胜率）更能说明归属，避免问「三张图胜率」被归到 pistol 题。
+# Scoring uses "the length of the matched word" rather than "the number of matches": long words
+# (first-blood conversion, confidence) indicate ownership better than short words (map, win rate),
+# avoiding a question like "win rates on the three maps" being routed to the pistol question.
 TOPIC_HINTS: dict[str, tuple[str, ...]] = {
     "series_totals": (
-        "总共打了多少回合", "一共多少回合", "总共多少回合", "总共打了", "全场",
-        "赢下了多少回合", "赢了多少回合", "总回合", "total_rounds",
-        # 「赢下多少」已删：实测「赢得首血之后能赢下多少比例」被这 4 字短语
-        # 脏击进 series_totals（长度打分压过 fb 的「首血」2 字）——胜率类
-        # 问句都含「赢下多少」，它不属于任何一道题。原题面靠「赢下了多少回合」归。
+        "total_rounds",
+        "total rounds", "how many rounds", "rounds in total", "rounds played",
+        "rounds won", "rounds did", "in total", "across the match", "whole match",
+        # "win how many" was deleted: in practice the question "what fraction can they win after winning first blood" was dirtily matched into
+        # series_totals by this 4-character phrase (its length score beat fb's 2-character "first blood") —— win-rate
+        # questions all contain that phrase, and it belongs to no question. The original question text routes via "how many rounds they won".
     ),
     "pistol_eco_pattern": (
-        "手枪", "手枪局", "pistol", "eco", "强起", "经济局", "半买",
-        "置信度", "置信", "confidence", "样本量够不够",
+        "pistol", "eco", "force buy", "confidence", "sample size", "enough sample",
+        "pistol round", "eco round", "pistol rounds", "eco rounds", "forced buy",
+        "half buy", "confident", "sample size enough", "enough data",
     ),
     "corrode_collapse": (
-        "崩盘", "崩", "连败", "连丢", "最长", "起始回合", "第几回合开始",
-        "最难看", "输得最惨", "streak", "一口气",
+        "streak", "collapse", "losing streak", "longest", "starting round",
+        "which round", "consecutive", "in a row", "collapse", "consecutive losses",
+        "worst", "lost the most", "longest run", "which round did it start",
     ),
     "fb_conversion_analysis": (
-        "首血", "首杀", "转换率", "转换", "fb_conv", "first blood",
-        "开局对枪", "拿到首血之后", "首血之后", "首血后", "赢得首血",
-        # 后三条是补长度：问「赢得首血之后能赢下多少比例」时，「首血」只有
-        # 2 字，打不过别的题里的 4 字泛用短语（见 series_totals 注释）。
+        "fb_conv", "first blood", "after first blood", "wins the first blood",
+        "first-blood conversion", "opening duel", "first kill", "fb conversion",
+        "conversion rate", "conversion", "after winning first blood",
+        "post first blood",
+        # The last few (previously the Chinese ones) were added for length: when asking "what fraction can they win after winning first blood", the 2-character word
+        # loses to other questions' 4-character generic phrases (see the series_totals comment).
     ),
     "map_rounds_split": (
-        "三张图", "每张图", "各打了多少回合", "回合数", "图上的胜率",
-        "map_rounds", "map_win_rate", "分图",
+        "map_rounds", "map_win_rate",
+        "three maps", "each map", "rounds per map", "win rate", "on the map",
+        "per map", "rounds on each map", "round count",
     ),
-    # lotus_win_rate 是后加的题，手写表里漏了它 —— 实测「Cloud9 在 Lotus 上的胜率
-    # 是多少？」归不上（AUTO_HINTS 派生的 map/win/rate 是**英文**词干，中文提问
-    # 命中不了），于是这条人导入的 topic_id 为空，出题器看不见，
-    # 还会拿这段文本去生成一道和已有题重复的新题。这里补上。
+    # lotus_win_rate was added later and missed from the handwritten table —— in practice the question
+    # "What is Cloud9's win rate on Lotus?" could not route (AUTO_HINTS derives map/win/rate, which are
+    # **English** stems, so non-English questions could not match), so this human import's topic_id was empty, the question generator could not see it,
+    # and it would also use this text to generate a new question duplicating an existing one. Added here.
     "lotus_win_rate": (
-        "lotus", "洛图", "lotus_win_rate", "lotus 图", "lotus图上",
+        "lotus", "lotus_win_rate",
+        "lotus map", "win rate on lotus", "on lotus",
     ),
 }
 
 
 def _auto_hints() -> dict[str, tuple[str, ...]]:
-    """从 TASKS **自动派生**归题关键词 —— 手写表 `TOPIC_HINTS` 的兜底。
+    """**Automatically derive** topic-routing keywords from TASKS —— the fallback for the handwritten table `TOPIC_HINTS`.
 
-    为什么必须自动：`kast_adr_check` 是后加的题，手写表里没有它 ——
-    实测「Cloud9 这场比赛的 KAST 是多少」直接归不上，于是这条 control fact
-    的 topic_id 为空，出题器 `latest_topics_by_kind()` 跳过它，
-    人导入的意图就这么断了。**每加一道题补一次手写表，迟早还会再漏一次。**
+    Why automation is necessary: `kast_adr_check` was added later and is not in the handwritten table ——
+    in practice "What is Cloud9's KAST in this match?" could not route at all, so this control fact's
+    topic_id was empty, the question generator's `latest_topics_by_kind()` skipped it,
+    and the human-import intent was broken. **Supplementing the handwritten table once per new question will eventually miss again.**
 
-    派生的三源（都是服务端既有的硬事实，不需要人工维护）：
-      1. `rubric.dimension` 的英文词干：kast_pct → kast / pct
-      2. `rubric.point` 里的大写缩写：KAST、ADR
-      3. `rubric.point` 里的比值写法：K/D
+    Three derivation sources (all existing server-side hard facts, no manual maintenance):
+      1. English stems of `rubric.dimension`: kast_pct → kast / pct
+      2. Uppercase abbreviations in `rubric.point`: KAST, ADR
+      3. Ratio notation in `rubric.point`: K/D
     """
     out: dict[str, set[str]] = {}
     for tid, task in TASKS.items():
@@ -620,20 +640,20 @@ AUTO_HINTS: dict[str, tuple[str, ...]] = _auto_hints()
 
 
 def infer_topic(question: str) -> tuple[str, str]:
-    """把一句自然语言归到最可能的那道题。返回 (topic_id, 命中的词)。
+    """Route a natural-language sentence to the most likely question. Returns (topic_id, matched word).
 
-    归不上返回 ("", "") —— 调用方必须处理这个分支，不能默认第一题。
+    Returns ("", "") when routing fails —— callers must handle this branch, not default to the first question.
 
-    两级：先查人工精修的 `TOPIC_HINTS`，再查从 TASKS 自动派生的
-    `AUTO_HINTS`（后加的题没补手写表时靠它兜住）。
+    Two levels: first check the manually refined `TOPIC_HINTS`, then the automatically derived
+    `AUTO_HINTS` (catches questions added later without a handwritten-table entry).
     """
     q = (question or "").lower()
     if not q.strip():
         return "", ""
     best_topic, best_hit, best_score = "", "", 0
-    # 手写表优先（人工精修过的更准）；自动派生的词短且泛（map / win / rate），
-    # 只作兜底，且要求 ≥3 字符 —— 长度闸**只管自动派生**，
-    # 手写的中文单字（「崩」）也是有效关键词，不能被它滤掉。
+    # Handwritten table takes priority (manually refined is more accurate); auto-derived words are short
+    # and generic (map / win / rate), only a fallback, and require ≥3 characters —— the length gate **only
+    # governs auto-derived words**; handwritten short keywords are valid and must not be filtered out by it.
     for source, weight, minlen in ((TOPIC_HINTS, 0, 0), (AUTO_HINTS, -2, 3)):
         for topic, hints in source.items():
             if topic not in TASKS:
@@ -642,7 +662,7 @@ def infer_topic(question: str) -> tuple[str, str]:
                 hl = h.lower()
                 if len(h) < minlen or hl not in q:
                     continue
-                # 英文词加一点权重：它是精确的维度名，比中文字面更可靠
+                # English words get a bit of extra weight: they are exact dimension names, more reliable than loose keywords
                 score = len(h) + (3 if h.isascii() else 0) + weight
                 if score > best_score:
                     best_topic, best_hit, best_score = topic, h, score

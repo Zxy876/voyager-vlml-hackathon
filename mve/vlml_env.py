@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""引导 VLML 运行环境（cwd + 沙箱 mkdir 补丁），供其它 MVE 模块复用。"""
+"""Bootstrap the VLML runtime environment (cwd + sandbox mkdir patch) for reuse by other MVE modules."""
 
 from __future__ import annotations
 
@@ -10,12 +10,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 VLML = ROOT / "vlml"
 
-# VLML 内部查询依赖 cwd 在仓库根
+# VLML internal queries depend on cwd being at the repo root
 os.chdir(VLML)
 sys.path.insert(0, str(VLML / "src"))
 
-# 沙箱对已存在目录的 mkdir(exist_ok=True) 会抛 PermissionError(EEXIST)，
-# 而 vlml/db/manager.py 每次建连接都调一次。MVE 侧绕过，不改仓库源码。
+# In the sandbox, mkdir(exist_ok=True) on an existing directory raises PermissionError(EEXIST),
+# while vlml/db/manager.py calls it on every connection. We bypass on the MVE side without
+# touching the repo source.
 _orig_mkdir = Path.mkdir
 
 
@@ -30,25 +31,28 @@ def _safe_mkdir(self, *args, **kwargs):  # type: ignore[no-untyped-def]
 
 Path.mkdir = _safe_mkdir  # type: ignore[assignment]
 
-# ---- 数据库可切换 ----
-# VLML 的工具里全部写死 `EventDatabase(read_only=True)`（不带 db_path），
-# 于是一律落到它自带的默认库 vlml/data/vlml_events.duckdb（GRID 切片）。
-# 要换库只能在这里打补丁 —— 和上面的 mkdir 补丁同一套路：MVE 侧绕过，
-# 不改 VLML 仓库源码。
+# ---- Database switchable ----
+# VLML's tools all hard-code `EventDatabase(read_only=True)` (without db_path),
+# so they always land on its bundled default database vlml/data/vlml_events.duckdb (the GRID slice).
+# Switching databases can only be patched here — same trick as the mkdir patch above:
+# bypass on the MVE side, without modifying the VLML repo source.
 #
-# 用配置文件而不是环境变量：run_mve 是 pilot 起的、pilot 是面板起的，
-# 环境变量要层层传递；写文件则所有进程读到的都是同一份。
+# Use a config file rather than environment variables: run_mve is launched by the pilot, and the pilot
+# is launched by the dashboard, so env vars would have to be threaded through layer by layer;
+# a written file is read the same by every process.
 #
-# ⚠️ db_path 为空时的兜底也必须是本项目的默认库（rib.gg，见 db_switch.DEFAULT_DB），
-#    不能留着 VLML 自带的 GRID 默认 —— 否则配置一丢，六个读库模块里这个
-#    悄悄落回 GRID，别的模块按新默认走，"数据源悄悄换了"就是这么来的
-#    （2026-10-13 服务器实测：db_config 被切空，工具实际连的是 GRID 库，
-#    而 db_switch.current_path() 报的是 rib）。
+# ⚠️ The fallback when db_path is empty must also be this project's default database
+#    (rib.gg, see db_switch.DEFAULT_DB) — VLML's bundled GRID default must not be kept,
+#    for otherwise, once the config is lost, this one module silently falls back to GRID while
+#    the others follow the new default: that's how "the data source silently changed" happens
+#    (observed on the server on 2026-10-13: db_config was cleared, the tools actually connected
+#    to the GRID database, while db_switch.current_path() reported rib).
 DB_CONFIG = ROOT / "mve" / "db_config.json"
 
-# 默认库的唯一定义在 db_switch（mve/ 在 sys.path 里：面板第 33 行插入，
-# 脚本直跑时 sys.path[0] 就是 mve/）。import 失败要**响**——静默兜底
-# 就等于默认库可以悄悄分叉，那正是要防的事。
+# The single definition of the default database lives in db_switch (mve/ is on sys.path:
+# inserted by the dashboard on line 33, and sys.path[0] is mve/ when a script runs directly).
+# An import failure must **fail loudly** — a silent fallback means the default database can
+# quietly fork, which is exactly what we're guarding against.
 from db_switch import DEFAULT_DB  # noqa: E402
 
 
@@ -62,16 +66,18 @@ def _read_db_config() -> dict:
 
 
 def _resolve_db_path(raw: str) -> str:
-    """把配置里的库路径解析成**绝对路径**。
+    """Resolve the configured database path to an **absolute path**.
 
-    ⚠️ 为什么必须显式解析（2026-10-13 服务器实测）：
-      本模块第 14 行做了 `os.chdir(VLML)`（VLML 内部查询依赖 cwd 在 vlml/ 下）。
-      于是配置里写相对路径 `vlml/data/vlml_rib.duckdb` 时，DuckDB 会拿当前
-      cwd 去拼 → `/root/mve/vlml/vlml/data/vlml_rib.duckdb` —— **路径被拼了两遍**，
-      报的是 `IO Error: database does not exist`。
-      现象极具迷惑性：它在循环侧表现为"连续三轮一次工具都没调成功"
-      （分诊给出 `linkage`），看着像"学不会"，其实是**配置里的一个相对路径**。
-      所以：相对路径一律按**仓库根**解析（人写配置时想的是仓库根，不是 vlml/）。
+    ⚠️ Why explicit resolution is mandatory (observed on the server on 2026-10-13):
+      Line 14 of this module does `os.chdir(VLML)` (VLML internal queries depend on cwd being under vlml/).
+      So when the config holds a relative path `vlml/data/vlml_rib.duckdb`, DuckDB joins it with the
+      current cwd → `/root/mve/vlml/vlml/data/vlml_rib.duckdb` — **the path gets joined twice**,
+      and it reports `IO Error: database does not exist`.
+      The symptom is deeply misleading: on the loop side it shows up as "three consecutive rounds
+      with zero successful tool calls" (triage reports `linkage`), which looks like "can't learn",
+      but is actually **a relative path in the config**.
+      Hence: always resolve relative paths against the **repo root** (when people write config they
+      mean the repo root, not vlml/).
     """
     p = Path(raw).expanduser()
     if not p.is_absolute():
@@ -80,19 +86,20 @@ def _resolve_db_path(raw: str) -> str:
 
 
 _RAW_DB_PATH = str(_read_db_config().get("db_path") or "")
-# db_path 为空 → 落到**本项目的**默认库（rib.gg），不是 VLML 自带的 GRID 库。
+# db_path empty → fall back to **this project's** default database (rib.gg), not VLML's bundled GRID database.
 ACTIVE_DB_PATH = (_resolve_db_path(_RAW_DB_PATH) if _RAW_DB_PATH
                   else str(DEFAULT_DB))
 
-# ⚠️ 库文件不在 —— **当场喊出来**（配置写的 / 默认兜底的都要喊）。
-#   不喊的代价（2026-10-13 服务器实测）：循环连跑三轮，每轮三次工具调用
-#   全部失败，日志里只有一行 `IO Error: database does not exist`；而 panel
-#   的分诊把它归到 `linkage`（"链路没跑通"）—— 归类是对的，但人得先看见它。
-#   有这一行，启动瞬间就知道是路径问题，不用等三道题跑完再倒推。
+# ⚠️ If the database file is missing — **shout about it immediately** (both for the configured and the default-fallback case).
+#   The cost of not shouting (observed on the server on 2026-10-13): the loop ran three rounds back to back,
+#   each round all three tool calls failed, and the log held only one line `IO Error: database does not exist`;
+#   while panel's triage filed it under `linkage` ("the pipeline didn't run through") — the classification was
+#   right, but a human has to see it first. With this line, you know at startup it's a path problem,
+#   without waiting for three tasks to finish and then working backwards.
 if not Path(ACTIVE_DB_PATH).exists():
-    _src = (f"db_config 里写的是 {_RAW_DB_PATH!r}（相对路径按仓库根 {ROOT} 解析）"
-            if _RAW_DB_PATH else "db_config 的 db_path 为空，用的是默认库兜底")
-    print(f"[vlml_env] ⚠️ 要连的库文件不存在：{ACTIVE_DB_PATH}（{_src}）",
+    _src = (f"db_config says {_RAW_DB_PATH!r} (relative paths resolve against repo root {ROOT})"
+            if _RAW_DB_PATH else "db_config's db_path is empty; falling back to the default database")
+    print(f"[vlml_env] ⚠️ the database file to connect to does not exist: {ACTIVE_DB_PATH} ({_src})",
           file=sys.stderr, flush=True)
 if ACTIVE_DB_PATH:
     from vlml.db.manager import EventDatabase  # noqa: E402
@@ -100,15 +107,15 @@ if ACTIVE_DB_PATH:
     _orig_db_init = EventDatabase.__init__
 
     def _patched_db_init(self, db_path=None, read_only=False):  # type: ignore[no-untyped-def]
-        # 显式传了 db_path 的照原样走；没传的换成本项目配置的库
+        # If db_path was passed explicitly, proceed unchanged; otherwise swap in this project's configured database
         _orig_db_init(self, db_path or ACTIVE_DB_PATH, read_only=read_only)
 
     EventDatabase.__init__ = _patched_db_init  # type: ignore[assignment]
 
-# MCP 对外暴露的 10 个工具，全部原样导入。
-# 注意命名：MCP 工具名 == Python 函数名，唯一例外是自定义 SQL ——
-#   对外叫 query_sql（vlml/src/vlml/server.py:93），实现函数叫 execute_custom_sql
-#   （vlml/src/vlml/tools/db_query_tools.py:239）。两个名字都要能分派。
+# All 10 tools exposed by MCP, imported as-is.
+# Note the naming: MCP tool name == Python function name, with the sole exception of custom SQL —
+#   externally query_sql (vlml/src/vlml/server.py:93), the implementing function is execute_custom_sql
+#   (vlml/src/vlml/tools/db_query_tools.py:239). Both names must be dispatchable.
 from vlml.tools.db_query_tools import execute_custom_sql, get_database_info  # noqa: E402
 from vlml.tools.insights_tools import (  # noqa: E402
     match_analysis_report,

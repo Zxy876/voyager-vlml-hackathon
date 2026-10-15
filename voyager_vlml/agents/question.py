@@ -1,12 +1,12 @@
-"""VLML 同构的出题 Agent：按**里程碑节点**出题（让闭环真正自己出题）。
+"""VLML-isomorphic question generator: poses questions per **milestone node** (so the loop truly generates its own questions).
 
-设计要点：
-  · 题面只描述"要取什么数"，**不附标准答案**（答案由模型自己写 SQL 去库里取）。
-    旧后端在这里会同时产出 reference_sql 给 VLML 裁判算标准答案，那是判分用的、
-    只该进面板；本文件不产参考答案。
-  · 沿用**口径锁定**：知识点名括号里的粒度标记（rounds / games / series /
-    base_events…）就是取数主表，题面必须落在该粒度上，避免跨粒度串味
-    （实测 grain_game 曾被出成"多少个回合"）。
+Design notes:
+  · The question only describes "what data to retrieve", **without a reference answer** (the model writes its own SQL to fetch from the DB).
+    The old backend also produced reference_sql here for the VLML referee to score against — that is for scoring only,
+    and belongs in the dashboard; this file produces no reference answer.
+  · It reuses **grain-locking**: the grain tag in parentheses in the topic name (rounds / games / series /
+    base_events…) is the main retrieval table, and the question must stay at that grain to avoid cross-grain leakage
+    (in practice, grain_game was once turned into "how many rounds").
 """
 
 from __future__ import annotations
@@ -17,10 +17,13 @@ from typing import Any
 from voyager_vlml.llm import chat_json
 
 _SYSTEM = (
-    "你是 Valorant 电竞数据分析的陪练教练。给定【知识点】和当前库真实 schema，"
-    "出**一道**需要用 SQL 从库里取数才能回答的练习题。\n"
-    "只返回 JSON：{\"question\": \"题面（自然语言，说清口径：哪张图/哪个队/哪场系列赛）\"}\n"
-    "要求：题面必须能用一条 SELECT 回答；不要编造库里不存在的表或列；不要给答案。"
+    "You are a sparring coach for Valorant esports data analysis. Given the 【Topic】 and the actual schema "
+    "of the current database, pose **one** practice question that requires SQL to retrieve data from the "
+    "database to answer.\n"
+    "Return only JSON: {\"question\": \"the question text (natural language, state the grain clearly: "
+    "which map / which team / which series)\"}\n"
+    "Requirements: the question must be answerable with a single SELECT; do not invent tables or columns "
+    "that do not exist in the DB; do not give the answer."
 )
 
 
@@ -31,13 +34,14 @@ def _gran(name: str) -> str:
 
 class VLMLQuestionAgent:
     def __init__(self, env: Any = None) -> None:
-        self.env = env  # 用于取真实 schema（不传则不带 schema 块）
+        self.env = env  # used to fetch the actual schema (omit the schema block if not passed)
 
     async def _schema_block(self) -> str:
-        """从库里实查表与列（env.schema_block，照伴学 entity_catalog 的"实查不写死"原则）。
+        """Fetch tables and columns live from the DB (env.schema_block, following the companion's
+        entity_catalog "live-query, don't hardcode" principle).
 
-        ⚠️ 必须是 async：闭环本身跑在事件循环里，这里再用 asyncio.run 会
-        "coroutine was never awaited"（实测踩过）。
+        ⚠️ Must be async: the loop itself runs inside an event loop, so calling asyncio.run here would
+        raise "coroutine was never awaited" (hit this in practice).
         """
         if self.env is None or not hasattr(self.env, "schema_block"):
             return ""
@@ -47,7 +51,7 @@ class VLMLQuestionAgent:
             return ""
 
     async def generate(self, topic: dict[str, Any]) -> str:
-        """为一个里程碑节点出题，返回题面文本。"""
+        """Pose a question for one milestone node; return the question text."""
         name = str(topic.get("name") or topic.get("id") or "")
         skills = "；".join(str(s) for s in (topic.get("skills") or [])[:3])
         ex = ""
@@ -57,19 +61,20 @@ class VLMLQuestionAgent:
 
         gran = _gran(name)
         gran_line = (
-            f"\n【口径锁定】本题粒度是 `{gran}`，题面必须围绕该粒度（取数主表 `{gran}`）提问，"
-            f"不要借用其它粒度（例如粒度不是 rounds 就不要问「多少个回合」）。"
+            f"\n【Grain lock】This question's grain is `{gran}`; the question must stay at that grain "
+            f"(main retrieval table `{gran}`), "
+            f"and must not borrow another grain (e.g., if the grain is not rounds, do not ask 'how many rounds')."
             if gran
             else ""
         )
         schema = await self._schema_block()
         user = (
-            f"【知识点】{name}\n"
-            f"技能要求：{skills or '（无）'}\n"
-            f"问法示例：{ex or '（无）'}"
+            f"【Topic】{name}\n"
+            f"Skill requirements: {skills or '(none)'}\n"
+            f"Example phrasing: {ex or '(none)'}"
             f"{gran_line}\n"
-            + (f"\n【当前库真实 schema】\n{schema}\n" if schema else "")
-            + "\n请只返回 JSON。"
+            + (f"\n【Current DB schema (actual)】\n{schema}\n" if schema else "")
+            + "\nReturn only JSON."
         )
         out = chat_json(
             [{"role": "system", "content": _SYSTEM}, {"role": "user", "content": user}],

@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""运行日志：每一轮落一行 JSONL。
+"""Run log: appends one JSONL line per round.
 
-面板的进步曲线读的就是这个文件。分开写的原因：
-- 主循环只管跑，不关心持久化格式
-- 面板只管读，不依赖主循环还在不在跑
+The dashboard's progress curve reads this file. Why it is written separately:
+- The main loop only runs; it does not care about the persistence format
+- The dashboard only reads; it does not depend on the main loop still running
 
-一条记录 = 一轮（round）的完整可观测状态。
+One record = one round's complete observable state.
 """
 
 from __future__ import annotations
@@ -40,7 +40,7 @@ def load_all() -> list[dict[str, Any]]:
 
 
 def attempted_counts() -> dict[str, int]:
-    """每题做过几次（照伴学 ordered_scope_topics 的 attempted 键）。"""
+    """How many times each topic was attempted (mirrors the study companion's attempted key in ordered_scope_topics)."""
     out: dict[str, int] = {}
     for r in load_all():
         t = str(r.get("topic_id") or "")
@@ -50,7 +50,7 @@ def attempted_counts() -> dict[str, int]:
 
 
 def failed_counts() -> dict[str, int]:
-    """每题错（wrong/dont_know）几次 —— 伴学的 retry_wrong_questions 就挑这些。"""
+    """How many times each topic was wrong (wrong/dont_know) — the study companion's retry_wrong_questions picks these."""
     out: dict[str, int] = {}
     for r in load_all():
         t = str(r.get("topic_id") or "")
@@ -60,11 +60,11 @@ def failed_counts() -> dict[str, int]:
 
 
 def undone_counts() -> dict[str, int]:
-    """每题「任务未完成」次数 —— **Voyager 尺子的 failed 账本**（照原版 failed_tasks）。
+    """Count of "task not done" per topic — **the failed ledger of Voyager's ruler** (mirrors the original failed_tasks).
 
-    done = 跑通编排 + 拿到数 + 没翻车（loop_core.task_done），**不算覆盖点**。
-    出题器（planner）据此决定「这道没完成的任务还要不要给」—— 课程规划的
-    依据是 Voyager 自己的学习质量（completed / failed 账本），不是 VLML 覆盖点。
+    done = orchestration ran + data retrieved + no crash (loop_core.task_done), **coverage points not counted**.
+    The question generator (planner) uses this to decide "should this unfinished task still be given" — curriculum planning
+    is based on Voyager's own learning quality (completed / failed ledger), not VLML coverage points.
     """
     out: dict[str, int] = {}
     for r in load_all():
@@ -75,16 +75,16 @@ def undone_counts() -> dict[str, int]:
 
 
 def unresolved_wrongs(topic_id: str) -> int:
-    """这道题**还没消化**的错题数（照伴学 mastery_v2 的 unresolved_wrong_count）。
+    """Number of wrong answers for this topic that are **not yet digested** (mirrors the study companion's unresolved_wrong_count in mastery_v2).
 
-    语义：做错就累加，做对就清零。伴学拿它做两件事
-    （adaptive_learning/mastery_v2.py:283-288）：
+    Semantics: wrong answers accumulate, a correct answer resets to zero. The study companion uses it for two things
+    (adaptive_learning/mastery_v2.py:283-288):
         if unresolved_wrong_count > 0:
             mastery = min(mastery, policy.unresolved_wrong_mastery_cap)  # =0.79
             flags.append("unresolved_wrong_cap")
         mastered = resolved_wrong_count == 0 and mastery >= threshold
-    即：**有没消化的错题就不许判"掌握"** —— 这正是"判错是信号而不是失败"
-    在评分侧的样子：不惩罚你错，但错题不清零就不给你毕业。
+    That is: **undigested wrong answers bar a "mastered" verdict** — this is what "being wrong is a signal, not a failure"
+    looks like on the scoring side: you are not punished for being wrong, but un-cleared wrong answers block graduation.
     """
     n = 0
     for r in load_all():
@@ -99,14 +99,14 @@ def unresolved_wrongs(topic_id: str) -> int:
 
 
 def evidence_rows(topic_id: str) -> list[Any]:
-    """这道题的**全部**历史证据，供 V2 掌握度模型跨进程重建。
+    """This topic's **entire** history of evidence, for the V2 mastery model to rebuild across processes.
 
-    V2 的加权与时间衰减要求看到完整序列：只喂当前这一轮，
-    权重和永远只有一条，confidence 就退化成常数。
-    跳过 evidence_status == "none" 的轮 —— 与主循环「没拿到证据
-    不计入掌握度序列」的规矩一致。
+    V2's weighting and time decay require seeing the full sequence: feeding only the current round
+    leaves the weight sum at a single entry, and confidence degenerates into a constant.
+    Skip rounds with evidence_status == "none" — consistent with the main loop's rule that rounds
+    with no evidence are not counted in the mastery sequence.
     """
-    import mastery_model  # 局部导入：避免与上层模块形成循环
+    import mastery_model  # Local import: avoids a circular dependency with upper-level modules
 
     out: list[Any] = []
     for r in load_all():
@@ -122,12 +122,12 @@ def evidence_rows(topic_id: str) -> list[Any]:
 
 
 def recent_scores(topic_id: str, limit: int = 9) -> list[float]:
-    """这道题的历史得分序列（供主循环跨进程续接掌握度序列）。
+    """This topic's historical score sequence (for the main loop to continue the mastery sequence across processes).
 
-    只收 evidence_status != "none" 的轮 —— 与主循环「未拿到证据不计入
-    掌握度序列」的规矩一致。分数用与 run_mve 的 history 相同的 verdict
-    映射（correct=1.0 / partial=0.6 / 其他=0.0），不用 score/100：
-    序列内部口径必须一致，variance / consistency 才有意义。
+    Only collect rounds with evidence_status != "none" — consistent with the main loop's rule that rounds
+    without evidence are not counted in the mastery sequence. Scores use the same verdict
+    mapping as run_mve's history (correct=1.0 / partial=0.6 / others=0.0), not score/100:
+    the sequence must use one consistent scale, or variance / consistency are meaningless.
     """
     out: list[float] = []
     for r in load_all():
@@ -141,7 +141,7 @@ def recent_scores(topic_id: str, limit: int = 9) -> list[float]:
 
 
 def last_missing(topic_id: str) -> list[str]:
-    """这道题最近一次判错的缺口评分点 —— 跨运行恢复 failed_dims 用。"""
+    """The missing rubric points from this topic's most recent wrong answer — used to restore failed_dims across runs."""
     out: list[str] = []
     for r in load_all():
         if str(r.get("topic_id") or "") != topic_id:
@@ -156,4 +156,4 @@ def last_missing(topic_id: str) -> list[str]:
 def reset() -> None:
     if LOG.exists():
         LOG.unlink()
-    print(f"已清空运行日志：{LOG}")
+    print(f"Run log cleared: {LOG}")

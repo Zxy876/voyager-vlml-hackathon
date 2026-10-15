@@ -1,24 +1,27 @@
 #!/usr/bin/env python3
-"""同构生成测试题工具（照会议纪要：测试集从已跑通项目同构生成，仅替换赛事编号、成员名称）。
+"""Isomorphic test-question generation tool (per the meeting minutes: test sets are
+isomorphically generated from already-working projects, replacing only the series id, member names, etc.).
 
-原则（纪要原文）：
-  "所有测试题目均从已跑通的项目中同构生成，仅替换赛事编号、成员名称等数据，
-   题目逻辑严谨，不存在不合理的泛化要求。"
+Principles (from the minutes):
+  "All test questions are isomorphically generated from already-working projects, replacing only
+   data such as the series id and member names. The question logic is rigorous, with no
+   unreasonable generalization requirements."
 
-做法（确定性，不经模型）：
-  1. 取源题（已跑通的 TASKS 题，或 --topic 指定）—— 逻辑骨架 = rubric 评分点 + answer_spec
-  2. 从当前库**实查**目标实体：新 series（回合数最多、且 ≠ 源 series）、
-     该 series 内回合数最多的 team、该 series 的 map 列表
-  3. 同构替换：subject 实体值、question 文本、answer_spec.sql 引号内实体值、tool_args
-     —— 只换"数据"，不换"逻辑"
-  4. 跑 VLML0 裁判校验：每个评分点的 dimension 都要在标准答案 facts 里出数
-     （min_cover 门槛）才算"测试题成立"；出不了数的直接丢弃 —— 这保证测试集
-     没有"换库就查不到数"的假题（rib 库种子题 17 个评分点 0 个跑得出数的教训）
+Approach (deterministic, no model):
+  1. Take the source question (a working TASKS question, or one specified via --topic) — the logic skeleton = rubric points + answer_spec
+  2. Look up the target entities in the current database: the new series (most rounds, and ≠ the source series),
+     the team with the most rounds in that series, the series' map list
+  3. Isomorphic replacement: subject entity values, question text, entity values inside answer_spec.sql quotes, tool_args
+     —— only swap "data", not "logic"
+  4. Run the VLML0 referee check: a question "holds up" only if every rubric point's dimension
+     yields a value in the ground-truth facts (min_cover threshold); ones that yield nothing are
+     dropped —— this guarantees the test set contains no fake questions that "can't find data
+     after a database swap" (the lesson of the rib database seed questions: 17 rubric points, 0 yielding data)
 
-用法：
-  python mve/gen_testset.py --topic fb_conversion_analysis          # 生成一道
-  python mve/gen_testset.py --all                                    # 为全部题生成
-  python mve/gen_testset.py --topic fb_conversion_analysis --emit-code   # 打印可入闱代码
+Usage:
+  python mve/gen_testset.py --topic fb_conversion_analysis          # generate one
+  python mve/gen_testset.py --all                                    # generate for all questions
+  python mve/gen_testset.py --topic fb_conversion_analysis --emit-code   # print code ready to paste into the bank
   python mve/gen_testset.py --topic fb_conversion_analysis --json testsets/x.json
 """
 
@@ -35,7 +38,8 @@ from loop_core import AnswerSpec, RubricPoint, Task  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 
-# SQL 关键字集合 —— 裸词替换时的护栏（引号内替换优先，裸词只用于非关键字）
+# SQL keyword set —— guardrail for bare-word replacement (in-quote replacement takes priority;
+# bare words are only used for non-keywords)
 _SQL_KEYWORDS = {
     "SELECT", "FROM", "WHERE", "GROUP", "BY", "ORDER", "LIMIT", "AND", "OR",
     "NOT", "IN", "AS", "ON", "JOIN", "LEFT", "RIGHT", "INNER", "OUTER",
@@ -46,7 +50,7 @@ _SQL_KEYWORDS = {
 
 
 def _db_path() -> Path:
-    """当前库路径（与 anchor._db_path 同一来源）。"""
+    """Current database path (same source as anchor._db_path)."""
     try:
         import anchor as _anchor
         return Path(_anchor._db_path())
@@ -60,7 +64,7 @@ def _connect():
 
 
 def _series_candidates(con, exclude: str) -> list[str]:
-    """库内全部 series，按回合数降序（数据最全的优先），排除源 series。"""
+    """All series in the database, sorted by round count descending (most complete data first), excluding the source series."""
     try:
         rows = con.execute(
             "SELECT CAST(series_id AS VARCHAR) AS sid, COUNT(*) AS n "
@@ -71,7 +75,7 @@ def _series_candidates(con, exclude: str) -> list[str]:
 
 
 def _team_of(con, sid: str) -> str | None:
-    """该 series 内回合数最多的队（与 anchor.pick 同一口径）。"""
+    """The team with the most rounds in this series (same convention as anchor.pick)."""
     try:
         r = con.execute(
             "SELECT t FROM (SELECT winning_team_name AS t FROM rounds "
@@ -86,7 +90,7 @@ def _team_of(con, sid: str) -> str | None:
 
 
 def _maps_of(con, sid: str) -> list[str]:
-    """该 series 内 map 列表（回合数降序）。"""
+    """Map list in this series (round count descending)."""
     try:
         rows = con.execute(
             "SELECT map_name FROM rounds WHERE CAST(series_id AS VARCHAR)=? "
@@ -98,11 +102,11 @@ def _maps_of(con, sid: str) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# 实体抽取与映射
+# Entity extraction and mapping
 # ---------------------------------------------------------------------------
 
 def _collect_entities(task: Task) -> dict[str, list[str]]:
-    """从 rubric subject 收集实体值：{实体键: [值...]}。"""
+    """Collect entity values from rubric subjects: {entity key: [values...]}."""
     out: dict[str, list[str]] = {}
     for p in task.rubric:
         for k, v in (p.subject or {}).items():
@@ -115,12 +119,13 @@ def _collect_entities(task: Task) -> dict[str, list[str]]:
 
 
 def _build_map(task: Task, con, new_series: str) -> dict[str, dict[str, str]]:
-    """构建 {实体键: {旧值: 新值}}。
+    """Build {entity key: {old value: new value}}.
 
-    - series：一律换新 series（源 series 已在候选里排除）
-    - team：换新 series 内回合数最多的队
-    - map：同名图优先（同构数据通常图名一致）；否则按出现顺序配对
-      （保持源题"多图对比"的结构 —— 不同旧图 → 不同新图）
+    - series: always swap to the new series (the source series is already excluded from candidates)
+    - team: swap to the team with the most rounds in the new series
+    - map: prefer same-name maps (isomorphic data usually has consistent map names); otherwise pair them
+      by order of appearance (preserving the source question's "multi-map comparison" structure ——
+      different old maps → different new maps)
     """
     entities = _collect_entities(task)
     m: dict[str, dict[str, str]] = {}
@@ -147,11 +152,11 @@ def _build_map(task: Task, con, new_series: str) -> dict[str, dict[str, str]]:
                 if cand:
                     mm[om] = cand[0]
                     used.add(cand[0])
-                else:                       # 新 series 图太少，保留旧图名
+                else:                       # the new series has too few maps, keep the old map name
                     mm[om] = om
         m["map"] = mm
 
-    # 其他 subject 键（player 等）：能查到对应实体的就查，查不到保持原值
+    # Other subject keys (player, etc.): look them up if a matching entity exists; otherwise keep the original value
     for k, vals in entities.items():
         if k in ("series", "team", "map"):
             continue
@@ -161,7 +166,7 @@ def _build_map(task: Task, con, new_series: str) -> dict[str, dict[str, str]]:
 
 
 def _replace_text(text: str, mapping: dict[str, dict[str, str]]) -> str:
-    """文本替换：所有实体键的 old→new，先长后短（避免子串误伤）。"""
+    """Text replacement: old→new for all entity keys, longest first (avoid substring damage)."""
     pairs: list[tuple[str, str]] = []
     for k, kv in mapping.items():
         for old, new in kv.items():
@@ -175,10 +180,11 @@ def _replace_text(text: str, mapping: dict[str, dict[str, str]]) -> str:
 
 
 def _replace_sql(sql: str, mapping: dict[str, dict[str, str]]) -> str:
-    """SQL 里的实体替换。
+    """Entity replacement inside SQL.
 
-    优先替换引号内的精确值（`'{old}'` / `"{old}"`），再兜底裸词替换
-    （仅当值不是 SQL 关键字 —— 校验阶段还会拦截出不了数的假题）。
+    Replace exact values inside quotes first (`'{old}'` / `"{old}"`), then fall back to bare-word
+    replacement (only when the value is not a SQL keyword —— the validation stage still blocks
+    fake questions that yield no data).
     """
     pairs: list[tuple[str, str]] = []
     for k, kv in mapping.items():
@@ -188,11 +194,11 @@ def _replace_sql(sql: str, mapping: dict[str, dict[str, str]]) -> str:
     pairs.sort(key=lambda p: -len(p[0]))
 
     out = sql
-    # 1) 引号内精确替换
+    # 1) exact in-quote replacement
     for old, new in pairs:
         out = out.replace(f"'{old}'", f"'{new}'")
         out = out.replace(f'"{old}"', f'"{new}"')
-    # 2) 裸词兜底（护栏：跳过 SQL 关键字；单字符/短词不碰）
+    # 2) bare-word fallback (guardrail: skip SQL keywords; leave single-char/short words alone)
     for old, new in pairs:
         if len(old) < 3 or old.upper() in _SQL_KEYWORDS:
             continue
@@ -201,7 +207,7 @@ def _replace_sql(sql: str, mapping: dict[str, dict[str, str]]) -> str:
 
 
 def _clone_task(task: Task, new_topic_id: str, mapping: dict[str, dict[str, str]]) -> Task:
-    """按实体映射克隆一道同构题：换数据，不换逻辑。"""
+    """Clone an isomorphic question per the entity mapping: swap data, not logic."""
     rubric = []
     for p in task.rubric:
         spec = p.answer_spec
@@ -242,14 +248,14 @@ def _clone_task(task: Task, new_topic_id: str, mapping: dict[str, dict[str, str]
 
 
 # ---------------------------------------------------------------------------
-# 裁判校验（测试题成立判据）
+# Referee validation (criterion for a test question holding up)
 # ---------------------------------------------------------------------------
 
 async def _verify(task: Task, min_cover: float) -> dict[str, Any]:
-    """跑 VLML0 裁判，校验每个评分点都出数。
+    """Run the VLML0 referee, checking that every rubric point yields a value.
 
-    覆盖判据：facts 里出现的 dimension 覆盖评分点比例 ≥ min_cover。
-    （维度=口径，事实的 subject/dimension 就是"这道题有没有解"的直接证据。）
+    Coverage criterion: the fraction of rubric points whose dimension appears in the facts ≥ min_cover.
+    (Dimension = convention; the fact's subject/dimension is the direct evidence for "does this question have a solution".)
     """
     import vlml0_referee
     ref = await vlml0_referee.answer(task, force=True)
@@ -273,10 +279,10 @@ async def _verify(task: Task, min_cover: float) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 def _emit_code(task: Task, src: str, series: str, mapping: dict[str, dict[str, str]]) -> str:
-    """打印可入闱的 Task 构造代码（粘贴进题库或测试集即可用）。"""
+    """Print a ready-to-paste Task constructor (paste into the question bank or test set to use)."""
     lines = [
-        f"# 同构测试题：源题 {src} → series {series}",
-        f"# 实体映射：{json.dumps(mapping, ensure_ascii=False)}",
+        f"# Isomorphic test question: source {src} → series {series}",
+        f"# Entity mapping: {json.dumps(mapping, ensure_ascii=False)}",
         f"Task(",
         f"    topic_id={task.topic_id!r},",
         f"    question={task.question!r},",
@@ -321,15 +327,15 @@ def _emit_code(task: Task, src: str, series: str, mapping: dict[str, dict[str, s
 
 
 async def _main(argv: list[str]) -> int:
-    ap = argparse.ArgumentParser(description="同构生成测试题工具")
-    ap.add_argument("--topic", default="", help="源题 topic_id（空=用当前 TASKS 全部题）")
-    ap.add_argument("--all", action="store_true", help="为全部已注册题生成测试题")
-    ap.add_argument("--series", default="", help="指定目标 series（默认自动挑回合数最多的）")
+    ap = argparse.ArgumentParser(description="Isomorphic test-question generation tool")
+    ap.add_argument("--topic", default="", help="source question topic_id (empty = use all current TASKS questions)")
+    ap.add_argument("--all", action="store_true", help="generate test questions for all registered questions")
+    ap.add_argument("--series", default="", help="specify the target series (default: auto-pick the one with most rounds)")
     ap.add_argument("--min-cover", type=float, default=0.8,
-                    help="测试题成立门槛：评分点出数比例（默认 0.8）")
-    ap.add_argument("--json", default="", help="输出 JSON 路径（默认 testsets/<src>__<series>.json）")
-    ap.add_argument("--emit-code", action="store_true", help="打印可入闱 Task 代码")
-    ap.add_argument("--keep-failed", action="store_true", help="连出不了数的假题也写进 JSON")
+                    help="threshold for a test question holding up: fraction of rubric points yielding data (default 0.8)")
+    ap.add_argument("--json", default="", help="output JSON path (default testsets/<src>__<series>.json)")
+    ap.add_argument("--emit-code", action="store_true", help="print ready-to-paste Task code")
+    ap.add_argument("--keep-failed", action="store_true", help="also write fake questions that yield no data into the JSON")
     args = ap.parse_args(argv)
 
     import tasks as tasks_mod
@@ -342,7 +348,7 @@ async def _main(argv: list[str]) -> int:
         elif args.topic:
             sources = [args.topic]
         else:
-            print("需 --topic <topic_id> 或 --all")
+            print("need --topic <topic_id> or --all")
             return 2
 
         out_dir = HERE / "testsets"
@@ -351,11 +357,11 @@ async def _main(argv: list[str]) -> int:
 
         for src in sources:
             if src not in tasks_mod.TASKS:
-                print(f"⚠ 题库里没有 {src}，跳过")
+                print(f"⚠ {src} is not in the question bank, skipping")
                 continue
             task = tasks_mod.TASKS[src]
 
-            # ── 选目标 series：指定优先，否则回合数最多的 ──
+            # ── pick the target series: specified takes priority, otherwise the one with the most rounds ──
             old_series = ""
             for p in task.rubric:
                 if (p.subject or {}).get("series"):
@@ -366,7 +372,7 @@ async def _main(argv: list[str]) -> int:
             else:
                 cands = _series_candidates(con, exclude=old_series)
                 if not cands:
-                    print(f"⚠ 库内没有除 {old_series} 外的 series，{src} 无法同构")
+                    print(f"⚠ no series in the database other than {old_series}; cannot make an isomorphic question for {src}")
                     continue
                 new_series = cands[0]
 
@@ -388,23 +394,23 @@ async def _main(argv: list[str]) -> int:
 
             if v["ok"]:
                 print(f"✅ {src} → {new_id}（series={new_series}）"
-                      f" 裁判出数 {v['facts']} 条 · 维度覆盖 {v['cover']:.0%} "
-                      f"· 轨迹 {v['trajectory']} 步")
+                      f" referee yielded {v['facts']} facts · dimension coverage {v['cover']:.0%} "
+                      f"· {v['trajectory']} trajectory steps")
                 if args.emit_code:
                     print()
                     print(_emit_code(new_task, src, new_series, mapping))
             else:
-                print(f"❌ {src} → {new_id} 出数 {v['facts']} 条，"
-                      f"覆盖 {v['cover']:.0%} < {args.min_cover:.0%} —— 丢弃"
-                      f"（缺维度：{v['missing_dims']}）")
+                print(f"❌ {src} → {new_id} yielded {v['facts']} facts, "
+                      f"coverage {v['cover']:.0%} < {args.min_cover:.0%} —— dropped "
+                      f"(missing dimensions: {v['missing_dims']})")
                 if not args.keep_failed:
                     results.pop()
 
         good = [r for r in results if r["validated"]["ok"]]
         print()
-        print(f"测试题成立 {len(good)}/{len(results)}（门槛 min_cover={args.min_cover}）")
+        print(f"{len(good)}/{len(results)} test questions held up (threshold min_cover={args.min_cover})")
         if results:
-            # 相对路径一律解析到 out_dir 下（避免后台任务 cwd 漂移导致写失败）
+            # Relative paths always resolve under out_dir (avoid write failures from background-task cwd drift)
             if args.json:
                 p = Path(args.json)
                 out_path = p if p.is_absolute() else out_dir / p.name
@@ -412,7 +418,7 @@ async def _main(argv: list[str]) -> int:
                 out_path = out_dir / "testset.json"
             out_path.write_text(
                 json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
-            print(f"已写入 {out_path}")
+            print(f"written to {out_path}")
         return 0
     finally:
         try:

@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
-"""代码化取证：Voyager 产出**调用 MCP 工具的代码**，而不是自己誊抄数字。
+"""Code-based evidence gathering: Voyager produces **code that calls MCP tools**, instead of transcribing numbers itself.
 
-为什么要有这个模块（用户原话）
-------------------------------
-「取证的取我认为要回到 Voyager × MCP：Voyager 的实践调用工具层面和 Voyager ×
-面板；Voyager 的旁路学习部分……这些你要看原版 Voyager 怎么产出相关 js 操作代码。」
+Why this module exists (the user's own words)
+---------------------------------------------
+"For evidence gathering, I believe the 'fetch' has to go back to Voyager × MCP: Voyager's layer of
+practically calling tools, and Voyager × dashboard; Voyager's bypass learning part… for these you
+should look at how the original Voyager produces the relevant JS operation code."
 
-原版 MineDojo/Voyager 的做法（`voyager/agents/action.py`）是一条完整链路：
+The original MineDojo/Voyager's approach (`voyager/agents/action.py`) is a complete chain:
 
-  1. `render_system_message()` 把**控制原语的源码**拼进 system prompt
-     （`load_control_primitives_context(base_skills) + skills`）；
-  2. 模型按 `action_response_format.txt` 输出：
+  1. `render_system_message()` splices the **control primitives' source code** into the system prompt
+     (`load_control_primitives_context(base_skills) + skills`);
+  2. the model outputs per `action_response_format.txt`:
          Explain: ...
          Plan:
          1) ...
@@ -19,39 +20,42 @@
          // helper functions (only if needed, try to avoid them)
          async function yourMainFunctionName(bot) { ... }
          ```
-  3. `process_ai_message()` 用正则抽 ```js 块 → **babel 解析 AST** →
-     遍历 `program.body` 找 `FunctionDeclaration` → 取**最后一个 async 函数**
-     作主函数 → 断言它**唯一参数名为 `bot`** → 拼出
-     `program_code` 与 `exec_code = f"await {name}(bot);"`（解析失败重试 3 次）；
-  4. 执行结果由**解释器**产出，观察**原样**读 events 字段回灌
-     （`render_human_message`）。
+  3. `process_ai_message()` uses a regex to extract the ```js block → **babel parses the AST** →
+     walks `program.body` for `FunctionDeclaration` → takes the **last async function**
+     as the main function → asserts its **sole parameter is named `bot`** → assembles
+     `program_code` and `exec_code = f"await {name}(bot);"` (3 retries on parse failure);
+  4. the execution result is produced by the **interpreter**, and the observation reads the events
+     field back verbatim (`render_human_message`).
 
-对 MVE 的同构映射
-------------------
-| 原版 | MVE |
+Isomorphic mapping onto MVE
+---------------------------
+| Original | MVE |
 |---|---|
-| `bot`（Mineflayer bot，对世界的操作句柄） | `mcp`（VLML MCP 工具句柄） |
-| ```javascript 代码块 | ```python 代码块（宿主语言是 Python） |
-| `babel.parse` 的 AST | `ast.parse` |
-| 最后一个 `async function` | 最后一个 `async def` |
-| 断言唯一参数名 `bot` | 断言唯一参数名 `mcp` |
+| `bot` (Mineflayer bot, the handle for acting on the world) | `mcp` (the VLML MCP tool handle) |
+| ```javascript code block | ```python code block (the host language is Python) |
+| `babel.parse`'s AST | `ast.parse` |
+| the last `async function` | the last `async def` |
+| assert the sole parameter name `bot` | assert the sole parameter name `mcp` |
 | `exec_code = await name(bot);` | `await name(mcp)` |
 
-为什么这一步能治好"取证不全"
-----------------------------
-之前的链路是「Voyager 调工具 → **LLM 读工具返回并誊写成 facts** → 判定读 facts」。
-誊抄环节会丢东西：实测 `eco_win_rate` 在观测里根本不存在，模型照样交了一个
-`None`，判定还把它当成答案去比对 —— 记成"值不可比"。
+Why this step fixes "incomplete evidence gathering"
+---------------------------------------------------
+The previous chain was "Voyager calls the tool → **the LLM reads the tool's return and transcribes it into facts** → grading reads facts".
+The transcription step loses things: observed `eco_win_rate` didn't exist in the observation at all,
+yet the model still submitted a `None`, and grading compared against it as if it were an answer —
+recorded as "value incomparable".
 
-改成代码化之后：**值由代码从原始返回里按路径取**（`dig()`），不经过 LLM 的嘴。
+After the code-based change: **values are fetched from the raw return by path in code** (`dig()`),
+never passing through the LLM's mouth.
 
     async def collect(mcp):
         s = await mcp.match_summary_report(series_id="2843069", team_name="Cloud9")
         p = await mcp.pattern_detection_report(series_id="2843069")
         return {"eco_win_rate": dig(p, "key_metrics.economy.eco.num"), ...}
 
-返回值里的 `None` 就是**没取到**（工具真的没这个字段），而不是"模型抄漏了"。
-这正是《取证通路-原版Voyager对照.md》里那句：**原版"原件进判定"，MVE"誊抄本进判定"**。
+A `None` in the return value means **not fetched** (the tool really doesn't have that field),
+not "the model missed it while copying". That's exactly the line in 《取证通路-原版Voyager对照.md》:
+**the original sends "the original document" into grading, while MVE was sending "a transcript"**.
 """
 
 from __future__ import annotations
@@ -67,15 +71,15 @@ from typing import Any
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
-import vlml_env  # noqa: E402  引导环境
+import vlml_env  # noqa: E402  bootstrap the environment
 
 # --------------------------------------------------------------------------
-# MCP 句柄：对外的 10 个工具（MCP 工具名 == Python 函数名，
-# 唯一例外：对外 query_sql / 实现 execute_custom_sql，见 vlml_env.py:65-67）
+# MCP handle: the 10 externally exposed tools (MCP tool name == Python function name,
+# sole exception: externally query_sql / implemented as execute_custom_sql, see vlml_env.py:65-67)
 # --------------------------------------------------------------------------
 _IMPL_NAME = {"query_sql": "execute_custom_sql"}
 
-# MCP 对外暴露的 10 个工具（vlml/server.py 的 @mcp.tool 列表）
+# The 10 tools MCP exposes externally (the @mcp.tool list in vlml/server.py)
 TOOL_NAMES = [
     "match_summary_report", "match_analysis_report", "match_players_report",
     "match_rounds_report", "match_economy_report", "pattern_detection_report",
@@ -84,8 +88,9 @@ TOOL_NAMES = [
 
 SERIES = "2843069"
 C9 = "Cloud9"
-# 图名锚点。以前只有 SERIES / C9，于是模型把图名**写死**在 SQL 里 ——
-# 换库后那张图根本不存在，技能复用全部跑 0 行（见 `stale_literals` 的实测）。
+# Map-name anchor. There used to be only SERIES / C9, so the model **hard-coded** map names in SQL —
+# after a database switch that map doesn't exist at all, and skill reuse runs 0 rows every time
+# (see the observed behavior of `stale_literals`).
 try:                                                     # pragma: no cover
     import anchor as _anchor
     MAP = str(_anchor.map_name() or "")
@@ -96,13 +101,14 @@ except Exception:
 
 
 def _tool_signatures() -> dict[str, str]:
-    """从真实函数反射签名 —— **绝不手写**。
+    """Reflect signatures from the real functions — **never hand-write them**.
 
-    手写签名的实测后果：`pattern_detection_report` 我写成
-    `(series_id, team_name=None)`，而真实签名是
+    Observed consequence of hand-writing signatures: I wrote `pattern_detection_report` as
+    `(series_id, team_name=None)`, while the real signature is
     `(team_name=None, player_name=None, tournament_name=None,
-      series_ids=None, min_rounds=200)` —— 参数名根本对不上，
-    探针调用直接 TypeError，结构文档拿不到，模型也就只能继续猜。
+      series_ids=None, min_rounds=200)` — the parameter names don't match at all,
+    the probe call throws TypeError outright, the structural docs can't be fetched, and the model
+    is left to keep guessing.
     """
     import inspect
     out: dict[str, str] = {}
@@ -114,14 +120,14 @@ def _tool_signatures() -> dict[str, str]:
     return out
 
 
-# 模块导入时反射一次（vlml_env 已在上面导入）
+# Reflect once at module import (vlml_env is imported above)
 TOOL_SIGNATURES: dict[str, str] = _tool_signatures()
 
 
 class MCPHandle:
-    """给模型代码用的工具句柄（原版 `bot` 的同构物）。
+    """The tool handle for the model's code (the isomorphic counterpart of the original's `bot`).
 
-    每个方法都是 async，返回工具的**原始返回**（不加工、不摘要）。
+    Every method is async and returns the tool's **raw return** (no processing, no summarizing).
     """
 
     def __init__(self) -> None:
@@ -132,18 +138,19 @@ class MCPHandle:
 
     def __getattr__(self, name: str) -> Any:
         if name not in TOOL_SIGNATURES:
-            raise AttributeError(f"MCP 没有工具 {name}")
+            raise AttributeError(f"MCP has no tool {name}")
         fn = self._fn(name)
         if fn is None:
-            raise AttributeError(f"工具 {name} 未加载")
+            raise AttributeError(f"tool {name} not loaded")
 
         async def _call(**kwargs: Any) -> Any:
             try:
                 res = await fn(**kwargs)
             except TypeError as e:
-                # 参数名写错必须报出来 —— 原版靠这条让模型下一轮改正
+                # Wrong parameter names must be surfaced — the original relies on this to make
+                # the model correct itself next round
                 self.calls.append({"tool": name, "args": kwargs,
-                                   "error": f"参数错误 {e}"})
+                                   "error": f"bad arguments {e}"})
                 raise
             self.calls.append({"tool": name, "args": kwargs, "ok": True})
             return res
@@ -152,12 +159,13 @@ class MCPHandle:
 
 
 # --------------------------------------------------------------------------
-# prompt（照原版 action_response_format.txt 的结构）
+# prompt (mirroring the structure of the original's action_response_format.txt)
 # --------------------------------------------------------------------------
-# 主函数名**不要**写成 `your_main_function_name` 这类占位符：实测模型会原样照抄
-# 占位名（存进技能库后叫 `your_main_function_name`，复盘时看不出这是哪题的解法）。
-# 给一个具体的示例名，模型就会照着起一个真名字。
-RESPONSE_FORMAT = """Explain: 一两句话说明你打算怎么取这些数
+# The main function name must **not** be a placeholder like `your_main_function_name`: observed,
+# the model copies placeholder names verbatim (saved into the skill library as
+# `your_main_function_name`, and at review time you can't tell which question's solution it is).
+# Give a concrete example name and the model will invent a real one.
+RESPONSE_FORMAT = """Explain: one or two sentences on how you plan to fetch these numbers
 Plan:
 1) ...
 2) ...
@@ -168,39 +176,41 @@ Code:
 ...
 # main function after the helper functions
 async def collect_stats(mcp):
-    # 正确用法示例：先拿工具返回，再用 dig 按**点分路径**取值
-    p = await mcp.<工具名>(<参数>)
+    # correct usage example: first get the tool's return, then use dig to fetch by **dotted path**
+    p = await mcp.<tool_name>(<args>)
     return {
-        "<维度名>": dig(p, "<照抄结构文档里的路径>"),
+        "<dimension_name>": dig(p, "<path copied from the structural docs>"),
     }
 ```
 """
 
 
 # --------------------------------------------------------------------------
-# 工具返回结构文档（原版 control_primitives 的同构物）
+# Tool return structure docs (the isomorphic counterpart of the original's control_primitives)
 # --------------------------------------------------------------------------
-# 原版把控制原语的**源码**拼进 system prompt，模型因此知道 `bot` 上有哪些方法、
-# 返回什么。MVE 不这样做的话，模型只能**猜**工具返回里的字段名 ——
-# 实测后果：四个维度全部 dig 到 None，因为猜的路径（`economy.pistol_win_rate`）
-# 跟真实路径（`key_metrics.economy.pistol.num`）根本不一样。
+# The original splices the control primitives' **source code** into the system prompt, so the model
+# knows what methods exist on `bot` and what they return. If MVE doesn't do the same, the model can
+# only **guess** the field names in the tool returns — observed consequence: all four dimensions
+# dug to None, because the guessed path (`economy.pistol_win_rate`) is nothing like the real path
+# (`key_metrics.economy.pistol.num`).
 #
-# 这不是"泄题"：给的是**结构**（哪个字段在哪），不是**值**。
-# 真实场景里 agent 拿得到 API 文档，原版 Voyager 也给。
+# This isn't "leaking the answer": what's given is the **structure** (which field is where), not the **value**.
+# In real scenarios an agent has API docs, and the original Voyager provides them too.
 SCHEMA_CACHE = HERE / "tool_schemas.json"
 
-# 抽取上限（写进缓存的全量骨架）。
-# 实测踩过：这里原来是 60，`match_analysis_report` 正好 61 条，于是
-# `key_metrics.team.consistency.kast.num` **在抽取阶段就被砍掉了** ——
-# 模型在 prompt 里永远看不到正确路径，只能在看得见的那 60 条里挑一条
-# 长得像的（`team_comparison.Cloud9.kast.num`，还抄漏了 consistency），
-# 三次 critic 重试也只是在同一条错路上打转。抽取阶段不能砍。
+# Extraction limit (the full skeleton written into the cache).
+# Hit this in practice: this used to be 60, and `match_analysis_report` has exactly 61 entries, so
+# `key_metrics.team.consistency.kast.num` **was cut at the extraction stage** —
+# the model never sees the correct path in the prompt, and can only pick from the visible 60 one
+# that looks similar (`team_comparison.Cloud9.kast.num`, which even drops consistency),
+# and three critic retries just circle on the same wrong path. The extraction stage must not cut.
 _MAX_PATHS = 400
 _MAX_DEPTH = 6
 
-# 展示预算（进 prompt 的条数）。抽取全留 ≠ 全展示：
-# 61 条一起塞进 prompt，正确那条会被淹没在 `team_comparison.NRG.*` 这类
-# 无关分支里（实测模型就是被它们带偏的）。所以按「与本题维度相关」聚焦。
+# Display budget (how many entries enter the prompt). Keeping everything in extraction ≠ showing everything:
+# cramming all 61 entries into the prompt buries the correct one among irrelevant branches like
+# `team_comparison.NRG.*` (observed: the model was led astray by exactly those). So focus on
+# "relevant to this question's dimensions".
 _RENDER_BUDGET = 60   # 一个维度都没命中时的兜底展示条数
 _FOCUS_BUDGET = 40    # 命中维度时的聚焦展示条数
 _SIBLINGS_PER_PARENT = 8   # 同父兄弟的配额
@@ -233,29 +243,31 @@ def load_schemas() -> dict[str, list[str]]:
 
 
 # --------------------------------------------------------------------------
-# 结构文档的「聚焦裁剪」：把正确路径挑出来，而不是把整个返回骨架截断
+# "Focused trimming" of the structural docs: pick out the correct paths, rather than truncating the whole return skeleton
 # --------------------------------------------------------------------------
-# 原版 Voyager 不需要这一步 —— control_primitives 是几十个小函数，全给就行。
-# MVE 不一样：`match_analysis_report` 一个工具就有 61+ 条叶子路径，全给会让
-# 正确那条被埋掉，按固定条数截断又会把正确那条砍掉（两个方向都实测翻过车）。
-# 所以按**维度名**检索：命中优先 → 补同父兄弟（看得见"同层两种混放"）→
-# 补顶层骨架（看得懂整体形状）→ 剩余预算才给其它分支。
+# The original Voyager doesn't need this step — control_primitives is a few dozen small functions,
+# so giving them all is fine. MVE is different: `match_analysis_report` alone has 61+ leaf paths;
+# giving them all buries the correct one, while truncating at a fixed count cuts the correct one
+# (both directions have crashed in practice). So search by **dimension name**: hits first →
+# add same-parent siblings (so "both kinds mixed at the same level" is visible) →
+# add the top-level skeleton (so the overall shape is comprehensible) → only leftover budget goes
+# to other branches.
 _STOP_TOKENS = {"pct", "rate", "ratio", "avg", "mean", "total", "num", "denom",
                 "count", "value", "index", "score", "check", "analysis"}
 
 
 def _tokens(dim: str) -> list[str]:
-    """维度名 → 匹配用的词。去掉口径后缀，只留指标本体。
+    """Dimension name → words for matching. Strip convention suffixes, keep only the metric core.
 
-    `kast_pct` → ["kast"]、`kd_ratio` → ["kd"] —— `pct`/`ratio` 是口径不是
-    指标名，留着会命中一大片无关路径。
+    `kast_pct` → ["kast"], `kd_ratio` → ["kd"] — `pct`/`ratio` are conventions, not
+    metric names; keeping them matches a swath of irrelevant paths.
     """
     parts = re.split(r"[^a-z0-9]+", str(dim or "").lower())
     return [p for p in parts if len(p) >= 2 and p not in _STOP_TOKENS]
 
 
 def _stem_of(path: str) -> str:
-    """去掉 num/denom 口径后缀，留下指标本体：`....kast.num` → `....kast`。"""
+    """Strip the num/denom convention suffix, keep the metric core: `....kast.num` → `....kast`."""
     for suf in (".num", ".denom"):
         if path.endswith(suf):
             return path[: -len(suf)]
@@ -263,17 +275,18 @@ def _stem_of(path: str) -> str:
 
 
 def _uses_declared(used: list[str], declared: str) -> bool:
-    """模型有没有按声明的口径取。
+    """Whether the model fetched per the declared convention.
 
-    百分比指标声明的是 `...kast.num`，模型写 `pct(p, "...kast.num")` 算命中，
-    写 `pct(p, "...kast")` 由 pct 自己推 denom 也算命中（都比到 stem）。
+    For a percentage metric the declaration is `...kast.num`; the model writing
+    `pct(p, "...kast.num")` counts as a hit, and writing `pct(p, "...kast")` letting pct derive
+    denom itself also counts (both compare down to the stem).
     """
     stem = _stem_of(declared)
     return any(u == declared or _stem_of(u) == stem for u in used)
 
 
 def _same_metric(a: str, b: str) -> bool:
-    """两条路径是不是指向同一个指标（`kd` 与 `kd_ratio` 算同一个）。"""
+    """Whether two paths point to the same metric (`kd` and `kd_ratio` count as the same)."""
     ta = set(_tokens(_stem_of(a).rsplit(".", 1)[-1]))
     tb = set(_tokens(_stem_of(b).rsplit(".", 1)[-1]))
     return bool(ta & tb)
@@ -281,7 +294,7 @@ def _same_metric(a: str, b: str) -> bool:
 
 def _candidates(schemas: dict[str, list[str]], dims: list[str],
                 limit: int = 12) -> list[str]:
-    """critic 回灌用：返回里真实存在、名字里含该维度词的路径。"""
+    """For critic feedback: paths that really exist in the return and whose names contain the dimension's words."""
     out: list[str] = []
     for d in dims:
         toks = _tokens(d)
@@ -303,11 +316,11 @@ def _parent(path: str) -> str:
 def focus_paths(paths: list[str], dims: list[str] | None,
                 prefer: list[str] | None = None,
                 budget: int = _FOCUS_BUDGET) -> tuple[list[str], list[str]]:
-    """把 paths 分成（与维度相关的、其余的）。
+    """Split paths into (dimension-relevant, the rest).
 
-    返回的两段都由调用方决定怎么展示 —— 相关那段要**完整**给，
-    其余那段只在预算富余时给（它们是干扰项的来源）。
-    `prefer` 是题干声明的口径路径，永远排最前并打星。
+    How the two segments are displayed is up to the caller — the relevant segment must be given
+    **in full**, while the rest is given only when budget allows (it's the source of distractors).
+    `prefer` is the question's declared convention paths, always sorted first and starred.
     """
     if not paths:
         return [], []
@@ -323,10 +336,10 @@ def focus_paths(paths: list[str], dims: list[str] | None,
     if not hit:
         return [], list(paths)
 
-    # 同父兄弟：让模型看得见「同一个父节点下 kast 是 num/denom、kd 是标量」
-    # 这种混放。只给命中那一条，模型照样会把 kast 的套路套到 kd 上。
-    # 每个父节点限 8 条：不设限的话 `player_performance.0` 一个父节点就能
-    # 拉进 20 条选手字段，把真正要用的那几条淹掉。
+    # Same-parent siblings: let the model see the mixing of "under the same parent node kast is
+    # num/denom while kd is a scalar". Giving only the hit line, the model still applies kast's
+    # pattern to kd. Cap at 8 per parent: uncapped, a single parent like `player_performance.0`
+    # can pull in 20 player fields, drowning out the few actually needed.
     by_parent: dict[str, list[str]] = {}
     for p in paths:
         by_parent.setdefault(_parent(p), []).append(p)
@@ -335,15 +348,17 @@ def focus_paths(paths: list[str], dims: list[str] | None,
         for p in by_parent.get(par, [])[:_SIBLINGS_PER_PARENT]:
             if p not in sibs:
                 sibs.append(p)
-    # 顶层骨架（depth<=1）：让模型知道返回大概长什么样，不至于把路径编出根
+    # Top-level skeleton (depth<=1): let the model know roughly what the return looks like,
+    # so it doesn't invent paths with no root
     head = [p for p in paths if p and "." not in p][:8]
 
     focus: list[str] = []
     for p in hit + sibs + head:
         if p not in focus:
             focus.append(p)
-    # 题干声明的口径排到最前：它在文档里排第几，模型就照第几条写 ——
-    # 实测声明路径排在 `team_comparison.Cloud9...` 后面时，模型挑了后者。
+    # The question's declared conventions sort to the front: whichever line it sits at in the doc,
+    # the model writes to that line — observed: when the declared path sat after
+    # `team_comparison.Cloud9...`, the model picked the latter.
     if prefer:
         focus = [p for p in prefer if p in focus] + \
                 [p for p in focus if p not in set(prefer)]
@@ -351,44 +366,48 @@ def focus_paths(paths: list[str], dims: list[str] | None,
     return focus[:budget], rest
 
 
-_FAIL_TAG = "<探针失败"
+_FAIL_TAG = "<probe failed"
 
 
 def _is_failed(v: list[str] | None) -> bool:
-    """这条缓存是**失败占位**吗（不是真结构）。"""
+    """Is this cache entry a **failure placeholder** (not a real structure)?"""
     return bool(v) and str(v[0]).startswith(_FAIL_TAG)
 
 
 async def probe_schemas(tools: list[str], *, force: bool = False,
                         stats: dict[str, list[str]] | None = None
                         ) -> dict[str, list[str]]:
-    """调一次工具，把它返回的**结构骨架**（叶子路径，不含值）抽出来缓存。
+    """Call each tool once, extract the **structural skeleton** of its return (leaf paths, no values), and cache it.
 
-    `stats`（可选）回填本轮的真实结果，三个桶：
-      `probed_ok` 本轮真探到的 / `failed` 本轮失败且无旧值可留 /
-      `retained` 本轮失败、**沿用了旧缓存**（换库场景下这份是旧库的结构）。
+    `stats` (optional) is backfilled with this round's real results, in three buckets:
+      `probed_ok` really probed this round / `failed` failed this round with no old value to keep /
+      `retained` failed this round, **kept the old cache** (in a database-switch scenario this is
+      the old database's structure).
 
-    ⚠️ 为什么必须把 `retained` 单独分出来（2026-10-14 实测，我自己踩的）：
-      「失败不覆盖成功」保住了好数据，但如果调用方只看"有没有值"来判成功，
-      沿用的旧值会被当成"本轮拿到了" —— 实测打出 `✓ match_analysis_report 61 条`，
-      而那 61 条是**旧库**的旧上限（60）探出来的，本轮其实失败了，
-      新库真实是 306 条。✓ 把"沿用"说成了"拿到"，是标准的自欺。
+    ⚠️ Why `retained` must be split out separately (observed 2026-10-14, I hit this myself):
+      "failure doesn't overwrite success" preserves good data, but if the caller judges success
+      only by "is there a value", the retained old value gets treated as "obtained this round" —
+      observed printing `✓ match_analysis_report 61 entries`, when those 61 were probed under the
+      **old database's** old limit (60), this round actually failed, and the new database really
+      has 306. ✓ calling "retained" "obtained" is textbook self-deception.
 
-    ⚠️ 两个必须守住的"不自欺"点（2026-10-14 服务器实测，都踩过）：
+    ⚠️ Two "no self-deception" points that must be held (both observed on the server on
+    2026-10-14, both hit in practice):
 
-    1. **工具返回 error ≠ 探到了结构**。以前只拦抛异常，于是
-       `{"error": "No data found for series 1058"}` 会被当成正常返回，
-       抽出一条叶子路径 `["error"]` 写进缓存 —— CLI 数它有 1 条就标 ✓，
-       实测 10/10 全"成功"，其中 6 个其实只有一条 error。
-       所以这里显式认 `res["error"]`，把它记成失败。
+    1. **A tool returning error ≠ having probed the structure**. Previously only thrown exceptions
+       were caught, so `{"error": "No data found for series 1058"}` was treated as a normal return,
+       extracting a single leaf path `["error"]` into the cache — the CLI counted 1 entry and
+       marked ✓, with 10/10 observed "successes" of which 6 were actually just one error line.
+       So here `res["error"]` is explicitly recognized and recorded as a failure.
 
-    2. **不能用失败覆盖成功**。上面那 6 条失败把 22 KB 的真实结构缓存
-       （每个工具 38~161 条）覆盖成了垃圾 —— 而它是可再生的，但重建要连库。
-       所以 `force` 重探时，某工具这次失败而**旧缓存是好的**，就留旧的。
-       全军覆没且没有旧值可留时，干脆不落盘（写垃圾不如不写）。
+    2. **Failure must not overwrite success**. Those 6 failures above overwrote a 22 KB real
+       structure cache (38~161 entries per tool) with garbage — and while it's regenerable,
+       rebuilding requires a database connection. So on `force` re-probing, if a tool fails this
+       round but the **old cache is good**, keep the old one. When everything fails with no old
+       value to keep, don't persist at all (writing garbage is worse than writing nothing).
     """
     cache = load_schemas()
-    old = dict(cache)          # 留一份底稿，供"失败不覆盖成功"用
+    old = dict(cache)          # keep a base copy, for "failure doesn't overwrite success"
     todo = [t for t in tools if force or t not in cache]
     if not todo:
         return {t: cache[t] for t in tools if t in cache}
@@ -400,14 +419,16 @@ async def probe_schemas(tools: list[str], *, force: bool = False,
 
     handle = MCPHandle()
     for t in todo:
-        # 按**真实签名**填默认参数：series_id / series_ids / team_name 各自不同，
-        # 靠"字符串里有没有 series_id"这种判断会错（series_ids 也含该子串）。
+        # Fill default args per the **real signature**: series_id / series_ids / team_name each differ,
+        # and judging by "does the string contain series_id" goes wrong (series_ids contains that
+        # substring too).
         args = _default_args(t)
         try:
             fn = getattr(handle, t)
             res = await fn(**args)
             if isinstance(res, dict) and res.get("error"):
-                # 探针参数（取自锚点）在当前库里查不到 —— 拿不到结构，记失败。
+                # The probe args (taken from the anchors) find nothing in the current database —
+                # no structure obtainable, record a failure.
                 raise RuntimeError(str(res["error"])[:120])
             cache[t] = _leaf_paths(res if isinstance(res, dict) else {"result": res})
             if stats is not None:
@@ -418,11 +439,11 @@ async def probe_schemas(tools: list[str], *, force: bool = False,
                 if stats is not None:
                     stats["retained"].append(t)
                 continue
-            cache[t] = [f"{_FAIL_TAG}：{type(e).__name__}: {str(e)[:120]}>"]
+            cache[t] = [f"{_FAIL_TAG}: {type(e).__name__}: {str(e)[:120]}>"]
             if stats is not None:
                 stats["failed"].append(t)
 
-    # 全军覆没（且没有旧值可留）→ 不落盘，别把好缓存写成一堆失败占位
+    # Total wipeout (with no old value to keep) → don't persist; don't overwrite a good cache with failure placeholders
     if todo and all(_is_failed(cache.get(t)) for t in todo):
         return {t: cache[t] for t in tools if t in cache}
 
@@ -432,16 +453,17 @@ async def probe_schemas(tools: list[str], *, force: bool = False,
 
 
 def _sample_player() -> str:
-    """从**当前库**取一个真实选手名，给探针当出参。
+    """Fetch a real player name from the **current database** to use as the probe's argument.
 
-    ⚠️ 为什么不能填空串（2026-10-13 切到 rib 后实测）：
-      `player_profile_report` 的 player_name 是必填，探针原来填 `""`，
-      工具直接返回 `{'error': 'No series found for player '}` ——
-      空串不是"没传"，是传了一个查不到的选手。GRID 库上碰巧能返回结构
-      （大概走了兜底分支），rib 库上就 error，于是 rib 的 schema 重建
-      9/10，`player_profile_report` 只能沿用旧库结构。
-      取真实值才拿得到结构 —— 和 team_name=C9 / series_id=SERIES 同一道理：
-      探针出参必须是**库里存在的实体**。
+    ⚠️ Why an empty string won't do (observed after switching to rib on 2026-10-13):
+      `player_profile_report`'s player_name is required, and the probe used to fill `""`,
+      so the tool directly returned `{'error': 'No series found for player '}` —
+      an empty string isn't "not passed", it's passing a player that can't be found. On the GRID
+      database it happened to return a structure (probably via a fallback branch), but on the rib
+      database it errors, so rib's schema rebuild came out 9/10, with `player_profile_report`
+      only able to retain the old database's structure.
+      Only a real value gets the structure — same reasoning as team_name=C9 / series_id=SERIES:
+      probe arguments must be **entities that exist in the database**.
     """
     try:
         import duckdb
@@ -475,7 +497,7 @@ def _sample_player() -> str:
 
 
 def _default_args(tool: str) -> dict[str, Any]:
-    """按真实参数名给探针填默认值（照 inspect.signature，不靠字符串猜）。"""
+    """Fill probe default values per the real parameter names (following inspect.signature, not string guessing)."""
     import inspect
     fn = getattr(vlml_env, _IMPL_NAME.get(tool, tool), None)
     if fn is None:
@@ -484,16 +506,17 @@ def _default_args(tool: str) -> dict[str, Any]:
     args: dict[str, Any] = {}
     for name, p in params.items():
         required = p.default is inspect._empty
-        # 探针的目的是**拿到返回结构**，所以可选参数也要给几个有意义的：
-        # 实测 pattern_detection_report 全参数都有默认值，一个都不传它会返回
-        # error（拿不到结构）；裁判那边传的是 team_name=C9，照它来。
+        # The probe's goal is to **get the return structure**, so optional parameters need
+        # meaningful values too: observed, pattern_detection_report has defaults for all
+        # parameters, and passing none returns an error (no structure obtainable); the referee
+        # passes team_name=C9, so follow that.
         if name == "team_name":
             args[name] = C9
         elif name == "series_id":
             args[name] = SERIES
         elif name == "player_name" and required:
-            # 必填 → 给当前库里的真实选手（空串会被当成"查不到的选手"报
-            # error，见 _sample_player 的实测注释）
+            # Required → give a real player from the current database (an empty string gets
+            # reported as "player not found" with an error, see _sample_player's observed note)
             args[name] = _sample_player()
         elif name == "sql_query":
             args[name] = "SELECT 1"
@@ -505,7 +528,7 @@ def _default_args(tool: str) -> dict[str, Any]:
 def render_tool_docs(schemas: dict[str, list[str]],
                      dims: list[str] | None = None,
                      prefer: list[str] | None = None) -> str:
-    """把工具返回结构拼进 prompt —— **按维度聚焦，不再按固定条数截断**。"""
+    """Splice the tool return structure into the prompt — **focused by dimension, no longer truncated at a fixed count**."""
     if not schemas:
         return ""
     stars = set(prefer or [])
@@ -515,42 +538,42 @@ def render_tool_docs(schemas: dict[str, list[str]],
         shown = "\n".join(f"    {'★ ' if p in stars else '  '}{p}"
                           for p in focus[:_FOCUS_BUDGET])
         if focus:
-            head = (f"await mcp.{TOOL_SIGNATURES.get(t, t)} 返回结构"
-                    f" —— **与本题维度相关的路径**（★ = 题干声明的口径，"
-                    f"必须用它）：")
+            head = (f"await mcp.{TOOL_SIGNATURES.get(t, t)} return structure"
+                    f" —— **paths relevant to this question's dimensions** (★ = the question's "
+                    f"declared convention, which must be used):")
             blocks.append(f"{head}\n{shown}")
             if rest:
-                # 其余分支只给条数提示，不铺开：铺开就是干扰项
-                # （实测 `team_comparison.NRG.*` 把模型带偏过）。
+                # Other branches get only a count hint, not a full listing: a full listing is
+                # a distractor (observed: `team_comparison.NRG.*` led the model astray).
                 blocks.append(
-                    f"    （另有 {len(rest)} 条与本题维度无关的路径，"
-                    f"多为对手/其它分支 —— 不要用）")
+                    f"    (plus {len(rest)} paths irrelevant to this question's dimensions, "
+                    f"mostly opponent/other branches — do not use)")
         else:
             shown = "\n".join(f"    {p}" for p in paths[:_RENDER_BUDGET])
-            blocks.append(f"await mcp.{TOOL_SIGNATURES.get(t, t)} 返回结构"
-                          f"（叶子路径，共 {len(paths)} 条，展示前 "
-                          f"{min(len(paths), _RENDER_BUDGET)} 条）：\n{shown}")
-    # 光给叶子路径不够 —— 原版 control_primitives 里是有**用法示例**的，
-    # 模型照着示例才会写对。实测踩过：query_sql 的返回是
-    # {"columns": [...], "rows": [[...]]}，模型却写了 res["rounds"]，
-    # 三次重试全栽在同一个 KeyError 上，整题 0%。
+            blocks.append(f"await mcp.{TOOL_SIGNATURES.get(t, t)} return structure"
+                          f" (leaf paths, {len(paths)} total, showing the first "
+                          f"{min(len(paths), _RENDER_BUDGET)}):\n{shown}")
+    # Leaf paths alone aren't enough — the original's control_primitives contain **usage examples**,
+    # and the model only writes correctly by following them. Hit this in practice: query_sql's return
+    # is {"columns": [...], "rows": [[...]]}, yet the model wrote res["rounds"],
+    # and all three retries died on the same KeyError, 0% for the whole question.
     if "query_sql" in schemas:
         blocks.append(
-            "⚠️ query_sql 的返回**不是**按表名组织的字典，固定是：\n"
+            "⚠️ query_sql's return is **not** a dict organized by table name; it is always:\n"
             "    {\"columns\": [\"col1\", \"col2\"], \"rows\": [[v1, v2], [v3, v4]]}\n"
-            "    取值必须走 rows：\n"
+            "    fetching values must go through rows:\n"
             "        res = await mcp.query_sql(sql_query=\"SELECT ...\")\n"
-            "        first_row = res[\"rows\"][0]        # 第一行\n"
-            "        value    = first_row[0]            # 第 0 列\n"
-            "    不要写 res[\"rounds\"] / res[\"rows\"][0][\"cnt\"] —— rows 里是**数组**不是字典。")
+            "        first_row = res[\"rows\"][0]        # the first row\n"
+            "        value    = first_row[0]            # column 0\n"
+            "    do not write res[\"rounds\"] / res[\"rows\"][0][\"cnt\"] — rows holds **arrays**, not dicts.")
     return "\n\n".join(blocks)
 
 
 def graph_hints(dims: list[str] | None, task: Any = None) -> str:
-    """图谱给的「维度 → 由哪个工具产出 + 按哪条路径取值」。
+    """The knowledge graph's "dimension → produced by which tool + fetched via which path".
 
-    没有它模型会选错工具（实测：economy 类维度去调 match_economy_report，
-    而图谱声明它们由 pattern_detection_report 产出）。
+    Without it the model picks the wrong tool (observed: economy-type dimensions went to
+    match_economy_report, while the graph declares they're produced by pattern_detection_report).
     """
     if not dims:
         return ""
@@ -562,46 +585,51 @@ def graph_hints(dims: list[str] | None, task: Any = None) -> str:
     lines = []
     for d in dims:
         prod = list(g.who_produces(d)) if g else []
-        # 必须给到 **value_path**，不能只给工具名。
-        # 实测踩过：只说"kast_pct 由 match_analysis_report 产出"，模型就在
-        # 返回结构里挑了一条长得像的路径 `team_comparison.Cloud9...`，
-        # 而真值口径在 `key_metrics.team...` —— 挑错分支就 dig 到 None。
-        # 给路径属于"给结构"不是"给值"（图谱里早就这么给了），不算泄题。
+        # Must give the **value_path**, not just the tool name.
+        # Hit this in practice: saying only "kast_pct is produced by match_analysis_report", the model
+        # picked a similar-looking path from the return structure `team_comparison.Cloud9...`,
+        # while the true convention is in `key_metrics.team...` — picking the wrong branch digs to None.
+        # Giving paths is "giving structure" not "giving values" (the graph has always given them),
+        # so it doesn't count as leaking the answer.
         node = g.nodes.get(f"dim:{d}") if g else None
         vp = str((node.detail.get("value_path") if node else "") or "")
         if not prod or not vp:
-            # 图谱缺这个维度时的兜底：**题目自己的 rubric 才是权威口径来源**。
-            # 图谱是 tasks.py 的缓存（`build()` 读的就是 answer_spec），
-            # 缓存过期不该让模型退回猜路径 —— 实测 kast_adr_check 就是因为
-            # 图谱没重建，提示整段为空，模型连着三轮都在错路上重试。
+            # Fallback when the graph lacks this dimension: **the question's own rubric is the
+            # authoritative convention source**. The graph is tasks.py's cache (`build()` reads
+            # answer_spec), and a stale cache shouldn't send the model back to guessing paths —
+            # observed: kast_adr_check's hint segment was entirely empty because the graph wasn't
+            # rebuilt, and the model retried on the wrong path for three rounds straight.
             spec = _spec_of(task, d)
             if spec:
                 prod = prod or [spec[0]]
                 vp = vp or spec[1]
-        line = f"    {d} → 调 {' 或 '.join(prod)}" if prod else ""
+        line = f"    {d} → call {' or '.join(prod)}" if prod else ""
         if vp:
-            line += (f"，按路径取值 {vp}"
-                     + ("（百分比：另有同层 .denom 作分母）" if spec_percent(task, d)
-                        else "（标量：dig 到就是最终值，不要再除）"))
+            line += (f", fetch by path {vp}"
+                     + (" (percentage: a sibling .denom at the same level serves as the denominator)"
+                        if spec_percent(task, d)
+                        else " (scalar: whatever dig returns is the final value, do not divide again)"))
         if line:
             lines.append(line)
     if not lines:
         return ""
-    return "\n\n知识图谱声明（维度由哪个工具产出）：\n" + "\n".join(lines)
+    return "\n\nknowledge graph declaration (which tool produces each dimension):\n" + "\n".join(lines)
 
 
 def declared_paths(task: Any, dims: list[str]) -> dict[str, str]:
-    """题干声明的口径：维度 → 取值路径。
+    """The question's declared conventions: dimension → fetch path.
 
-    权威来源是图谱（它由 tasks.py 的 answer_spec 构建），图谱缺这个维度时
-    直接读题目自己的 rubric —— 实测 `kast_adr_check` 加进 tasks.py 后图谱
-    没重建，提示整段为空，模型连着三轮在错分支上重试。
+    The authoritative source is the knowledge graph (built from tasks.py's answer_spec); when the
+    graph lacks a dimension, read the question's own rubric directly — observed: after
+    `kast_adr_check` was added to tasks.py the graph wasn't rebuilt, the hint segment was entirely
+    empty, and the model retried on the wrong branch for three rounds straight.
 
-    为什么必须是**硬约束**而不是提示：`match_analysis_report` 里
-    `team_comparison.*.consistency` 是一支**占位值**分支（Cloud9 与 NRG 的
-    kd_ratio 都是 1.0、adr 分母都是 59），而权威段 `key_metrics.team` 才是
-    1.24 / 109。两条路都"取得到值"，光看"空不空"根本区分不出来 ——
-    所以声明的口径必须拿来筛分支，不能只拿来建议。
+    Why this must be a **hard constraint** rather than a hint: in `match_analysis_report`,
+    `team_comparison.*.consistency` is a **placeholder-value** branch (Cloud9's and NRG's
+    kd_ratio are both 1.0, their adr denominators both 59), while the authoritative section
+    `key_metrics.team` is really 1.24 / 109. Both paths "return a value", and looking only at
+    "empty or not" can't tell them apart at all — so the declared convention must be used to
+    filter branches, not merely to suggest.
     """
     out: dict[str, str] = {}
     try:
@@ -623,7 +651,7 @@ def declared_paths(task: Any, dims: list[str]) -> dict[str, str]:
 
 
 def _spec_of(task: Any, dim: str) -> tuple[str, str] | None:
-    """从**题目自己的 rubric** 读 (tool, value_path) —— 不依赖图谱缓存。"""
+    """Read (tool, value_path) from the **question's own rubric** — no reliance on the graph cache."""
     for p in (getattr(task, "rubric", None) or []):
         if str(getattr(p, "dimension", "") or "") != dim:
             continue
@@ -649,65 +677,70 @@ def spec_percent(task: Any, dim: str) -> bool:
 
 def render_system_message(tool_docs: str = "", dim_hints: str = "",
                           skills_text: str = "") -> str:
-    """照原版 `render_system_message`：把可用的"控制原语"源码拼进 system。
+    """Mirroring the original's `render_system_message`: splice the available "control primitives" source code into the system.
 
-    原版拼的是 `load_control_primitives_context(base_skills) + skills`
-    （`voyager/agents/action.py`）—— **两个都有**：先给稳定 API（原语），
-    再给**已学会技能的源码**。之前这里只有原语那一半（tool_docs + graph_hints），
-    技能库里学到的解法源码没进来，于是"学"和"用"断成两截：
-    旁路学到的源码躺在技能库里，写代码时一句都看不到。
+    The original splices in `load_control_primitives_context(base_skills) + skills`
+    (`voyager/agents/action.py`) — **both**: first the stable API (primitives),
+    then the **source code of already-learned skills**. Previously this had only the primitives half
+    (tool_docs + graph_hints), with the solution source learned into the skill library never coming
+    in, so "learning" and "using" were cut into two pieces: source learned via the bypass sat in
+    the skill library, invisible when writing code.
 
-    `dim_hints` 是图谱给的「哪个维度由哪个工具产出」—— 原版没有这一项
-    （它靠技能库里的 JS 函数名体现），MVE 有图谱就直接给，省得模型选错工具。
+    `dim_hints` is the graph's "which dimension is produced by which tool" — the original has no
+    such item (it's expressed via JS function names in the skill library); MVE has the graph, so
+    give it directly and save the model from picking the wrong tool.
     """
     sigs = "\n".join(f"await mcp.{s}" for s in TOOL_SIGNATURES.values())
-    return f"""你是一名数据分析 agent，通过写代码调用 MCP 工具来取证。
+    return f"""You are a data-analysis agent that gathers evidence by writing code that calls MCP tools.
 
-可用的 MCP 工具（全部 async，返回 dict）：
+Available MCP tools (all async, returning dict):
 {sigs}
 {tool_docs}
 
-取值的辅助函数已经备好（**按指标类型分两个入口，不要混用**）：
-    scalar(obj, "a.b.c")              —— **标量**（如 kd = 1.24）：dig 到就是最终值
-    pct(obj, "a.b.num", "a.b.denom")  —— **百分比**（如 kast）：返回 {{"num":..,"denom":..}}
-    dig(obj, "a.b.0.c")               —— 通用按点分路径取值，取不到返回 None
+Value-fetching helper functions are ready (**two entry points split by metric type, do not mix them**):
+    scalar(obj, "a.b.c")              —— **scalar** (e.g. kd = 1.24): whatever dig returns is the final value
+    pct(obj, "a.b.num", "a.b.denom")  —— **percentage** (e.g. kast): returns {{"num":..,"denom":..}}
+    dig(obj, "a.b.0.c")               —— generic dotted-path fetch, returns None when not found
 
-⚠️ 先判断指标是标量还是百分比，再决定用哪个：
-   同一个父节点下常常两种混着放（实测：consistency 下 kast 是 num/denom、kd 是标量）。
-   把标量路径传给 pct() 会拿到 denom=None —— 那时请改用 scalar()。
-   **不要用别的指标的 num/denom 去除出当前指标**，那是取错，不是算对。
+⚠️ First judge whether the metric is scalar or percentage, then decide which to use:
+   The two are often mixed under the same parent node (observed: under consistency, kast is num/denom
+   while kd is a scalar). Passing a scalar path to pct() gets denom=None — switch to scalar() then.
+   **Do not divide out the current metric using another metric's num/denom** — that's fetching wrong,
+   not computing right.
 
-**路径必须从上面的返回结构里照抄**，不要自己编字段名。
+**Paths must be copied verbatim from the return structure above**; do not invent field names.
 
-⚠️ 取值只能用 dig —— **不要写 obj.get("a.b.c")**：点分路径不是一个 key，
-字典的 key 里没有点号。实测踩过：模型写了
-`r.get("key_metrics.economy.eco.num", 0)`，get 取不到就退回默认值 0，
-于是交上来的是 **0 而不是"没取到"** —— 那比留 None 更糟，
-因为它把"没取到"伪装成了"取到了，值是 0**。
+⚠️ Fetching values may only use dig — **do not write obj.get("a.b.c")**: a dotted path is not a key,
+and dict keys contain no dots. Hit this in practice: the model wrote
+`r.get("key_metrics.economy.eco.num", 0)`, and when get failed it fell back to the default 0,
+so what was submitted was **0 rather than "not fetched"** — which is worse than leaving None,
+because it disguises "not fetched" as "fetched, value is 0".
 
-已预置的常量（直接用，不要再自己定义）：
-    SERIES = "{SERIES}"      # 本场 series_id
-    C9     = "{C9}"          # 队伍名
-    MAP    = "{MAP}"         # 图名
+Predefined constants (use directly, do not redefine them yourself):
+    SERIES = "{SERIES}"      # this series' series_id
+    C9     = "{C9}"          # team name
+    MAP    = "{MAP}"         # map name
 {dim_hints}
 {skills_text}
-硬性要求：
-1. 主函数必须是 async，且**唯一参数名为 mcp**；
-2. 用 return 返回一个 dict，key 是维度名，value 是从工具返回里**取出来的原值**；
-3. **不要把数字手写在代码里** —— 所有值必须来自工具返回；
-4. 取不到就让它返回 None —— 那表示"这个维度不在观测里"，比编一个数有用得多；
-5. **实体值一律用上面的常量，不要写死字面量** —— 这是"技能能不能复用"的
-   分水岭。原版 Voyager 的技能函数是可带参数的（`mineBlock(bot, name,
-   count)`，值在调用点传），所以同一个技能换个材料照样能用；写死了值，
-   技能就退化成"那一次的答案"。实测：技能里写死
-   `series_id=2843069 / winning_team_name='Cloud9' / map_name='Lotus'`，
-   换库之后这些值一个都不存在 → 复用时全部 0 行 → 考核覆盖率回 0
-   （面板：摸底 16% → 结业 0%）。
-   正确写法（用 f-string 拼进 SQL）：
+Hard requirements:
+1. The main function must be async, and its **sole parameter must be named mcp**;
+2. Return a dict via return, with keys being dimension names and values being the **original values fetched** from tool returns;
+3. **Do not hand-write numbers in the code** — all values must come from tool returns;
+4. If it can't be fetched, let it return None — that means "this dimension isn't in the observation",
+   which is far more useful than making up a number;
+5. **Entity values must always use the constants above, never hard-coded literals** — this is the
+   watershed of "can the skill be reused". The original Voyager's skill functions take parameters
+   (`mineBlock(bot, name, count)`, with values passed at the call site), so the same skill works with
+   a different material; hard-coding the value degrades the skill into "the answer to that one time".
+   Observed: hard-coding in a skill
+   `series_id=2843069 / winning_team_name='Cloud9' / map_name='Lotus'`, after a database switch
+   none of these values exist → every reuse returns 0 rows → exam coverage falls back to 0
+   (dashboard: baseline exam 16% → final exam 0%).
+   Correct form (splicing into SQL via f-string):
        f"... WHERE series_id='{{SERIES}}' AND map_name='{{MAP}}'"
-   错误写法：`... WHERE series_id='2843069'`
+   Wrong form: `... WHERE series_id='2843069'`
 
-输出格式：
+Output format:
 {RESPONSE_FORMAT}"""
 
 

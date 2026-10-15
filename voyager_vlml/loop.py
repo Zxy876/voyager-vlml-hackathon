@@ -1,19 +1,21 @@
-"""VLML 同构学习循环的最小驱动（⑤ 冒烟用，面板后置）。
+"""Minimal driver for the VLML-isomorphic learning loop (⑤ smoke-test use; dashboard deferred).
 
-闭环（真正自己出题取数）：
-  curriculum.propose_next_task()   ← 里程碑树选题（种子 → 树干，已完成排除）
+The closed loop (truly generates its own questions and fetches data):
+  curriculum.propose_next_task()   ← milestone-tree topic selection (seed → trunk, completed excluded)
       ↓
-  question.generate(topic)         ← LLM 按里程碑节点**出题**（只出题面，不给答案）
+  question.generate(topic)         ← LLM **poses a question** per milestone node (question text only, no answer)
       ↓
-  action.solve(question)           ← LLM **写 SQL** → VLML MCP(DB/RIB/VLGG) 执行
-                                     失败则带 critique 迭代重写（最多 3 轮）
+  action.solve(question)           ← LLM **writes SQL** → VLML MCP (DB/RIB/VLGG) executes
+                                     on failure, iteratively rewrites with critique (up to 3 rounds)
       ↓
-  critic.check_task_success()      ← **成败 = 有没有真的从 DB 取到数**（不比标准答案）
+  critic.check_task_success()      ← **success/failure = whether data was really fetched from the DB**
+                                     (not compared against a reference answer)
       ↓
-  curriculum.update_exploration_progress()  ← 跑通→解锁里程碑 + 挂 SQL 技能指针
-                                             否则记失败/跳过（带原因）
+  curriculum.update_exploration_progress()  ← on success → unlock milestone + attach SQL skill pointer
+                                             otherwise record failure/skip (with reason)
 
-⚠️ 整条链里没有 VLML 判决、没有覆盖率、没有参考答案 —— 那些是给人看的，只在面板。
+⚠️ Nowhere in the whole chain is there a VLML verdict, coverage, or reference answer —— those are
+   for humans only, and live only in the dashboard.
 """
 
 from __future__ import annotations
@@ -28,10 +30,10 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-# run_log / skill_store 住在 `mve/` 下（面板读的就是那两个文件）。
-# 驾驶舱从**仓库根**拉起本脚本（cwd=仓库根），sys.path[0] 是脚本所在目录，
-# 不是 mve/ —— 不加这一段，`import run_log` 会被下面那层 except 静默吞掉，
-# 表现是「题跑通了、技能也存了，但面板曲线一条不动」。
+# run_log / skill_store live under `mve/` (the dashboard reads exactly those two files).
+# The cockpit launches this script from the **repo root** (cwd=repo root); sys.path[0] is the script's
+# own directory, not mve/ —— without this block, `import run_log` gets silently swallowed by the
+# except below, and the symptom is "questions ran, skills got saved, but the dashboard curve doesn't move".
 _MVE_DIR = _REPO_ROOT / "mve"
 if str(_MVE_DIR) not in sys.path:
     sys.path.insert(0, str(_MVE_DIR))
@@ -42,29 +44,29 @@ from voyager_vlml.agents.curriculum import VLMLCurriculumAgent  # noqa: E402
 from voyager_vlml.agents.question import VLMLQuestionAgent  # noqa: E402
 from voyager_vlml.env.vlml_mcp import VLMLMCPEnv  # noqa: E402
 
-# ---- 停止信号（同构原版 voyager.py:_stop_requested / run_voyager_learn.py:request_stop）----
-# 原版：面板「停止」→ SIGTERM → request_stop() → 主循环**在当前任务结束后**退出，
-# 不硬杀（技能已按任务落盘）。
-# ⚠️ 学习循环本来就是**不带停**的（原版 `while True` + 只有 iteration 上限），
-#    停止是外部动作，不是循环内部的终止条件。
+# ---- stop signal (isomorphic to original voyager.py:_stop_requested / run_voyager_learn.py:request_stop) ----
+# Original: dashboard "stop" → SIGTERM → request_stop() → the main loop exits **after the current task ends**,
+# without a hard kill (skills are already persisted per task).
+# ⚠️ The learning loop is inherently **non-stopping** (original `while True` + only an iteration cap),
+#    stopping is an external action, not a termination condition inside the loop.
 _STOP = {"requested": False}
-_MAX_ITERATIONS = 0      # 不停模式下的总题数上限（0 = 不限；原版 --max-iterations 默认 160）
+_MAX_ITERATIONS = 0      # total question cap in non-stop mode (0 = unlimited; original --max-iterations defaults to 160)
 
-# ---- 循环自己的状态文件（与面板状态文件**分开**）----
-# 用户原话：「循环与面板的运行状态写在两个不同的状态文件里」。
-# 为什么必须分开（实测踩的耦合）：面板状态（mve/pilot_state.json）是**人的操作
-# 记录**（谁点了启动、点了停止、pid 多少）；循环状态是**循环自己的心跳**（跑到
-# 第几轮、这轮工具成没成、连续几轮没拿到证据）。混在一个文件里会有两种互相
-# 污染的写法：
-#   · 循环每轮重写状态文件 → 人点「停止」写的 stop_requested 位可能被覆盖回去；
-#   · 面板为了显示 pid 重写文件 → 把循环刚写的"这轮没取到数"抹掉。
-# 分家之后：面板**只读**循环状态，两个文件的写入方各只有一个。
+# ---- the loop's own state file (kept **separate** from the dashboard's state file) ----
+# User's exact words: "the loop's and the dashboard's running states are written into two different state files".
+# Why they must be separate (a coupling pitfall hit in practice): the dashboard state (mve/pilot_state.json)
+# is the **human's operation log** (who clicked start, who clicked stop, what pid); the loop state is the
+# **loop's own heartbeat** (which round it's on, whether this round's tool calls succeeded, how many
+# consecutive rounds fetched no evidence). Mixing them in one file creates two mutually polluting writes:
+#   · the loop rewrites the state file every round → the stop_requested bit the human clicked may get overwritten;
+#   · the dashboard rewrites the file to show pid → it erases the "no data fetched this round" the loop just wrote.
+# After the split: the dashboard **only reads** the loop state, and each file has exactly one writer.
 LOOP_STATE = _MVE_DIR / "loop_state.json"
 
-# 运行期新生成的图谱节点落盘处 —— **与消费侧同一份文件**
-# （消费侧登记的是 `consume_<hash8>`，这里登记的是 `runtime_<hash8>`）。
-# 为什么不各存一份：掌握度的分母是「图谱节点 + 这里登记的能力项」，
-# 分两个文件迟早会出现两边口径对不上的账。
+# Where runtime-generated knowledge-graph nodes are persisted —— **the same file as the consumption side**
+# (the consumption side registers `consume_<hash8>`, here we register `runtime_<hash8>`).
+# Why not store them separately: the denominator of mastery is "graph nodes + the capability items registered
+# here", and two files would eventually drift into inconsistent tallies.
 RUNTIME_TOPICS = _MVE_DIR / "runtime_topics.json"
 
 
@@ -80,15 +82,16 @@ def _load_runtime_topics() -> dict[str, Any]:
 
 
 def _save_runtime_topic(node: dict[str, Any]) -> None:
-    """把一个运行期生成的图谱节点**持久化**。
+    """Persist one runtime-generated knowledge-graph node.
 
-    ⚠️ 为什么必须落盘（2026-10-13 服务器实跑 12 轮后发现）：
-      以前 `_generate_new_task` 只往内存里的 `curr.graph.topics[tid]` 塞，
-      进程一退就没了。结果是：技能库拿到了 14 条新配方、MasteryStore 记了 34 个
-      completed，但**图谱节点一个都没留下** —— 重开之后 `select_next` 看不到
-      这些已完成节点，于是又 exhausted、又去生成新题、又重新验一遍同样的题。
-      用户设计里「任务跑通 → 图谱节点改为已完成（**不重复规划**）」就落空了：
-      节点没存，等于每次都得重新规划。
+    ⚠️ Why it must be persisted (found after 12 rounds of real server runs on 2026-10-13):
+      Previously `_generate_new_task` only stuffed `curr.graph.topics[tid]` in memory,
+      so it vanished when the process exited. The result: the skill library got 14 new recipes,
+      MasteryStore recorded 34 completed, but **not a single graph node was left behind** ——
+      on restart `select_next` can't see these completed nodes, so it's exhausted again, generates
+      new questions again, and re-verifies the same questions.
+      The user's design of "task succeeds → graph node marked completed (**no re-planning**)" is thus
+      voided: with no node saved, every restart must re-plan from scratch.
     """
     try:
         import json as _json
@@ -100,11 +103,11 @@ def _save_runtime_topic(node: dict[str, Any]) -> None:
         RUNTIME_TOPICS.write_text(
             _json.dumps(reg, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception as e:  # pragma: no cover
-        print(f"  （运行期节点落盘失败：{type(e).__name__}: {e}）")
+        print(f"  (runtime node persistence failed: {type(e).__name__}: {e})")
 
 
 def _inject_runtime_topics(curr: Any) -> int:
-    """把落盘的运行期节点装回课程的内存图谱（重开后不必重造同一批题）。"""
+    """Load the persisted runtime nodes back into the curriculum's in-memory graph (no need to regenerate the same batch after restart)."""
     nodes = [v for k, v in _load_runtime_topics().items()
              if isinstance(v, dict) and str(k).startswith("runtime_")]
     n = 0
@@ -117,7 +120,7 @@ def _inject_runtime_topics(curr: Any) -> int:
 
 
 def _write_loop_state(**kw: Any) -> None:
-    """把循环心跳写到 `mve/loop_state.json`（只有循环写，面板只读）。"""
+    """Write the loop heartbeat to `mve/loop_state.json` (only the loop writes; the dashboard only reads)."""
     import json as _json
     import time as _time
 
@@ -135,12 +138,12 @@ def _write_loop_state(**kw: Any) -> None:
         pass
 
 
-# 错误分诊的关键词表。**顺序有意义**：基础设施类先判，因为它看起来也像
-# "does not exist"（`database does not exist` vs `column "x" does not exist`）。
+# Keyword table for error triage. **Order matters**: infrastructure-class is judged first, because it can also
+# look like "does not exist" (`database does not exist` vs `column "x" does not exist`).
 _INFRA_ERRORS = (
     "cannot open database", "database does not exist", "io error",
     "catalog error", "permission denied", "no module named",
-    "未装载的工具", "connection", "failed to open", "file not found",
+    "unloaded tool", "connection", "failed to open", "file not found",
 )
 _SQL_ERRORS = (
     "parser error", "syntax error", "binder error", "conversion error",
@@ -160,24 +163,29 @@ def _is_sql_error(err: str) -> bool:
 
 
 def _classify_no_evidence(observations: list[dict[str, Any]]) -> str:
-    """这轮为什么没拿到证据 —— 让观察者能分清「它没学会」和「链路根本没跑通」。
+    """Why no evidence was fetched this round —— so an observer can tell "it didn't learn" from
+    "the pipeline never ran at all".
 
-    ⚠️ 用户明确要求的可区分性（原话：「面板要用可区分信息让观察者分辨
-      '它没学会' 和 '链路根本没跑通'」）。四种结果的处置完全不同：
-        · `linkage`   —— 一次工具都没调成功，且错误是**基础设施类**（打不开库、
-                         工具没装载、模块缺失）。改配置/依赖能修，跟"学没学会"无关。
-        · `sql_error` —— 工具**跑起来了**，是它写的 SQL 有问题（Parser/Binder
-                         错误）。这是**它**的水平问题，不是链路。
-                         ⚠️ 这一档是 2026-10-13 补的：之前把「SQL 语法/列名写错」
-                         一律归成 `linkage`，于是面板让人去查"库在不在、工具装没装"
-                         —— 查半天查的是根本没错的地方。
-        · `empty`     —— SQL 跑通了但取到 0 行：题面在库里没数据，或过滤条件过严。
-        · `unproven`  —— 取到数了但判据没过（critic 判定为没取到有效证据）。
-    不停循环**不会因为任何一种而停下** —— 这里只负责如实标出来。
+    ⚠️ The user explicitly required this distinguishability (exact words: "the dashboard must use
+      distinguishable information to let the observer tell 'it didn't learn' from 'the pipeline never
+      ran at all'"). The four outcomes are handled completely differently:
+        · `linkage`   —— not a single tool call succeeded, and the error is **infrastructure-class**
+                         (can't open the DB, tool not loaded, module missing). Fixable via config/deps;
+                         unrelated to "did it learn or not".
+        · `sql_error` —— the tool **did run**, but the SQL it wrote is wrong (Parser/Binder error).
+                         This is **its** competence issue, not a pipeline issue.
+                         ⚠️ This tier was added on 2026-10-13: previously "wrong SQL syntax/column name"
+                         was all classified as `linkage`, so the dashboard told people to check
+                         "is the DB there, is the tool loaded" —— checking places that were perfectly fine.
+        · `empty`     —— SQL ran but fetched 0 rows: the question has no data in the DB, or the filter
+                         is too strict.
+        · `unproven`  —— data was fetched but the criterion didn't pass (the critic judged no valid
+                         evidence was obtained).
+    The non-stop loop **never stops for any of these** —— this function only labels them honestly.
     """
     obs = observations or []
     if not obs:
-        return "linkage"          # 连一次调用都没发出去 = 环境根本没转起来
+        return "linkage"          # not even one call was issued = the environment never spun up
     ok_n = sum(1 for o in obs if o.get("ok"))
     if ok_n <= 0:
         errs = [str(o.get("error") or "") for o in obs]
@@ -185,7 +193,7 @@ def _classify_no_evidence(observations: list[dict[str, Any]]) -> str:
             return "linkage"
         if any(_is_sql_error(e) for e in errs):
             return "sql_error"
-        return "linkage"          # 工具失败但认不出原因 → 按最坏情况当链路问题
+        return "linkage"          # tool failed but cause unknown → treat as a linkage problem in the worst case
     rows = sum(int(o.get("rows") or 0) for o in obs if o.get("ok"))
     if rows <= 0:
         return "empty"
@@ -197,7 +205,7 @@ def _install_stop_handler() -> None:
 
     def _handler(signum, _frame):
         _STOP["requested"] = True
-        print(f"\n（收到信号 {signum}：跑完当前这道题就停）", flush=True)
+        print(f"\n(received signal {signum}: finish the current question then stop)", flush=True)
 
     for sig in (getattr(signal, "SIGTERM", None), getattr(signal, "SIGINT", None)):
         if sig is None:
@@ -211,15 +219,16 @@ def _install_stop_handler() -> None:
 def _retrieve_skills(
     tid: str, question: str, quiet: bool = False
 ) -> list[dict[str, Any]]:
-    """照原版 `voyager.py:195`：这一趟**要写 SQL 之前**，先检索已学会的技能。
+    """Following the original `voyager.py:195`: **before** this turn writes SQL, first retrieve learned skills.
 
-    原版是 `skills = self.skill_manager.retrieve_skills(query=self.context)`，
-    每次 rollout 都做，不管这个任务是新课程给的还是自己新想的。这里照做：
-    检索到的配方会拼进 system prompt（同构 `action.py:94` 的 `+ skills`），
-    所以**注入了才算一次 hit** —— 直接在这里 mark_used。
+    The original is `skills = self.skill_manager.retrieve_skills(query=self.context)`,
+    done on every rollout, whether the task came from the curriculum or was invented fresh. We follow
+    suit: the retrieved recipes are concatenated into the system prompt (isomorphic to `action.py:94`'s
+    `+ skills`), so **only an injection counts as a hit** —— we mark_used right here.
 
-    库里一条都没有 / 一条都不相关（跨题相似度门槛）/ 检索出错 → 返回空，
-    不打扰主流程：技能库为空是冷启动的常态，不该被当成异常。
+    No recipes at all / none relevant (cross-question similarity threshold) / retrieval error → return
+    empty, without disturbing the main flow: an empty skill library is the normal state of cold start
+    and should not be treated as an exception.
     """
     try:
         import skill_store
@@ -233,13 +242,13 @@ def _retrieve_skills(
             skill_store.mark_used(keys)
             if not quiet:
                 print(
-                    f"  注入 {len(keys)} 条已学配方："
-                    + "、".join(k.split("::")[0] for k in keys[:3])
+                    f"  injected {len(keys)} learned recipe(s): "
+                    + ", ".join(k.split("::")[0] for k in keys[:3])
                     + (" …" if len(keys) > 3 else "")
                 )
         return got
     except Exception as e:  # pragma: no cover
-        print(f"  （检索技能库失败：{type(e).__name__}: {e}）")
+        print(f"  (skill library retrieval failed: {type(e).__name__}: {e})")
         return []
 
 
@@ -247,27 +256,30 @@ async def _generate_new_task(curr: Any, env: Any, act: Any = None,
                              max_tries: int = 3, max_iters: int = 4
                              ) -> tuple[str, str, list[dict[str, Any]], str,
                                         list[str]]:
-    """生成一个新任务，**并且先验证它真的能从库里取到数**。
+    """Generate a new task, **and first verify it can really fetch data from the DB**.
 
-    返回 (topic_id, 题面, 验题时取到的观察, 验题用的 SQL)。取不到就换一个再生成，
-    全都取不到返回空串 —— 由调用方如实报"这轮没生成出可做的题"。
+    Returns (topic_id, question, observations fetched during verification, SQL used for verification).
+    If nothing can be fetched, try another and regenerate; if none can be fetched, return empty strings
+    —— the caller honestly reports "no doable question was generated this round".
 
-    ⚠️ 为什么必须先验题（2026-10-13 用户贴的日志）：连跑 3 轮，3 轮都是
-      generated_new_task，其中 2 轮失败。失败原因**不是模型不会写 SQL**，
-      是题面本身在库里答不了：
-        · 「每个回合哪款武器被使用得最多」→ 去 JOIN `weapon_types`（库里没这张表）
-        · 「各地图平均得分率」→ 用 `team_score_before / enemy_score_before`（列不存在）
-      旧题库出题有七道验题闸（`question_gen`），而**运行期生成的新题一道都没有** ——
-      生成完直接拿去跑，跑不通记一次失败 → attempts+1 → 3 次就 stale →
-      课程里可选节点越来越少 → 又去生成新题。这是恶性循环，必须从源头掐掉。
+    ⚠️ Why verification is mandatory first (from logs the user pasted on 2026-10-13): 3 consecutive
+      rounds, all generated_new_task, 2 of them failed. The failure cause was **not** that the model
+      can't write SQL, but that the question itself is unanswerable in the DB:
+        · "which weapon is used most in each round" → JOIN `weapon_types` (no such table in the DB)
+        · "average score rate per map" → uses `team_score_before / enemy_score_before` (columns don't exist)
+      The old question bank had seven verification gates (`question_gen`), but **not a single one for
+      runtime-generated questions** —— generated and run immediately, a failure is recorded → attempts+1
+      → stale after 3 → fewer selectable nodes in the curriculum → generate new questions again. A vicious
+      cycle that must be cut off at the source.
 
-    ⚠️ 为什么 id 要按题面哈希（同一个日志挖出来的第二个 bug）：
-      旧写法是 `runtime_{n}` 递增，而 n 只在**内存**的 `graph.topics` 里数 ——
-      进程一重启就回到 `runtime_1`。于是「问武器」和「问平均伤害」两道完全不同的题
-      共用同一个 id，失败账互相叠加（实测 `runtime_1` attempts=5、fails=5），
-      新题一出生就背着上一道题的账，凑够 3 次立刻 stale。
-      改成 `runtime_<md5(题面)[:8]>`：同题同 id、异题异 id（与消费侧
-      `consume_<hash8>` 同一套做法）。
+    ⚠️ Why id is hashed from the question (the second bug dug out of the same log):
+      The old approach was `runtime_{n}` incrementing, but n was only counted in the **in-memory**
+      `graph.topics` —— on restart it went back to `runtime_1`. So "ask about weapons" and
+      "ask about average damage", two completely different questions, shared the same id, and their
+      failure tallies piled onto each other (in practice `runtime_1` attempts=5, fails=5); a new question
+      is born carrying the previous question's tally and goes stale instantly once it hits 3.
+      Changed to `runtime_<md5(question)[:8]>`: same question → same id, different question → different id
+      (same approach as the consumption side's `consume_<hash8>`).
     """
     import hashlib
 
@@ -291,30 +303,33 @@ async def _generate_new_task(curr: Any, env: Any, act: Any = None,
                 {
                     "role": "system",
                     "content": (
-                        "你是 Valorant 电竞数据分析的课程设计者。当前库的知识点都被拿下或"
-                        "暂时拿不下了，请**新提一个**还能用 SQL 从库里取数回答的知识点。\n"
-                        "⚠️ 只提**库里真有数据**的知识点：只能引用下面 schema 里出现过的"
-                        "表名与列名，不许凭印象编表名/列名（实测编过 `weapon_types`、"
-                        "`team_score_before`，题面看着合理但库里根本没有）。\n"
-                        "只返回 JSON：{\"name\": \"知识点名（含粒度，如 回合粒度（rounds））\","
-                        " \"question\": \"一个具体题面\", \"skills\": [\"一两条取数要点\"]}"
+                        "You are a curriculum designer for Valorant esports data analysis. The current "
+                        "database's topics have all been conquered or are temporarily unconquerable, so "
+                        "**propose a new** topic that can still be answered with SQL from the database.\n"
+                        "⚠️ Only propose topics for which the database **actually has data**: you may only "
+                        "reference table and column names that appear in the schema below; do not invent "
+                        "table/column names from memory (in practice we invented `weapon_types`, "
+                        "`team_score_before` — they looked reasonable but don't exist in the DB).\n"
+                        "Return only JSON: {\"name\": \"topic name (include the grain, e.g. round grain (rounds))\", "
+                        " \"question\": \"a concrete question text\", \"skills\": [\"one or two data-retrieval points\"]}"
                     ),
                 },
                 {
                     "role": "user",
                     "content": (
-                        "当前库 schema：\n"
+                        "Current DB schema:\n"
                         f"{schema}\n\n"
-                        "已有的知识点不要重复。\n"
-                        + ("下面这些题面刚试过，库里取不到数，**不要**再提类似的：\n- "
+                        "Don't repeat existing topics.\n"
+                        + ("The following question texts were just tried and fetched no data from the DB; "
+                           "**do not** propose similar ones:\n- "
                            + "\n- ".join(tried) + "\n" if tried else "")
-                        + "请只返回 JSON。"
+                        + "Return only JSON."
                     ),
                 },
             ],
             temperature=0.7,
         )
-        name = str(out.get("name") or "").strip() or "运行期新任务"
+        name = str(out.get("name") or "").strip() or "runtime new task"
         question = str(out.get("question") or "").strip()
         skills = [str(s) for s in (out.get("skills") or [])][:2]
         if not question:
@@ -322,22 +337,24 @@ async def _generate_new_task(curr: Any, env: Any, act: Any = None,
 
         tid = "runtime_" + hashlib.md5(question.encode("utf-8")).hexdigest()[:8]
         if tid in curr.graph.topics:
-            # 同一道题以前生成过 → 复用它的节点，不重复验、也不重复建
-            # （没写 SQL 就没有任何注入，keys 给空，别虚报一次复用）
+            # The same question was generated before → reuse its node; don't re-verify or re-create it
+            # (no SQL was written so there's no injection; give empty keys, don't falsely report a reuse)
             return tid, question, [], "", []
 
-        # —— 验题就当正式那趟跑（同一个 agent、同样的迭代次数）——
-        # ⚠️ 别用更严的标准筛题：一开始写成 `max_iters=1`（只迭代一次就判生死），
-        #    结果连出 3 题全被刷掉（"能学会但第一次写不对"的题被误杀）。
-        #    验题必须与正式跑同标准，否则等于自杀式筛选。
-        #    而且跑通就直接复用这趟结果，不重复烧一次 LLM + DB。
-        # 取不到数 → 题面不合格，换一个再来；**不记失败**（它还没进课程）
+        # —— Verification runs as the real turn (same agent, same iteration count) ——
+        # ⚠️ Don't filter questions with a stricter standard: it was initially written as `max_iters=1`
+        #    (judge life-or-death after a single iteration), and 3 questions in a row all got filtered out
+        #    ("learnable but wrong on the first try" questions were wrongly killed).
+        #    Verification must use the same standard as the real run, otherwise it's suicidal filtering.
+        #    And if it succeeds we reuse this turn's result directly, without burning another LLM + DB.
+        # No data fetched → the question is invalid, try another; **don't record a failure** (it hasn't
+        # entered the curriculum yet)
         #
-        # ⚠️ 这里**也要**检索技能库：原版是每次 rollout 都 retrieve
-        #    （`voyager.py:195`），不管任务是课程给的还是自己新想的。
-        #    而种子课程跑完之后，走的**全是**这条生成路径 —— 实测进度 32 之后
-        #    连跑 4 轮、4 轮都是 generated_new_task。不在这里检索，
-        #    复用链就等于永远不转（技能库 28 条一条都用不上）。
+        # ⚠️ We **also** retrieve the skill library here: the original retrieves on every rollout
+        #    (`voyager.py:195`), whether the task came from the curriculum or was invented fresh.
+        #    After the seed curriculum is exhausted, **everything** goes through this generation path ——
+        #    in practice after progress 32, 4 consecutive rounds were all generated_new_task. If we don't
+        #    retrieve here, the reuse chain never turns (all 28 skill-library entries go unused).
         gen_hits = _retrieve_skills(tid, question)
         gen_keys = [str(s.get("key") or "") for s in gen_hits]
         obs, sql = await act.solve(
@@ -348,23 +365,25 @@ async def _generate_new_task(curr: Any, env: Any, act: Any = None,
             node = {
                 "id": tid,
                 "name": name,
-                "chapter": "运行期生成",
-                "depth": 9,          # 排在种子之后
+                "chapter": "runtime-generated",
+                "depth": 9,          # ranked after the seeds
                 "difficulty": 0.5,
                 "skills": skills,
                 "examples": [{"prompt": question}],
-                "prerequisites": [],  # 无前置 → 立即可选
+                "prerequisites": [],  # no prerequisites → immediately selectable
                 "source": "practice",
             }
             curr.graph.topics[tid] = node
-            _save_runtime_topic(node)   # 落盘：不落盘重开就得重造同一批题
+            _save_runtime_topic(node)   # persist: without persistence, restart would rebuild the same batch
             return tid, question, list(obs or []), str(sql or ""), gen_keys
         tried.append(question)
-        print(f"  （新题验题没取到数，换一个：{question[:50]}）")
+        print(f"  (new question failed verification, trying another: {question[:50]})")
 
-    # 连续几次都生成不出能从库里取到数的题 —— 如实返回空，不硬凑一道去跑。
-    # ⚠️ 这一趟的注入已经记进 hits 了（mark_used 在 _retrieve_skills 里就地做），
-    #    但**没有**对应的 mark_result —— 注入了却没帮上，正是要它沉底的信号。
+    # Several consecutive attempts failed to generate a question fetchable from the DB —— return empty
+    # honestly, don't force a question to run.
+    # ⚠️ This turn's injection is already recorded in hits (mark_used is done in-place in _retrieve_skills),
+    #    but there is **no** corresponding mark_result —— injected but didn't help, exactly the signal
+    #    that should sink it to the bottom.
     return "", "", [], [], []
 
 
@@ -376,22 +395,22 @@ async def run_one_round(
     curr: Any = None,
     env: Any = None,
 ) -> dict[str, Any]:
-    """跑一轮：里程碑选题 → LLM 出题 → LLM 写 SQL 取数 → DB 取证判据 → 改写图谱。"""
+    """Run one round: milestone topic selection → LLM poses question → LLM writes SQL to fetch data → DB evidence criterion → rewrite the graph."""
     env = env or VLMLMCPEnv()
     if curr is None:
         curr = VLMLCurriculumAgent(scope=scope)
         n = _inject_runtime_topics(curr)
         if n:
-            print(f"  （从上次的运行期节点里装回 {n} 个，不重造同一批题）")
+            print(f"  (loaded {n} runtime nodes from last time, not rebuilding the same batch)")
     act = VLMLActionAgent(env=env)
     crit = VLMLCriticAgent()
 
-    # ---- 选题（里程碑树）----
+    # ---- topic selection (milestone tree) ----
     generated = False
     gen_question = ""
     pre_obs: list[dict[str, Any]] = []
     pre_sql = ""
-    # 验题那一趟注入了哪些已学配方（由 _generate_new_task 带回来，别重复记 hit）
+    # which learned recipes were injected during verification (brought back by _generate_new_task; don't double-count the hit)
     gen_keys: list[str] = []
     if topic_id:
         tid, reason = topic_id, "explicit"
@@ -399,20 +418,23 @@ async def run_one_round(
         nxt = curr.propose_next_task()
         tid, reason = nxt["topic_id"], nxt["reason"]
         if not tid:
-            # 范围内已无可拿下的任务 → 生成一个**并先验题**（设计：整轮不结束）
+            # no conquerable task left in range → generate one **and verify it first** (design: the whole round doesn't end)
             tid, gen_question, pre_obs, pre_sql, gen_keys = await _generate_new_task(
                 curr, env, act=act, max_iters=max_iters)
             reason, generated = "generated_new_task", True
             if not tid:
-                # 连续几次生成的新题都从库里取不到数 —— 如实报，不硬跑一道充数。
-                # 以前的写法是"生成完就去跑"，跑不通记一次失败，失败会喂 stale，
-                # stale 会把课程越堵越死（实测 3 轮全 generated_new_task、2 轮失败）。
-                print("  （连续生成的新题都从库里取不到数，本轮不跑，也不记失败）")
-                # ⚠️ 字段必须与正常返回**完全对齐**。2026-10-13 服务器实跑踩到：
-                #   跑满课程后连续生成新题都验不过 → 走进这条早退 → 返回里漏了
-                #   `progress`/`critique` → run_rounds 打印时 `r['progress']`
-                #   KeyError → **整个不停循环当场崩掉**。不停循环里"空转一圈"
-                #   是设计内的常态（设计：整轮不结束），它绝不能成为致命路径。
+                # Several consecutive generated questions all fail to fetch data from the DB —— report
+                # honestly, don't force a question to run just to fill the slot.
+                # The old approach was "generate then run"; a failure records a failure, and failures feed
+                # stale, which clogs the curriculum to death (in practice 3 rounds all generated_new_task,
+                # 2 failed).
+                print("  (consecutive generated questions all fail to fetch data; skip this round, record no failure)")
+                # ⚠️ Fields must **fully align** with the normal return. Hit on 2026-10-13 server run:
+                #   after exhausting the curriculum, consecutive generated questions all fail verification
+                #   → fall into this early exit → the return is missing `progress`/`critique` →
+                #   run_rounds crashes on print with `r['progress']` KeyError → **the entire non-stop
+                #   loop dies on the spot**. In the non-stop loop, "spinning an empty round" is an in-design
+                #   normal state (design: the whole round doesn't end), and it must never become a fatal path.
                 return {
                     "topic_id": "", "reason": "generated_but_unverifiable",
                     "success": False, "question": "", "sql": "",
@@ -422,38 +444,40 @@ async def run_one_round(
 
     topic = curr.graph.topics.get(tid) or {}
 
-    # ---- 出题（LLM；只出题面，不给参考答案）----
-    # ⚠️ 运行期新题是**生成时就带着题面一起来的**，且已经验过能从库里取到数，
-    #    不再走出题器（出了反而可能把验过的题面换成另一个取不到数的说法）。
+    # ---- question generation (LLM; question text only, no reference answer) ----
+    # ⚠️ Runtime-new questions come **with the question text at generation time**, and have already been
+    #    verified to fetch data from the DB, so we don't go through the question generator (doing so might
+    #    swap the verified question for another un-fetchable phrasing).
     question = gen_question
     if not question and use_llm:
         try:
             question = await VLMLQuestionAgent(env=env).generate(topic) or ""
         except Exception as e:
-            print(f"  （出题失败：{type(e).__name__}: {e}）")
+            print(f"  (question generation failed: {type(e).__name__}: {e})")
     if not question:
-        # 兜底：用知识点自带的问法示例，保证链路仍可跑
+        # fallback: use the topic's own example phrasing, to keep the chain runnable
         ex = topic.get("examples") or []
         question = (
             str(ex[0].get("prompt") or "") if ex and isinstance(ex[0], dict) else ""
-        ) or f"按「{topic.get('name') or tid}」这个知识点，从库里取一个数。"
+        ) or f"Fetch one data point from the DB for the topic \"{topic.get('name') or tid}\"."
 
-    # ---- 写 SQL + 取数（LLM + VLML MCP，带迭代修正）----
+    # ---- write SQL + fetch data (LLM + VLML MCP, with iterative correction) ----
     #
-    # 照原版 Voyager 的顺序（`voyager.py:195` → `:199` → `:370`）：
-    #     ① 每轮**先** retrieve_skills  ② 拼进 system prompt  ③ 跑  ④ 成功才 add
-    # 此前练习线只做了 ④（下面 `skill_store.add`），①②③ 一个都没有 ——
-    # 技能库于是成了**单向仓库**：25 条真 SQL 写进去，一条都没被用过，
-    # hits / ok 恒为 0（mark_used 只在 retrieve 之后被调用）。
+    # Following the original Voyager's order (`voyager.py:195` → `:199` → `:370`):
+    #     ① retrieve_skills **first** each round  ② concatenate into system prompt  ③ run  ④ add only on success
+    # Previously the practice loop only did ④ (the `skill_store.add` below); ①②③ were all missing ——
+    # so the skill library became a **one-way warehouse**: 25 real SQL entries written in, none ever used,
+    # hits / ok stayed 0 (mark_used is only called after retrieve).
     #
-    # ⚠️ 两条**真的会写 SQL** 的路都要检索（原版是每次 rollout 都 retrieve）：
-    #    · 生成新题那条路：验题时已经在 `_generate_new_task` 里检索并注入过了，
-    #      keys 顺着 `gen_keys` 带回来；
-    #    · 现场写这条路：在这里检索。
-    #    **不要两边都检索** —— 否则同一题同一次注入会被记两次 hit。
+    # ⚠️ Both paths that **actually write SQL** must retrieve (the original retrieves on every rollout):
+    #    · the new-question generation path: already retrieved and injected during verification in
+    #      `_generate_new_task`, keys brought back via `gen_keys`;
+    #    · the on-the-spot writing path: retrieve here.
+    #    **Don't retrieve on both sides** —— otherwise the same injection for the same question would be
+    #    counted as a hit twice.
     injected_keys: list[str] = []
 
-    # 验题那一趟已经取到数了 → 直接复用，不重复烧一次 LLM + DB。
+    # The verification turn already fetched data → reuse directly, don't burn another LLM + DB.
     if pre_obs:
         observations, sql = pre_obs, pre_sql
         injected_keys = gen_keys
@@ -466,17 +490,17 @@ async def run_one_round(
             skills=skill_hits,
         )
 
-    # ---- 判成败：是否真的从 DB 取到数 ----
+    # ---- judge success/failure: whether data was really fetched from the DB ----
     success, critique = crit.check_task_success(
         observations=observations,
         task={"task": question, "hints": list(topic.get("skills") or [])[:3]},
     )
 
-    # ---- 计数：注入过的配方这轮有没有帮上忙 ----
-    # 照原版：有效性低的技能会在 retrieve 的排序里自然沉底
-    # （`skill_store.py:273` 打分式里的 `0.6*(ok/hits)` 项）。
-    # mark_result 只记成功，失败不加 ok —— 所以「hits 涨、ok 不涨」
-    # = 注入了但没帮上，正是要它露出来的信号。
+    # ---- counting: did the injected recipes help this round? ----
+    # Following the original: low-effectiveness skills naturally sink in the retrieve ranking
+    # (`skill_store.py:273`'s scoring term `0.6*(ok/hits)`).
+    # mark_result only records success; failure doesn't add ok —— so "hits rise, ok doesn't"
+    # = injected but didn't help, exactly the signal that should surface.
     if injected_keys:
         try:
             import skill_store
@@ -485,7 +509,7 @@ async def run_one_round(
         except Exception:  # pragma: no cover
             pass
 
-    # ---- 存技能：可复用 SQL，主键 = 图谱问题类型 topic_id ----
+    # ---- store skill: reusable SQL, primary key = the graph question type topic_id ----
     skill_key = ""
     if success and sql:
         try:
@@ -493,28 +517,29 @@ async def run_one_round(
 
             _, skill_key = skill_store.add(
                 tid,
-                tid,  # 主键 = 索引到的图谱问题类型（设计）
-                f"自己写 SQL 取数跑通：{question[:60]}",
+                tid,  # primary key = the indexed graph question type (design)
+                f"self-written SQL fetch succeeded: {question[:60]}",
                 code=sql,
                 blueprint={"source": "practice", "question": question},
                 source="practice",
             )
         except Exception as e:  # pragma: no cover
-            print(f"  （存技能失败：{type(e).__name__}: {e}）")
+            print(f"  (skill storage failed: {type(e).__name__}: {e})")
 
     curr.update_exploration_progress(
         {
             "topic_id": tid,
             "success": success,
             "verdict": "ok" if success else "no_evidence",
-            "reason": "已从库取到数" if success else "未从库取到数（链路/口径问题）",
+            "reason": "fetched from DB" if success else "not fetched from DB (pipeline/grain issue)",
             "skill_key": skill_key,
         }
     )
 
-    # 落一行 run_log，字段对齐面板读取（面板后置，但先保持数据连续性）。
-    # ⚠️ 不编造 coverage / score：那是 VLML 判分的事，新后端不判分，如实写 None，
-    #    judge 标成 db_evidence 以示区别。
+    # Append one run_log row, with fields aligned to the dashboard's reading (dashboard is deferred, but
+    # keep data continuity first).
+    # ⚠️ Don't fabricate coverage / score: that's VLML's scoring job; the new backend doesn't score, so
+    #    honestly write None, and mark judge as db_evidence to distinguish.
     try:
         import run_log
 
@@ -548,12 +573,12 @@ async def run_one_round(
                 "generated_task": generated,
                 "sql": sql,
                 "skill_key": skill_key,
-                # 这一轮注入了哪些已学配方（复用的直接证据；面板/导出可读）
+                # which learned recipes were injected this round (direct evidence of reuse; readable by dashboard/export)
                 "reused_skills": injected_keys,
             }
         )
     except Exception as e:  # pragma: no cover
-        print(f"  （写 run_log 失败：{type(e).__name__}: {e}）")
+        print(f"  (run_log write failed: {type(e).__name__}: {e})")
     return {
         "topic_id": tid,
         "reason": reason,
@@ -565,7 +590,7 @@ async def run_one_round(
         "critique": critique,
         "skill_key": skill_key,
         "progress": curr.progress,
-        # 这一轮注入了几条已学配方（复用的直接证据）
+        # how many learned recipes were injected this round (direct evidence of reuse)
         "reused": len(injected_keys),
     }
 
@@ -577,34 +602,38 @@ async def run_rounds(
     use_llm: bool = True,
     max_iters: int = 4,
 ) -> list[dict[str, Any]]:
-    """连跑 n 轮（共享 env 与课程状态）。
+    """Run n rounds in a row (shares env and curriculum state).
 
-    ⚠️ **`n <= 0` = 不停**（同构原版 Voyager 的 `while True`）：
-      一直跑到人点「停止」，或跑满 `--max-iterations`。
-      原版就是这个语义 —— `voyager_original/voyager/voyager.py:326` 的主循环
-      **没有"跑 N 轮就结束"这一说**，只有 iteration 上限（`--max-iterations`，
-      默认 160）和停止信号（SIGTERM → 当前任务跑完后退出）。
+    ⚠️ **`n <= 0` = non-stop** (isomorphic to the original Voyager's `while True`):
+      runs until a human clicks "stop", or until `--max-iterations` is exhausted.
+      The original has exactly this semantics —— `voyager_original/voyager/voyager.py:326`'s main loop
+      **has no notion of "stop after N rounds"**, only an iteration cap (`--max-iterations`,
+      default 160) and a stop signal (SIGTERM → exit after the current task finishes).
 
-      以前这里 n 是硬上限，面板还写死 `rounds:3` → 一次启动只跑 3 道题就退出，
-      29 个节点的图谱根本跑不完，人看到的就是「三轮就结束了」。
-      那不是 Voyager 该有的行为：**学习循环是不带停的**。
+      Previously n here was a hard cap, and the dashboard hardcoded `rounds:3` → one launch only ran
+      3 questions then exited, so the 29-node graph was never finished; what the human saw was
+      "it ends after three rounds".
+      That is not Voyager's proper behavior: **the learning loop is non-stopping**.
 
-    停止是**优雅停**：收到信号后把手头这道题跑完再退出（照原版
-    "exiting learn loop after current task"），不硬杀 —— 技能已按任务落盘。
+    Stopping is a **graceful stop**: on receiving the signal, finish the current question then exit
+    (following the original "exiting learn loop after current task"), without a hard kill —— the skills
+    are already persisted per task.
     """
     env = VLMLMCPEnv()
     curr = VLMLCurriculumAgent(scope=scope)
-    # 把上次运行期生成的节点装回内存图谱 —— 它们已经落盘且多半已标记完成，
-    # 装回来才能「不重复规划」；不装的话每次重开都要重新生成、重新验一遍。
+    # Load the runtime-generated nodes from last time back into the in-memory graph —— they are already
+    # persisted and mostly marked completed; loading them back enables "no re-planning"; without loading,
+    # every restart would regenerate and re-verify them.
     _n_inj = _inject_runtime_topics(curr)
     if _n_inj:
-        print(f"（装回 {_n_inj} 个上次运行期生成的图谱节点）")
+        print(f"(loaded {_n_inj} runtime-generated graph nodes from last time)")
     out: list[dict[str, Any]] = []
     i = 0
-    # 连续「没拿到证据」的计数。**只观测，不终止**：设计原文是
-    # 「一直跳过且技能进度没涨时，整轮不会结束；只有停止能改变循环节奏」。
-    # 所以它唯一的作用是把状态写进 loop_state.json，让面板把
-    # 「它没学会」和「链路没跑通」区分给人看（见 _classify_no_evidence）。
+    # Consecutive "no evidence fetched" counter. **Observation only, no termination**: the design's
+    # original wording is "when it keeps skipping and skill progress isn't rising, the whole round won't
+    # end; only stopping changes the loop's pace".
+    # So its only job is to write state into loop_state.json, letting the dashboard distinguish for humans
+    # "it didn't learn" from "the pipeline never ran" (see _classify_no_evidence).
     streak = 0
     last_progress = curr.progress
     since_progress = 0
@@ -612,10 +641,10 @@ async def run_rounds(
         if n > 0 and i >= n:
             break
         if _STOP["requested"]:
-            print("\n（收到停止信号：跑完当前这道题就停，不硬杀）")
+            print("\n(received stop signal: finish the current question then stop, no hard kill)")
             break
         if n <= 0 and _MAX_ITERATIONS > 0 and i >= _MAX_ITERATIONS:
-            print(f"\n（跑满 --max-iterations {_MAX_ITERATIONS}，停）")
+            print(f"\n(--max-iterations {_MAX_ITERATIONS} exhausted, stopping)")
             break
         r = await run_one_round(
             scope=scope,
@@ -628,7 +657,7 @@ async def run_rounds(
         out.append(r)
         i += 1
 
-        # ---- 写循环心跳（面板只读这个文件，不写）----
+        # ---- write loop heartbeat (dashboard only reads this file, doesn't write) ----
         obs = r.get("observations") or []
         ok_calls = [o for o in obs if o.get("ok")]
         rows = sum(int(o.get("rows") or 0) for o in ok_calls)
@@ -654,7 +683,7 @@ async def run_rounds(
             tool_ok=len(ok_calls),
             tool_fail=len(obs) - len(ok_calls),
             rows=rows,
-            # 这一轮注入了几条已学配方 = 复用链真的在转的证据
+            # how many learned recipes were injected this round = evidence the reuse chain is really turning
             reused=int(r.get("reused") or 0),
             last_error=next(
                 (str(o.get("error") or "") for o in reversed(obs) if not o.get("ok")),
@@ -664,17 +693,18 @@ async def run_rounds(
             rounds_since_progress=since_progress,
         )
 
-        # 一律用 .get()：不停循环里"这轮什么都没跑成"是设计内的常态，
-        # 任何一条早退路径缺字段都不该把整个循环打死（实测踩过 KeyError 崩循环）。
-        tag = f"第 {i}/{n} 轮" if n > 0 else f"第 {i} 轮（不停）"
+        # Always use .get(): in the non-stop loop, "this round ran nothing" is an in-design normal state,
+        # and any early-exit path missing a field must not kill the whole loop (hit KeyError crashing the
+        # loop in practice).
+        tag = f"round {i}/{n}" if n > 0 else f"round {i} (non-stop)"
         empty_round = not str(r.get("topic_id") or "")
         print(
-            f"[{tag}] {r.get('topic_id') or '（本轮没跑出题）'} · reason={r.get('reason')}"
-            f"{' (新生成)' if r.get('generated') else ''}"
-            f" · 成功={r.get('success')} · 进度={r.get('progress')}"
-            f" · 复用={r.get('reused') or 0} 条已学配方"
-            + (f" · ⚠️ 连续 {streak} 轮没拿到证据"
-               f"（{_classify_no_evidence(obs)}）"
+            f"[{tag}] {r.get('topic_id') or '(no question run this round)'} · reason={r.get('reason')}"
+            f"{' (newly generated)' if r.get('generated') else ''}"
+            f" · success={r.get('success')} · progress={r.get('progress')}"
+            f" · reused={r.get('reused') or 0} learned recipe(s)"
+            + (f" · ⚠️ {streak} consecutive rounds with no evidence"
+               f" ({_classify_no_evidence(obs)})"
                if (streak >= 3 and not empty_round) else "")
         )
     _write_loop_state(running=False, round=i, progress=last_progress)
@@ -682,58 +712,60 @@ async def run_rounds(
 
 
 def _main() -> int:
-    ap = argparse.ArgumentParser(description="VLML 同构学习循环 · 一轮（自己出题取数）")
-    ap.add_argument("--topic", default="", help="钉住某个知识点（不给则走课程选题）")
-    ap.add_argument("--no-llm", action="store_true", help="不出题不写 SQL（仅演示骨架）")
-    ap.add_argument("--iters", type=int, default=4, help="写 SQL 的迭代修正轮数（对齐原版 task_max_retries=4）")
+    ap = argparse.ArgumentParser(description="VLML-isomorphic learning loop · one round (self-generated question + data fetch)")
+    ap.add_argument("--topic", default="", help="pin a specific topic (falls back to curriculum selection if omitted)")
+    ap.add_argument("--no-llm", action="store_true", help="no question generation, no SQL writing (skeleton demo only)")
+    ap.add_argument("--iters", type=int, default=4, help="iteration-correction rounds for SQL writing (aligned with original task_max_retries=4)")
     ap.add_argument("--rounds", type=int, default=1,
-                    help="连跑几轮；**0 = 不停**（同构原版 while True，只有点停止才退出）")
+                    help="how many rounds to run; **0 = non-stop** (isomorphic to original while True, exits only on stop)")
     ap.add_argument("--max-iterations", type=int, default=0,
-                    help="不停模式下的总题数上限（0 = 不限；原版 --max-iterations 默认 160）")
+                    help="total question cap in non-stop mode (0 = unlimited; original --max-iterations defaults to 160)")
     ap.add_argument("--unstale", nargs="?", const="__all__", default="",
-                    help="清掉「放弃换题」标记并重置 attempts（不给值=全清，给值=清这一题）")
+                    help="clear the 'gave up switching questions' mark and reset attempts (no value = clear all, value = clear that one)")
     a = ap.parse_args()
 
-    # 不停模式必须装信号处理器：面板「停止」发的是 SIGTERM，
-    # 我们要的是「跑完当前这道题再退」，不是被硬杀在半路。
+    # Non-stop mode must install a signal handler: the dashboard's "stop" sends SIGTERM,
+    # and we want "finish the current question then exit", not a hard kill halfway.
     global _MAX_ITERATIONS
     if a.rounds == 0:
         _install_stop_handler()
         _MAX_ITERATIONS = max(0, int(a.max_iterations or 0))
 
     if a.unstale:
-        # 课程被 stale 堵死时的清理口子（实测：8 个 stale 就能让 29 个节点全不可选）
+        # cleanup outlet when the curriculum is clogged by stale (in practice: 8 stale nodes make all 29 nodes unselectable)
         import topic_graph
         st = topic_graph.MasteryStore()
         tid = "" if a.unstale == "__all__" else str(a.unstale)
         touched = st.unstale(tid)
-        print(f"已清理 stale / attempts：{len(touched)} 题"
+        print(f"cleared stale / attempts: {len(touched)} topic(s)"
               + (f" → {touched[:15]}" if touched else ""))
         return 0
 
-    # ⚠️ `rounds=0` 也必须走 run_rounds（0 = 不停），只有 `rounds==1` 才走单轮路径。
-    #    以前写成 `if a.rounds > 1`，于是面板传 0 想"不停"时会被当成单轮跑完就退
-    #    —— 正是「三轮就结束了」那一类问题的入口版本。
+    # ⚠️ `rounds=0` must also go through run_rounds (0 = non-stop); only `rounds==1` takes the
+    #    single-round path. Previously it was written as `if a.rounds > 1`, so when the dashboard passed
+    #    0 wanting "non-stop" it was treated as a single round that exits after running —— exactly the
+    #    entry version of the "ends after three rounds" problem.
     if a.rounds != 1:
         rs = asyncio.run(
             run_rounds(a.rounds, use_llm=not a.no_llm, max_iters=a.iters)
         )
         ok = sum(1 for r in rs if r.get("success"))
         gen = sum(1 for r in rs if r.get("generated"))
-        # 「生成了但验题没过」必须与「跑了但失败」分开数：前者是**出题**的问题
-        # （题面在库里答不了），后者才是**它**的问题。混成一个数就没法定位。
+        # "generated but failed verification" must be counted separately from "ran but failed": the former
+        # is a **question-generation** problem (the question is unanswerable in the DB), the latter is **its**
+        # problem. Mixing them into one number makes the issue impossible to locate.
         bad = sum(1 for r in rs
                   if r.get("reason") == "generated_but_unverifiable")
-        why_stop = "（收到停止信号，跑完手头这道题就退）" if _STOP["requested"] else ""
-        print("=== 多轮汇总 ===")
-        print(f"轮数 {len(rs)} · 成功 {ok} · 生成新任务 {gen}"
-              f"（其中验题没过 {bad}）· 末轮进度 "
-              f"{rs[-1].get('progress') if rs else '（一轮没跑）'}{why_stop}")
+        why_stop = " (received stop signal, finish current question then exit)" if _STOP["requested"] else ""
+        print("=== multi-round summary ===")
+        print(f"rounds {len(rs)} · success {ok} · generated new tasks {gen}"
+              f" (of which verification failed {bad}) · last-round progress "
+              f"{rs[-1].get('progress') if rs else '(no round run)'}{why_stop}")
         for r in rs:
-            print(f"  {r['round']}. {r['topic_id']} [{r['reason']}] 成功={r['success']}"
-                  f" 技能={r.get('skill_key') or '—'}")
-            print(f"     题面：{r.get('question')}")
-            print(f"     SQL ：{(r.get('sql') or '').replace(chr(10), ' ')[:110]}")
+            print(f"  {r['round']}. {r['topic_id']} [{r['reason']}] success={r['success']}"
+                  f" skill={r.get('skill_key') or '—'}")
+            print(f"     question: {r.get('question')}")
+            print(f"     SQL     : {(r.get('sql') or '').replace(chr(10), ' ')[:110]}")
         return 0
 
     r = asyncio.run(
@@ -741,17 +773,17 @@ def _main() -> int:
             topic_id=a.topic or None, use_llm=not a.no_llm, max_iters=a.iters
         )
     )
-    print("=== 一轮闭环（自己出题取数）===")
-    print("选题     :", r.get("topic_id"), "| reason:", r.get("reason"))
-    print("题面     :", r.get("question"))
+    print("=== one-round loop (self-generated question + data fetch) ===")
+    print("topic    :", r.get("topic_id"), "| reason:", r.get("reason"))
+    print("question :", r.get("question"))
     print("SQL      :", r.get("sql"))
     for o in r.get("observations") or []:
-        print("  观察   :", {k: o[k] for k in ("ok", "tool", "rows", "error")})
-    print("成功     :", r.get("success"), "（判据 = 是否真的从 DB 取到数）")
-    print("技能     :", r.get("skill_key") or "（未存）")
-    print("进度     :", r.get("progress"), "个里程碑已解锁")
+        print("  obs     :", {k: o[k] for k in ("ok", "tool", "rows", "error")})
+    print("success  :", r.get("success"), " (criterion = whether data was really fetched from the DB)")
+    print("skill    :", r.get("skill_key") or "(not stored)")
+    print("progress :", r.get("progress"), "milestones unlocked")
     if r.get("critique"):
-        print("--- 反馈（SQL 语言，无答案/覆盖率）---")
+        print("--- feedback (SQL language, no answer/coverage) ---")
         print(r["critique"])
     return 0
 

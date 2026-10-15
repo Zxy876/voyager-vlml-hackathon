@@ -1,61 +1,70 @@
 #!/usr/bin/env python3
-"""判题反馈结构（照猫娘伴学 `tutor_llm_agent_answer_evaluate.py:96-131`）。
+"""Grading-feedback structure (mirrors the study companion's `tutor_llm_agent_answer_evaluate.py:96-131`).
 
-为什么要有这个模块
-------------------
-用户原话：「反馈写回 Voyager 学习部分的内容没有做好，没有提供可取的有用的价值。」
+Why this module exists
+----------------------
+The user's own words: "the content written back from feedback into Voyager's learning side is not
+done well; it does not provide retrievable, useful value."
 
-之前 `voyager.learn()` 产出的 critique 是硬编码模板，判对判错各一句，
-每轮只把维度名换一下：
+Previously the critique produced by `voyager.learn()` was a hard-coded template — one sentence for
+right, one for wrong, with only the dimension name swapped each round:
 
-    判对：「我的事实集覆盖了裁判的全部评分点，编排方式有效。」
-    判错：「我以为这样编排就能覆盖全部评分点，但裁判比对后判定 wrong；
-          漏掉的维度是 eco_win_rate。下次应当针对这些维度补一次下钻。」
+    right: "My fact set covers all of the referee's scoring points; the orchestration is effective."
+    wrong: "I thought orchestrating it this way would cover every scoring point, but after the
+            referee's comparison the verdict was wrong; the dimension that was missed is
+            eco_win_rate. Next time I should drill down once more on those dimensions."
 
-**"下次应当针对这些维度补一次下钻"这句话是可执行价值的下限** —— 它没说：
-- 这个维度是**没取到**（观测里根本没有）还是**取到了但取错**；
-- 该补哪个工具；
-- 已调的工具里有没有白调的。
+**"Next time I should drill down on those dimensions" is the floor of executable value** — it does
+not say:
+- whether the dimension was **never retrieved** (it isn't in the observations at all) or was
+  **retrieved but wrong**;
+- which tool should be added;
+- whether any of the already-called tools were called for nothing.
 
-而"没取到"和"取错"的补救动作**完全不同**：前者要补工具，后者要改口径。
-把两者混成一句"补一次下钻"，模型就永远在错误的方向上重试 —— 这正是
-`取证通路-原版Voyager对照.md` 里实测到的病（got=None 被当成答去比对）。
+And the remedy for "never retrieved" and for "retrieved wrongly" are **completely different**:
+the former needs another tool, the latter needs a different metric definition. Collapsing both into
+one sentence "drill down once more" means the model keeps retrying in the wrong direction — which is
+exactly the disease measured in `取证通路-原版Voyager对照.md` (got=None being treated as an answer and
+compared).
 
-伴学怎么做
-----------
-伴学判完题回传的是**一包结构**，不是一句评语：
+How the study companion does it
+-------------------------------
+After grading, the study companion returns **a structured bundle**, not a single comment:
     verdict / score / error_type / feedback / next_action /
     covered_points / missing_points / misconceptions / step_feedback /
     related_topics / reference_answer / confidence
 
-其中三件事是价值所在：
-1. `error_type` —— 错在哪一类，决定补救方向；
-2. `next_action` —— 下一步**具体**做什么；
-3. `misconceptions` —— 记下"我以为 X"这个错误假设，而不只是"我错了"。
+Three of those carry the value:
+1. `error_type` — which class of error it was, deciding the remedy direction;
+2. `next_action` — the **concrete** next step;
+3. `misconceptions` — records the wrong assumption "I thought X", not just "I was wrong".
 
-本模块的映射
-------------
-MVE 没有数学题的"错误类型"，但有自己这一套（全部来自 `loop_core.py`
-判定时的实测后缀，不是编的）：
+The mapping in this module
+--------------------------
+MVE has no mathematical "error types", but it has its own set (all of them come from the measured
+suffixes recorded at judging time in `loop_core.py`, none of them are invented):
 
-    unmeasured        模型交了 null —— 这个维度**不在观测里**（取证不全）
-    missing_dimension 评分点对应的事实根本没交
-    wrong_value       取到了但数不对（口径 / 过滤条件错）
-    value_form        类型不可比（数值 vs 枚举）
-    low_base          样本量不足被裁判拒收
-    no_evidence       完全没有证据
+    unmeasured        the model submitted null — this dimension **is not in the observations**
+                      (evidence gathering incomplete)
+    missing_dimension the fact behind the scoring point was never submitted
+    wrong_value       retrieved but the number is wrong (metric definition / filter condition wrong)
+    value_form        types are incomparable (numeric vs enum)
+    low_base          sample size too small, rejected by the referee
+    no_evidence       no evidence at all
 
-`error_type → next_action` 是本模块的核心表：**每条都要能直接执行**。
+`error_type → next_action` is this module's core table: **every entry must be directly executable**.
 
-另外：伴学判完会把标准答案 `reference_answer` 回传，因为它要的是"学会"。
-MVE 的考核通道刻意不给数值（否则掌握度不可比），只给**编排序列**
-（对应 `reference_plan`）—— 给做法，不给答案。
+On top of that: the study companion returns the reference answer `reference_answer` after grading,
+because what it wants is "learning". MVE's exam channel deliberately withholds the numbers (otherwise
+mastery would not be comparable) and returns only the **orchestration sequence** (corresponding to
+`reference_plan`) — the method, not the answer.
 
-与旁路学习的分工
-----------------
-`bypass_learn.py` 提炼的技能带 `defect` / `strategy`（粗粒度：解决哪类缺陷）。
-本模块的 `error_type` 是细粒度（这一轮具体错在哪）。两者用
-`ERROR_TO_DEFECT` 对齐成同一套词汇，否则技能库里会出现两套叫法。
+Division of labour with bypass learning
+--------------------------------------
+The skills distilled by `bypass_learn.py` carry `defect` / `strategy` (coarse-grained: which class of
+defect it fixes). The `error_type` here is fine-grained (what exactly went wrong this round). The two
+are aligned into one vocabulary via `ERROR_TO_DEFECT`, otherwise the skill library ends up with two
+different vocabularies.
 """
 
 from __future__ import annotations
@@ -67,34 +76,37 @@ from dataclasses import dataclass, field
 from typing import Any
 
 # --------------------------------------------------------------------------
-# 词汇表：error_type（本轮错在哪，细）
+# Vocabulary: error_type (where this round went wrong, fine-grained)
 # --------------------------------------------------------------------------
+# Keys are matched against loop_core.py's `missing` / `rejected_low_base` entries and are shared
+# with the referee-side tooling — never translate the keys, only the human-readable values.
 ERROR_TYPES: dict[str, str] = {
-    "unmeasured": "没取到值（模型交了 null）—— 这个维度不在观测里，取证不全",
-    "missing_dimension": "漏维度 —— 评分点对应的事实根本没交",
-    "wrong_value": "值不符 —— 取到了但数不对（口径/过滤条件错）",
-    "value_form": "值形态不可比 —— 类型对不上（数值 vs 枚举/字符串）",
-    "low_base": "样本量不足，被裁判拒收",
-    "no_evidence": "完全没有证据",
+    "unmeasured": "value not retrieved (the model submitted null) — this dimension is not in the observations, evidence gathering is incomplete",
+    "missing_dimension": "dimension missing — the fact behind the scoring point was never submitted",
+    "wrong_value": "value mismatch — retrieved but the number is wrong (metric definition / filter condition wrong)",
+    "value_form": "value form incomparable — the types don't line up (numeric vs enum/string)",
+    "low_base": "sample size too small, rejected by the referee",
+    "no_evidence": "no evidence at all",
 }
 
 # --------------------------------------------------------------------------
-# 词汇表：defect / strategy（技能库 blueprint 用，粗；与 bypass_learn 同一套）
+# Vocabulary: defect / strategy (used by skill-library blueprints, coarse-grained; the same set as
+# bypass_learn)
 # --------------------------------------------------------------------------
 DEFECTS: dict[str, str] = {
-    "missing_dimension": "漏维度",
-    "wrong_granularity": "粒度/口径不对",
-    "tool_uncovered": "工具没被用到",
-    "value_form": "数值形态不对",
+    "missing_dimension": "dimension missing",
+    "wrong_granularity": "granularity / metric definition wrong",
+    "tool_uncovered": "tool never used",
+    "value_form": "value form wrong",
 }
 STRATEGIES: dict[str, str] = {
-    "drill_down": "下钻一层",
-    "switch_tool": "换工具",
-    "combine_tools": "组合多工具",
-    "read_scope": "读报告的 scope 元数据",
+    "drill_down": "drill down one level",
+    "switch_tool": "switch tool",
+    "combine_tools": "combine several tools",
+    "read_scope": "read the report's scope metadata",
 }
 
-# 细 → 粗：保证 feedback 和 bypass_learn 说的是同一套缺陷
+# Fine → coarse: guarantees feedback and bypass_learn speak of the same set of defects
 ERROR_TO_DEFECT: dict[str, str] = {
     "unmeasured": "tool_uncovered",
     "missing_dimension": "missing_dimension",
@@ -104,8 +116,9 @@ ERROR_TO_DEFECT: dict[str, str] = {
     "no_evidence": "tool_uncovered",
 }
 
-# 严重度：取最严重的那条当主 error_type（unmeasured 最该先修 —— 它意味着
-# 后面的比对根本没发生，先补工具才谈得上对不对）
+# Severity: the most severe one becomes the primary error_type (unmeasured is the one to fix first —
+# it means the comparison never even happened, so only after adding a tool does right/wrong even
+# come into play)
 ERROR_SEVERITY: dict[str, int] = {
     "no_evidence": 5,
     "unmeasured": 4,
@@ -116,20 +129,29 @@ ERROR_SEVERITY: dict[str, int] = {
 }
 
 # --------------------------------------------------------------------------
-# 解析：missing 条目里带的原因后缀（loop_core.py 判定时刻进去的）
+# Parsing: the reason suffixes carried in the missing entries (inserted by loop_core.py at judging
+# time). These patterns must match the suffixes loop_core.py literally appends:
+#   loop_core.py:358  f"{p.point}(value not retrieved: model submitted null)"
+#   loop_core.py:363  f"{p.point}(value mismatch: {got_value}≠{ref_value})"
+#   loop_core.py:379  f"{p.point}(value incomparable: got=...<type>≠ref=...<type>)"
+#   loop_core.py:347  f"{p.point}(base={base}<{p.min_base})"
 # --------------------------------------------------------------------------
-_RE_UNMEASURED = re.compile(r"^(?P<point>.+?)\(未取到值[：:]?\s*(?P<got>[^)]*)\)\s*$")
-_RE_WRONG = re.compile(r"^(?P<point>.+?)\(值不符[：:]?\s*(?P<got>.*?)[≠](?P<ref>.*?)\)\s*$")
+_RE_UNMEASURED = re.compile(
+    r"^(?P<point>.+?)\(value not retrieved:?\s*(?P<got>[^)]*)\)\s*$"
+)
+_RE_WRONG = re.compile(
+    r"^(?P<point>.+?)\(value mismatch:?\s*(?P<got>.*?)[≠](?P<ref>.*?)\)\s*$"
+)
 _RE_FORM = re.compile(
-    r"^(?P<point>.+?)\(值不可比[：:]?\s*got=(?P<got>.*?)<(?P<gottype>[A-Za-z_]+)>"
+    r"^(?P<point>.+?)\(value incomparable:?\s*got=(?P<got>.*?)<(?P<gottype>[A-Za-z_]+)>"
     r"[≠]ref=(?P<ref>.*?)<(?P<reftype>[A-Za-z_]+)>\)\s*$"
 )
-_RE_LOWBASE = re.compile(r"^(?P<point>.+?)\(样本不足.*\)\s*$")
+_RE_LOWBASE = re.compile(r"^(?P<point>.+?)\(base=.*\)\s*$")
 
 
 @dataclass
 class MissingItem:
-    """一条缺失评分点 + 它为什么缺失。"""
+    """One missing scoring point + why it is missing."""
     point: str
     dimension: str = ""
     error_type: str = "missing_dimension"
@@ -143,8 +165,9 @@ class MissingItem:
         return ERROR_TO_DEFECT.get(self.error_type, "missing_dimension")
 
     def to_dict(self) -> dict[str, Any]:
-        # producers：图谱里"这个维度由哪个工具产出"。带上它，Voyager 才能判断
-        # "点名的工具我试过没有" —— 没这条它只能瞎猜要不要求助。
+        # producers: "which tool produces this dimension" in the knowledge graph. Carrying it lets
+        # Voyager judge "have I already tried the tool that was named" — without it, it can only
+        # guess whether help is needed.
         producers: list[str] = []
         g = graph()
         if g is not None:
@@ -162,9 +185,10 @@ class MissingItem:
 
 
 def parse_missing(entry: str, *, dim_by_point: dict[str, str] | None = None) -> MissingItem:
-    """把 `xxx(值不符: 0≠59)` 这种条目拆成结构化的一条。
+    """Split an entry such as `xxx(value mismatch: 0≠59)` into one structured record.
 
-    后缀是判定时刻进去的（`loop_core.py:305/310/316`），所以这里是**读**不是猜。
+    The suffix is inserted at judging time (`loop_core.py:358/363/379`), so this is **reading**, not
+    guessing.
     """
     e = str(entry or "").strip()
     dim_by_point = dim_by_point or {}
@@ -179,7 +203,11 @@ def parse_missing(entry: str, *, dim_by_point: dict[str, str] | None = None) -> 
             item = MissingItem(point=point, dimension=dim_by_point.get(point, point),
                                error_type=etype)
             if etype == "unmeasured":
-                item.got = (m.group("got") or "").strip() or "null"
+                # loop_core.py:358 writes the fixed literal "model submitted null" after the
+                # colon; normalise it back to "null" so the text stays machine-comparable.
+                raw = (m.group("got") or "").strip()
+                item.got = "" if raw in ("", "model submitted null") else raw
+                item.got = item.got or "null"
             elif etype == "wrong_value":
                 item.got = (m.group("got") or "").strip()
                 item.ref = (m.group("ref") or "").strip()
@@ -196,24 +224,27 @@ def parse_missing(entry: str, *, dim_by_point: dict[str, str] | None = None) -> 
 
 
 def point_name(entry: str) -> str:
-    """评分点原文：剥掉判定后缀（`(值不符: got≠ref)` / `(未取到值…)` / `(base=…)`）。
+    """The scoring point's original text: strip the judging suffix (`(value mismatch: got≠ref)` /
+    `(value not retrieved…)` / `(base=…)`).
 
-    后缀是判定时刻拼上的，里面带**裁判参考值** —— 它只能进面板/日志（人看的
-    对账信息），绝不能进模型可见上下文，否则下一轮直接抄答案（约定⑧延伸，
-    用户 2026-10-12 纠偏）。parse_missing 的 point 组就是剥好后缀的原文。
+    The suffix is appended at judging time and carries the **referee's reference value** — it may
+    only go to the dashboard/log (reconciliation info for humans), and must never enter the
+    model-visible context, otherwise the next round simply copies the answer (extension of
+    convention ⑧, user correction on 2026-10-12). The `point` group of parse_missing is precisely
+    that suffix-stripped original text.
     """
     return parse_missing(entry).point
 
 
 # --------------------------------------------------------------------------
-# 知识图谱（lazy）：维度 → 由哪个工具产出
+# Knowledge graph (lazy): dimension → which tool produces it
 # --------------------------------------------------------------------------
-_GRAPH: Any = None          # None=未加载 / False=不可用 / KnowledgeGraph=已加载
+_GRAPH: Any = None          # None=not loaded / False=unavailable / KnowledgeGraph=loaded
 
 
 def graph() -> Any | None:
-    """取知识图谱。读的是落盘的 json，**不 import vlml_env** ——
-    离线重算（--topic 回放历史日志）时也必须能用。"""
+    """Fetch the knowledge graph. It reads the persisted JSON and **does not import vlml_env** —
+    so it also works when recomputing offline (replaying historical logs via --topic)."""
     global _GRAPH
     if _GRAPH is None:
         try:
@@ -230,24 +261,27 @@ def reset_graph() -> None:
 
 
 # --------------------------------------------------------------------------
-# error_type → next_action（本模块的核心表：每条都要能直接执行）
+# error_type → next_action (this module's core table: every entry must be directly executable)
 # --------------------------------------------------------------------------
 def _sql_recipe(dim: str, subject: dict[str, Any] | None = None) -> str:
-    """SQL 路径维度的「该查什么」—— 图谱里存着，反馈却一直没给出去。
+    """"What to query" for SQL-path dimensions — it is stored in the graph, yet feedback never
+    handed it over.
 
-    **这是「跑再多轮也学不会」的根因**：
-    `map_fb_conv`（Haven 图首血转换率）23 轮一次都没取到、
-    `map_win_rate`（图上胜率）43 轮只取到 5 次。这两条都是 **SQL 路径**
-    维度 —— 图谱 `who_produces` 为空，于是反馈里 `producers=[]`，
-    模型每轮拿到的都是同一句「先确认哪个工具能出它，再补调」，
-    **一句可执行的信息都没有**，所以第 43 轮和第 1 轮拿到的一样多。
+    **This is the root cause of "no matter how many rounds it runs, it never learns"**:
+    `map_fb_conv` (first blood conversion on Haven) was never retrieved in 23 rounds, and
+    `map_win_rate` (map win rate) was retrieved only 5 times in 43 rounds. Both are **SQL-path**
+    dimensions — the graph's `who_produces` is empty for them, so feedback carries `producers=[]`
+    and the model receives the same sentence ("first confirm which tool can produce it, then add a
+    call") every round — **not one piece of actionable information** — so round 43 learned exactly as
+    much as round 1.
 
-    而图谱里其实存着完整的教学信息（`knowledge_graph.py:1258-1289`）：
-    `tables` / `columns_by_table` / `semantics` / `typical_errors` ——
-    事前渲染进了图谱提示，事后反馈一个字没用。这里补上。
+    Yet the graph does hold the complete teaching information (`knowledge_graph.py:1258-1289`):
+    `tables` / `columns_by_table` / `semantics` / `typical_errors` — it was rendered into the graph
+    prompt up front, and the feedback afterwards used not one word of it. Adding that here.
 
-    给的是**结构不是答案**（跟 `action_code` 那条路同一个边界）：
-    表名、列名、易错点、口径形态；不含任何数值。
+    What is given is **structure, not answers** (the same boundary as the `action_code` path):
+    table names, column names, common mistakes, the shape of the metric definition; no numbers at
+    all.
     """
     g = graph()
     if g is None:
@@ -259,23 +293,26 @@ def _sql_recipe(dim: str, subject: dict[str, Any] | None = None) -> str:
         return ""
     cols_map = det.get("columns_by_table") or {}
     cols = [str(c) for c in (det.get("columns") or [])]
-    parts = [f"{dim} 是 **SQL 口径**（没有工具直接出它，得自己写 SQL）"]
+    parts = [f"{dim} is a **SQL metric** (no tool produces it directly, you must write the SQL "
+             f"yourself)"]
     for t in tables[:2]:
         cs = [str(c) for c in (cols_map.get(t) or cols)]
-        parts.append(f"表 `{t}`" + (f"，相关列 {'、'.join(cs[:8])}" if cs else ""))
+        parts.append(f"table `{t}`" + (f", relevant columns {', '.join(cs[:8])}" if cs else ""))
     errs = [str(e) for e in (det.get("typical_errors") or [])][:2]
     if errs:
-        parts.append("易错点：" + "；".join(errs))
+        parts.append("common mistakes: " + "; ".join(errs))
     if isinstance(subject, dict) and subject:
-        # subject 的每个键都必须在 WHERE 里出现 —— 这正是「漏查某张图」的解药
-        keys = "、".join(f"{k}={v}" for k, v in subject.items() if v not in (None, ""))
+        # Every key of subject must appear in the WHERE clause — this is precisely the antidote to
+        # "forgot to filter by map"
+        keys = ", ".join(f"{k}={v}" for k, v in subject.items() if v not in (None, ""))
         if keys:
-            parts.append(f"这个评分点的范围是 {{{keys}}} —— WHERE 必须逐个带上，"
-                         "不能只查整体再往下推算")
+            parts.append(f"the scope of this scoring point is {{{keys}}} — the WHERE clause must "
+                         "carry every one of them; querying the aggregate and drilling down "
+                         "afterwards is not equivalent")
     sem = str(det.get("semantics") or "")
     if sem:
-        parts.append(f"口径形态：{sem}")
-    return "；".join(parts) + "。"
+        parts.append(f"metric definition shape: {sem}")
+    return "; ".join(parts) + "."
 
 
 def _next_action(item: MissingItem, *, ref_plan: list[str] | None = None,
@@ -283,16 +320,18 @@ def _next_action(item: MissingItem, *, ref_plan: list[str] | None = None,
                  subject: dict[str, Any] | None = None) -> str:
     dim = item.dimension or item.point
     plan = " → ".join(ref_plan or [])
-    tools = "、".join(my_tools or []) or "（没调任何工具）"
+    tools = ", ".join(my_tools or []) or "(no tools called)"
 
     if item.error_type == "unmeasured":
-        # 这是最该被修的一类：维度压根不在观测里，补口径没用，得补工具。
+        # The class most worth fixing: the dimension simply isn't in the observations, so adding a
+        # metric definition is useless — a tool has to be added.
         #
-        # 该补**哪个**工具，两个来源，优先图谱：
-        #   1. 知识图谱的 produced_by（声明式：`answer_spec.tool` 配好的取数
-        #      配方）—— 事前可查，裁判没跑过时也答得出来；
-        #   2. 裁判轨迹差集（事后反推）—— 只在图谱没这条边时才用，且它说的是
-        #      "裁判调了而我没有"，不是"本来就该由它出"。
+        # Which tool to add comes from two sources, the graph first:
+        #   1. the knowledge graph's produced_by edge (declarative: the retrieval recipe declared in
+        #      `answer_spec.tool`) — queryable up front, and answerable even before the referee runs;
+        #   2. the referee's trajectory difference (reverse-engineered after the fact) — used only
+        #      when the graph has no such edge, and it says "the referee called it and I did not",
+        #      not "it ought to be produced by it".
         g = graph()
         producers: list[str] = []
         if g is not None:
@@ -301,16 +340,18 @@ def _next_action(item: MissingItem, *, ref_plan: list[str] | None = None,
             except Exception:
                 producers = []
         if producers:
-            return (f"{dim} 不在观测里（我交了 null），不是算错 —— "
-                    f"它**由 {'、'.join(producers)} 产出**（知识图谱声明），"
-                    f"我这次没调这个工具。")
+            return (f"{dim} is not in the observations (I submitted null), it is not a computation "
+                    f"error — it is **produced by {', '.join(producers)}** (declared by the "
+                    f"knowledge graph), and I did not call that tool this time.")
         gap = [t for t in (ref_plan or []) if t not in (my_tools or [])]
         if gap:
-            return (f"{dim} 不在观测里（我交了 null），不是算错 —— "
-                    f"要先补调一个能出它的工具；裁判调过而我没调的是 {'、'.join(gap)}"
-                    + (f"（裁判完整编排 {plan}）。" if plan else "。"))
-        return (f"{dim} 不在观测里（我交了 null），不是算错 —— "
-                f"当前调的是 {tools}，它们不出这个维度，要换工具。")
+            return (f"{dim} is not in the observations (I submitted null), it is not a computation "
+                    f"error — a tool that can produce it must be called first; the ones the referee "
+                    f"called and I did not are {', '.join(gap)}"
+                    + (f" (the referee's full orchestration: {plan})." if plan else "."))
+        return (f"{dim} is not in the observations (I submitted null), it is not a computation "
+                f"error — the tools currently called are {tools}, they do not produce this "
+                f"dimension, so the tool has to change.")
 
     if item.error_type == "missing_dimension":
         g = graph()
@@ -319,44 +360,53 @@ def _next_action(item: MissingItem, *, ref_plan: list[str] | None = None,
                 producers = [t for t in g.who_produces(dim)
                              if t not in (my_tools or [])]
                 if producers:
-                    return (f"{dim} 连 null 都没交 —— 它**由 {'、'.join(producers)} "
-                            f"产出**（知识图谱声明），补调它。")
+                    return (f"{dim} did not even submit a null — it is **produced by "
+                            f"{', '.join(producers)}** (declared by the knowledge graph), "
+                            f"add a call to it.")
             except Exception:
                 pass
-        # 图谱说不出生产者 = 这是 SQL 路径维度。以前走到这里只给一句
-        # 「先确认哪个工具能出它」—— 对 SQL 维度是句空话，实测 43 轮没变过。
+        # The graph names no producer = this is a SQL-path dimension. Previously the code stopped
+        # here with just "first confirm which tool can produce it" — which is empty talk for a SQL
+        # dimension, and measured unchanged over 43 rounds.
         recipe = _sql_recipe(dim, subject)
         if recipe:
             return recipe
-        tail = f"裁判的标准编排是 {plan}。" if plan else ""
-        return f"{dim} 没有任何事实，连 null 都没交 —— 先确认哪个工具能出它，再补调。{tail}"
+        tail = f" The referee's standard orchestration is {plan}." if plan else ""
+        return (f"{dim} has no facts at all, not even a null — first confirm which tool can produce "
+                f"it, then add a call.{tail}")
 
     if item.error_type == "wrong_value":
-        # ⚠️ 同构会话约定⑧的延伸（用户 2026-10-12 纠偏）：裁判的**参考值**绝不进反馈。
-        # 实测泄漏：wrong_value 的反馈写成「skuba≠initiator」——标准答案就这么
-        # 送给了模型，下一轮直接抄答案交卷，取证通路等于作废。只说"口径不一致"，
-        # 让模型回环境里重新取证，而不是等裁判喂答案。got 是模型自己的观测，可以留。
-        return (f"{dim} 取到了但与裁判口径不一致（我交的是 {item.got or '?'}）—— "
-                f"这是过滤条件/范围的问题（时间范围、地图、队伍、回合类型），"
-                f"**不是补工具能解决的**，回看调用参数重新取证。")
+        # ⚠️ Extension of the isomorphic session's convention ⑧ (user correction on 2026-10-12):
+        # the referee's **reference value** must never enter feedback.
+        # Measured leak: wrong_value feedback was written as "skuba≠initiator" — the standard answer
+        # was handed straight to the model, which copied the answer on the next round, voiding the
+        # evidence-gathering path. Only say "the metric definitions disagree", so the model goes back
+        # to the environment and re-gathers evidence instead of waiting for the referee to feed it
+        # the answer. `got` is the model's own observation and may stay.
+        return (f"{dim} was retrieved but disagrees with the referee's metric definition (what I "
+                f"submitted was {item.got or '?'}) — this is a problem of filter conditions / scope "
+                f"(time range, map, team, round type); **adding tools will not fix it**. Go back "
+                f"over the call parameters and re-gather the evidence.")
 
     if item.error_type == "value_form":
-        # 同上：只给**形态**指引（数值 vs 枚举），不给裁判的参考值。
-        return (f"{dim} 形态对不上（我给的是 {item.got or '?'}<{item.got_type}>，"
-                f"裁判要的是 <{item.ref_type}> 形态）—— "
-                f"对齐答案形态（数值 vs 枚举/字符串），不是数值算错。")
+        # Same: give only **form** guidance (numeric vs enum), never the referee's reference value.
+        return (f"{dim} has a mismatched form (what I gave was {item.got or '?'}<{item.got_type}>, "
+                f"the referee wanted the <{item.ref_type}> form) — align the form of the answer "
+                f"(numeric vs enum/string); it is not a wrong number.")
 
     if item.error_type == "low_base":
-        return f"{dim} 样本量不足被拒收 —— 放宽过滤条件或换更大口径再取。"
+        return (f"{dim} was rejected for an insufficient sample size — loosen the filter conditions "
+                f"or switch to a broader scope and retrieve again.")
 
-    return f"{dim}：整轮没有拿到任何证据（当前工具 {tools}），先重建取证通路。"
+    return (f"{dim}: no evidence at all this round (current tools {tools}), rebuild the "
+            f"evidence-gathering path first.")
 
 
 def _strategy_for(defect: str, *, ref_plan: list[str] | None = None,
                   my_tools: list[str] | None = None) -> str:
-    """缺陷 → 修补策略（与 bypass_learn 同一套四个）."""
+    """defect → remedy strategy (the same four as bypass_learn)."""
     if defect == "tool_uncovered":
-        # 裁判用了多个工具而我只用了一个 → 组合；否则换工具
+        # The referee used several tools and I used only one → combine; otherwise switch tool
         if ref_plan and my_tools and len([t for t in ref_plan if t not in my_tools]) >= 1 \
                 and len(set(ref_plan)) > 1:
             return "combine_tools"
@@ -369,26 +419,27 @@ def _strategy_for(defect: str, *, ref_plan: list[str] | None = None,
 
 
 # --------------------------------------------------------------------------
-# 反馈包
+# Feedback bundle
 # --------------------------------------------------------------------------
 @dataclass
 class Feedback:
-    """一包判题反馈（字段对齐伴学 `answer_evaluate` 的返回）。"""
+    """A bundle of grading feedback (fields aligned with the study companion's `answer_evaluate`
+    return value)."""
     verdict: str = ""
     score: int = 0
     coverage: float = 0.0
-    error_type: str = ""                       # 主错误类型（最严重的）
+    error_type: str = ""                       # primary error type (the most severe one)
     error_types: list[str] = field(default_factory=list)
-    feedback: str = ""                         # 人话评语
-    next_action: str = ""                      # 可执行的下一步
-    lesson: str = ""                           # 可固化的做法（只在判对时非空）
+    feedback: str = ""                         # plain-language comment
+    next_action: str = ""                      # executable next step
+    lesson: str = ""                           # what can be crystallised (non-empty only when correct)
     covered_points: list[str] = field(default_factory=list)
-    missing_points: list[str] = field(default_factory=list)   # 干净的评分点名
+    missing_points: list[str] = field(default_factory=list)   # clean scoring point names
     missing_detail: list[dict[str, Any]] = field(default_factory=list)
-    misconceptions: list[str] = field(default_factory=list)   # "我以为 X"
+    misconceptions: list[str] = field(default_factory=list)   # "I thought X"
     step_feedback: list[dict[str, Any]] = field(default_factory=list)
-    related_topics: list[str] = field(default_factory=list)   # 供出题器选下一题
-    reference_plan: list[str] = field(default_factory=list)   # 编排示范（不给数值）
+    related_topics: list[str] = field(default_factory=list)   # for the question generator to pick the next question
+    reference_plan: list[str] = field(default_factory=list)   # orchestration demo (no values)
     my_plan: list[str] = field(default_factory=list)
     confidence: float = 0.0
 
@@ -424,10 +475,12 @@ def build_feedback(
     confidence: float = 0.0,
     subj_by_point: dict[str, dict[str, Any]] | None = None,
 ) -> Feedback:
-    """从判定结果组装一包反馈。纯函数：同样的输入永远给同样的输出。
+    """Assemble a bundle of feedback from the judging result. Pure function: the same input always
+    yields the same output.
 
-    `subj_by_point`：评分点 → subject。SQL 路径维度漏掉时，要靠它说清
-    「WHERE 必须带上 map=Haven 这种过滤」—— 没有它反馈就是空话。
+    `subj_by_point`: scoring point → subject. When an SQL-path dimension is missed, this is what
+    lets the feedback say "the WHERE clause must carry a filter like map=Haven" — without it the
+    feedback is empty talk.
     """
     subj_by_point = subj_by_point or {}
     covered = [str(c) for c in (covered or [])]
@@ -437,7 +490,8 @@ def build_feedback(
     my_plan = [str(t) for t in (my_plan or []) if not str(t).startswith("<")]
 
     items = [parse_missing(m, dim_by_point=dim_by_point) for m in missing_raw]
-    # 样本不足被拒收的单独补进来 —— 判定把它们放 rejected_low_base，不在 missing 里
+    # Points rejected for an insufficient sample are added separately — judging puts them in
+    # rejected_low_base, not in missing
     for p in (rejected_low_base or []):
         point = str(p).split("(")[0].strip()
         items.append(MissingItem(point=point, dimension=dim_by_point.get(point, point),
@@ -451,117 +505,139 @@ def build_feedback(
         reference_plan=ref_plan, my_plan=my_plan, confidence=float(confidence),
     )
 
-    # ⚠️ 判据必须是**判定结果**，不能是"missing 列表为不为空"。
+    # ⚠️ The criterion must be the **judging result**, not "whether the missing list is empty".
     #
-    # 实测踩的坑：一道题 verdict=wrong、coverage=0、covered=[]，但 missing 也
-    # 是 []（事实被判 `below_threshold` 拒收，走的是 rejected 而不是 missing）。
-    # 于是这里走进"全覆盖"分支，输出：
-    #     「我的事实集覆盖了裁判的全部 0 个评分点，编排方式有效。
-    #       这套编排可以固化 —— 写进技能库，下次同类题直接复用。」
-    # **把失败讲成了成功**。critique 就是这样回灌给模型的 —— 模型每轮读到
-    # "有效、可以固化"，于是五轮如一日地重复同一个错。学习曲线起不来的
-    # 直接断点就是这一行：不是模型学不会，是反馈在骗它。
+    # Pitfall actually measured: a question with verdict=wrong, coverage=0, covered=[] but missing
+    # also [] (the facts were rejected as `below_threshold`, so they took the rejected path rather
+    # than the missing path). So the code fell into the "full coverage" branch and printed:
+    #     "My fact set covers all 0 of the referee's scoring points; the orchestration is effective.
+    #      This orchestration can be crystallised — write it into the skill library and reuse it
+    #      directly next time on a similar question."
+    # **Reporting failure as success.** This is how it feeds back to the model — the model reads
+    # "effective, can be crystallised" every round, and so repeats the very same mistake for five
+    # rounds running. This line is precisely where the learning curve's failure to lift comes from:
+    # it is not that the model cannot learn, it is that the feedback is lying to it.
     judged_ok = (str(verdict).lower() in ("correct", "ok", "true")
                  or float(coverage) >= 1.0)
     if not items and judged_ok:
         fb.error_type = ""
         fb.error_types = []
-        fb.feedback = f"覆盖了裁判的全部 {len(covered)} 个评分点，编排方式有效。"
-        fb.next_action = ("这套编排可以固化 —— 把它按『工具名+按什么维度拆分』"
-                          "写进技能库，下次同类题直接复用。")
-        # lesson 必须是**这套具体编排**，不能是"先取整体报告再下钻"那种模板 ——
-        # 模板写进技能库等于什么都没写（它就是这么来的：voyager.py:1048 的模板）。
+        fb.feedback = (f"Covered all {len(covered)} of the referee's scoring points; the "
+                       f"orchestration is effective.")
+        fb.next_action = ("This orchestration can be crystallised — write it into the skill library "
+                          "as 'tool name + which dimension it splits by', and reuse it directly "
+                          "next time on a similar question.")
+        # lesson must be **this concrete orchestration**, not a template like "fetch the overall
+        # report first, then drill down" — a template written into the skill library says nothing at
+        # all (that is exactly where it came from: the template at voyager.py:1048).
         dims = sorted({dim_by_point.get(c, c) for c in covered})
         if my_plan:
             fb.lesson = (
-                f"编排 {' → '.join(my_plan)}：先取 {my_plan[0]} 拿总盘"
-                + (f"，再用 {'、'.join(my_plan[1:])} 补齐" if len(my_plan) > 1 else "")
-                + f"。覆盖 {len(covered)} 个评分点"
-                + (f"（{'、'.join(dims)}）" if dims else "")
-                + "。")
+                f"Orchestration {' → '.join(my_plan)}: first fetch {my_plan[0]} for the overall "
+                f"picture"
+                + (f", then complete it with {', '.join(my_plan[1:])}" if len(my_plan) > 1 else "")
+                + f". Covered {len(covered)} scoring points"
+                + (f" ({', '.join(dims)})" if dims else "")
+                + ".")
         else:
-            fb.lesson = f"未调工具即覆盖 {len(covered)} 个评分点（可疑，检查是否用了缓存事实）。"
+            fb.lesson = (f"Covered {len(covered)} scoring points without calling any tool "
+                         f"(suspicious — check whether cached facts were used).")
         fb.step_feedback = _step_feedback(my_plan, ref_plan, [])
         fb.related_topics = dims
         return fb
 
     if not items:
-        # **没漏维度，但一个事实都没被认可**（拒收 / 值不对 / 证据不足）。
-        # 以前这里会掉到下面 `ranked[0]` 直接 IndexError —— 而更早以前它
-        # 干脆被当成"全覆盖"，把失败播报成成功。必须单独一支，说清**没被认可**。
+        # **No dimension missing, yet not one fact was accepted** (rejected / wrong value /
+        # insufficient evidence).
+        # This used to fall through to `ranked[0]` below and raise IndexError directly — and even
+        # earlier it was simply treated as "full coverage", broadcasting failure as success. It
+        # needs its own branch that states clearly that **nothing was accepted**.
         fb.error_type = "not_accepted"
         fb.error_types = ["not_accepted"]
-        # ⚠️ 设计硬约束（同构会话约定⑧）：得分 / 覆盖率这类「VLML 跑一遍得到的
-        # 判定数值」**不允许进反馈**——它会让模型把重心从「把事实取到」歪到
-        # 「刷覆盖率」。这里只给已覆盖**评分点个数**（枚举量，不可被单值游戏化），
-        # 绝不报百分比。score/coverage 仍留在 Feedback 结构与 to_dict()，供面板/日志。
+        # ⚠️ Hard design constraint (isomorphic session convention ⑧): figures such as score /
+        # coverage — "verdict numbers produced by running VLML" — **must not enter feedback**,
+        # because they push the model's focus away from "retrieve the facts" and towards
+        # "game the coverage". Here we only give the **number** of scoring points covered (a count,
+        # which cannot be gamed by any single value) and never a percentage. score/coverage stay in
+        # the Feedback structure and to_dict() for the dashboard/log.
         fb.feedback = (
-            f"交上去的事实一个都没被裁判认可（判定 {verdict}，已覆盖 "
-            f"{len(covered)} 个评分点）。"
-            "**交了 ≠ 拿到了证据** —— 这不是「编排有效」。")
+            f"Not one of the facts submitted was accepted by the referee (verdict {verdict}, "
+            f"covered {len(covered)} scoring points). "
+            "**Submitted ≠ evidence obtained** — this does not mean the orchestration is effective.")
         why: list[str] = []
         if rejected_low_base:
-            why.append("有事实因样本量不足被拒收（"
-                       + "、".join(str(p) for p in list(rejected_low_base)[:3])
-                       + "）：放宽过滤或换更粗的粒度，别只取一行")
+            why.append("some facts were rejected for an insufficient sample size ("
+                       + ", ".join(str(p) for p in list(rejected_low_base)[:3])
+                       + "): loosen the filters or switch to a coarser granularity, don't just "
+                         "grab one row")
         if my_plan and ref_plan:
             lack = [t for t in ref_plan if t not in my_plan]
             if lack:
-                why.append(f"裁判的编排是 {' → '.join(ref_plan)}，你只做了 "
-                           f"{' → '.join(my_plan)}，还差 {'、'.join(lack)}")
-        fb.next_action = ("先搞清为什么没被认可再重跑：" + "；".join(why)) if why else (
-            "事实没通过裁判校验 —— 不是漏维度，是**没被认可**。换一种取法，"
-            "别把上一轮完全相同的查询再跑一遍：同一条 SQL 只会拿到同一个结果。")
+                why.append(f"the referee's orchestration is {' → '.join(ref_plan)}, while you only "
+                           f"did {' → '.join(my_plan)} — still missing {', '.join(lack)}")
+        fb.next_action = ("First work out why nothing was accepted, then re-run: "
+                          + "; ".join(why)) if why else (
+            "the facts failed the referee's validation — it is not a missing dimension, it is "
+            "**not accepted**. Try a different retrieval approach; re-running the exact same query "
+            "as last round is pointless: the same SQL returns the same result.")
         fb.misconceptions.append(
-            "我把「把事实交上去」当成了「拿到了证据」 —— 交上去的事实一个都没被裁判认可。"
-            "重复同样的编排不会让它变对。")
+            "I treated \"submitting the facts\" as \"obtaining the evidence\" — yet not one of the "
+            "facts submitted was accepted by the referee. Repeating the same orchestration will "
+            "not make it right.")
         fb.step_feedback = _step_feedback(my_plan, ref_plan, [])
         fb.related_topics = sorted({dim_by_point.get(c, c) for c in covered})
         return fb
 
-    # 主错误类型 = 最严重的那条
+    # Primary error type = the most severe one
     ranked = sorted(items, key=lambda i: -ERROR_SEVERITY.get(i.error_type, 0))
     fb.error_types = sorted({i.error_type for i in items},
                             key=lambda t: -ERROR_SEVERITY.get(t, 0))
     fb.error_type = ranked[0].error_type
 
-    # next_action：按严重度排，最多给两条（给多了等于没给）
+    # next_action: ordered by severity, at most two entries (giving more is the same as giving none)
     tops = ranked[:2]
     fb.next_action = " ".join(
         _next_action(i, ref_plan=ref_plan, my_tools=my_plan,
                      subject=subj_by_point.get(i.point)) for i in tops
     )
 
-    # misconceptions：把"我以为这样编排就能覆盖"这个错误假设挑明
+    # misconceptions: spell out the wrong assumption "I thought orchestrating it this way would
+    # cover everything"
     unmeasured = [i for i in items if i.error_type == "unmeasured"]
     if unmeasured:
-        tools = "、".join(my_plan) or "（没调任何工具）"
-        dims = "、".join(i.dimension or i.point for i in unmeasured)
+        tools = ", ".join(my_plan) or "(no tools called)"
+        dims = ", ".join(i.dimension or i.point for i in unmeasured)
         fb.misconceptions.append(
-            f"我调了 {tools} 就以为能覆盖 {dims} —— 实际这些维度不在这些工具的输出里。"
-            f"（已调用过但仍取不到，说明不是忘调，是这两个工具不出这个维度）")
+            f"I assumed that calling {tools} would cover {dims} — in reality those dimensions are "
+            f"not in those tools' output. "
+            f"(They were already called and still could not be retrieved, so this is not a matter "
+            f"of forgetting to call them: these two tools simply do not produce that dimension.)")
     wrong = [i for i in items if i.error_type == "wrong_value"]
     if wrong:
-        # ⚠️ 约定⑧延伸：不写 (got≠ref) —— ref 是裁判参考值，写出来=送答案。
+        # ⚠️ Extension of convention ⑧: never write (got≠ref) — ref is the referee's reference
+        # value, and writing it out is equivalent to handing over the answer.
         fb.misconceptions.append(
-            "我以为取到的数就是裁判口径下的数 —— 实际过滤条件/范围不一致："
-            + "、".join(f"{i.dimension or i.point}（取值与裁判口径不符）" for i in wrong))
+            "I assumed the number I retrieved is the number under the referee's metric definition — "
+            "in reality the filter conditions / scope disagree: "
+            + ", ".join(f"{i.dimension or i.point} (the value disagrees with the referee's metric "
+                        f"definition)" for i in wrong))
     form = [i for i in items if i.error_type == "value_form"]
     if form:
         fb.misconceptions.append(
-            "我以为答案就是这个形态 —— 实际裁判要的是另一套："
-            + "、".join(f"{i.dimension or i.point}({i.got_type}≠{i.ref_type})" for i in form))
+            "I assumed the answer has this form — in reality the referee wanted a different one: "
+            + ", ".join(f"{i.dimension or i.point}({i.got_type}≠{i.ref_type})" for i in form))
 
     n_by_type: dict[str, int] = {}
     for i in items:
         n_by_type[i.error_type] = n_by_type.get(i.error_type, 0) + 1
-    # ⚠️ 同构会话约定⑧：覆盖率是「VLML 判定数值」，禁止进反馈（见 not_accepted 分支）。
-    # 这里只给「已覆盖评分点个数」这种枚举量；具体漏了哪些维度在 missing_points 里。
+    # ⚠️ Convention ⑧: coverage is a "VLML verdict number" and must not enter feedback (see the
+    # not_accepted branch). Here we only give a count such as "number of scoring points covered";
+    # exactly which dimensions were missed lives in missing_points.
     fb.feedback = (
-        f"判定 {verdict}："
-        + "；".join(f"{ERROR_TYPES.get(t, t)} ×{n}" for t, n in
+        f"Verdict {verdict}: "
+        + "; ".join(f"{ERROR_TYPES.get(t, t)} ×{n}" for t, n in
                    sorted(n_by_type.items(), key=lambda kv: -kv[1]))
-        + f"。已覆盖 {len(covered)} 个评分点（不报百分比）。"
+        + f". Covered {len(covered)} scoring points (no percentage reported)."
     )
 
     fb.step_feedback = _step_feedback(my_plan, ref_plan, items)
@@ -571,10 +647,11 @@ def build_feedback(
 
 def _step_feedback(my_plan: list[str], ref_plan: list[str],
                    items: list[MissingItem]) -> list[dict[str, Any]]:
-    """逐步反馈：每个工具这一步到底起了什么作用。
+    """Step-by-step feedback: what role each tool actually played at its step.
 
-    伴学的 `step_feedback` 是逐步骤说"这一步对不对"。MVE 的"步骤"就是工具调用，
-    能说的是：调了它之后，哪些维度进来了、哪些还是没进来、以及哪些工具压根没调。
+    The study companion's `step_feedback` says per step "was this step right". In MVE a "step" is a
+    tool call, so what can be said is: after calling it, which dimensions came in, which still did
+    not, and which tools were never called at all.
     """
     out: list[dict[str, Any]] = []
     covered_dims = set()
@@ -583,29 +660,33 @@ def _step_feedback(my_plan: list[str], ref_plan: list[str],
     for t in ref_plan:
         if t not in my_plan:
             out.append({"tool": t, "used": False,
-                        "note": "裁判调了它，我没调 —— 缺失的维度很可能从这里出"})
+                        "note": "the referee called it and I did not — the missing dimensions "
+                                "most likely come from here"})
 
-    # 把"调了但没出"标到具体工具上：只标最后一个（前面的不能确定）
+    # Tag "called but nothing came out" onto a specific tool: only the last one (the earlier ones
+    # cannot be pinned down)
     dims_missing = {i.dimension or i.point for i in items
                     if i.error_type in ("unmeasured", "missing_dimension")}
     if out and dims_missing:
         last_used = [o for o in out if o["used"]]
         if last_used:
             last_used[-1]["note"] = (
-                f"调了它，但 {'、'.join(sorted(dims_missing))} 仍未取到 "
-                f"—— 这些维度不由它出，需要换/加工具")
+                f"it was called, but {', '.join(sorted(dims_missing))} are still not retrieved — "
+                f"these dimensions are not produced by it, so the tool has to change")
     _ = covered_dims
     return out
 
 
 def blueprint_for(fb: Feedback) -> dict[str, Any] | None:
-    """把反馈包压成技能库能带的 blueprint（缺陷 → 策略 → 动作）。
+    """Compress the feedback bundle into a blueprint the skill library can carry
+    (defect → strategy → action).
 
-    与 `bypass_learn.py` 产出的 blueprint 同构，只是 `source` 不同：
-    旁路学的是裁判的做法（`bypass`），这里是自己判对后固化下来的（`practice`）。
+    Isomorphic to the blueprints produced by `bypass_learn.py`, only the `source` differs:
+    bypass learning distils the referee's approach (`bypass`), while this is what was crystallised
+    after getting it right ourselves (`practice`).
     """
     if not fb.error_type and not fb.missing_detail:
-        # 判对：固化的是"这套编排有效"
+        # Correct: what gets crystallised is "this orchestration is effective"
         return {
             "defect": "", "strategy": "combine_tools" if len(fb.my_plan) > 1 else "drill_down",
             "trajectory": fb.my_plan,
@@ -623,30 +704,34 @@ def blueprint_for(fb: Feedback) -> dict[str, Any] | None:
 
 
 def render_critique(fb: Feedback) -> str:
-    """把反馈包渲染成给模型的 critique 文本（进下一轮 prompt）。
+    """Render the feedback bundle as the critique text handed to the model (fed into the next
+    round's prompt).
 
-    照 fork 的 critic 形态：**第一人称自我反思**。但不再是一句模板 ——
-    带上 error_type 的归因和 next_action 的具体动作。
+    Follows the forked critic's shape: **first-person self-reflection**. But no longer a single
+    template — it now carries the error_type attribution and next_action's concrete move.
     """
     if not fb.error_type:
-        return (f"我的事实集覆盖了裁判的全部 {len(fb.covered_points)} 个评分点，"
-                f"编排方式有效。{fb.next_action}")
-    head = f"我以为这样编排就能覆盖全部评分点，但裁判比对后判定 {fb.verdict}。"
+        return (f"My fact set covers all {len(fb.covered_points)} of the referee's scoring points; "
+                f"the orchestration is effective. {fb.next_action}")
+    head = (f"I thought orchestrating it this way would cover every scoring point, but after the "
+            f"referee's comparison the verdict was {fb.verdict}.")
     body = fb.feedback
-    mis = (" ".join(f"错误假设：{m}" for m in fb.misconceptions)) if fb.misconceptions else ""
-    act = f"下一步：{fb.next_action}"
+    mis = (" ".join(f"Wrong assumption: {m}" for m in fb.misconceptions)) if fb.misconceptions else ""
+    act = f"Next step: {fb.next_action}"
     return " ".join(x for x in (head, body, mis, act) if x)
 
 
 # --------------------------------------------------------------------------
-# 离线重算：从 run_log 的一行重建反馈（用于验证"结构说得对不对"）
+# Offline recomputation: rebuild the feedback from one run_log row (used to verify "is the structure
+# right")
 # --------------------------------------------------------------------------
 def dim_map_for(topic_id: str) -> dict[str, str]:
-    """评分点原文 → dimension。
+    """Scoring point original text → dimension.
 
-    离线重算必须补这个映射：run_log 里存的 missing 是**评分点原文**
-    （例如「eco 局胜率（0-100 的百分比数值，如 42.9）」），直接拿来当维度名
-    根本没法读；真正的维度名在 rubric 里（`eco_win_rate`）。
+    Offline recomputation must supply this mapping: the `missing` entries stored in run_log are the
+    **original scoring point text** (e.g. "eco round win rate (a percentage value 0-100, such as
+    42.9)"), which is unusable as a dimension name; the real dimension names live in the rubric
+    (`eco_win_rate`).
     """
     try:
         from tasks import TASKS
@@ -659,7 +744,8 @@ def dim_map_for(topic_id: str) -> dict[str, str]:
 
 
 def from_row(row: dict[str, Any]) -> Feedback:
-    """用 run_log 的一行重建反馈包 —— 不重跑模型，只重算结构。"""
+    """Rebuild the feedback bundle from one run_log row — no model re-run, structure recomputed
+    only."""
     topic = str(row.get("topic_id") or "")
     return build_feedback(
         verdict=str(row.get("verdict") or ""),
@@ -676,10 +762,11 @@ def from_row(row: dict[str, Any]) -> Feedback:
 
 
 def _main() -> int:
-    ap = argparse.ArgumentParser(description="判题反馈结构：离线重算 + 回放")
-    ap.add_argument("--topic", default="", help="只看这道题；不传则看全部")
-    ap.add_argument("--limit", type=int, default=5, help="回放最近几条")
-    ap.add_argument("--json", action="store_true", help="输出原始 JSON")
+    ap = argparse.ArgumentParser(description="Grading feedback structure: offline recomputation + "
+                                             "replay")
+    ap.add_argument("--topic", default="", help="only look at this question; all of them if omitted")
+    ap.add_argument("--limit", type=int, default=5, help="replay the most recent N entries")
+    ap.add_argument("--json", action="store_true", help="print the raw JSON")
     args = ap.parse_args()
 
     import run_log
@@ -688,7 +775,7 @@ def _main() -> int:
         rows = [r for r in rows if str(r.get("topic_id") or "") == args.topic]
     rows = rows[-args.limit:]
     if not rows:
-        print("没有可回放的日志")
+        print("No log entries to replay")
         return 1
 
     for r in rows:
@@ -697,19 +784,19 @@ def _main() -> int:
             print(json.dumps(fb.to_dict(), ensure_ascii=False))
             continue
         print(f"[{r.get('ts')}] {r.get('topic_id')} · {fb.verdict} · "
-              f"覆盖率 {fb.coverage:.0%}")
-        print(f"  判据      : {fb.feedback}")
+              f"coverage {fb.coverage:.0%}")
+        print(f"  Criteria     : {fb.feedback}")
         if fb.error_type:
-            print(f"  错误类型  : {fb.error_type}  （{ERROR_TYPES.get(fb.error_type, '')}）")
-        print(f"  下一步    : {fb.next_action}")
+            print(f"  Error type   : {fb.error_type}  ({ERROR_TYPES.get(fb.error_type, '')})")
+        print(f"  Next step    : {fb.next_action}")
         for m in fb.misconceptions:
-            print(f"  错误假设  : {m}")
-        print(f"  我的编排  : {' → '.join(fb.my_plan) or '（无）'}")
-        print(f"  裁判编排  : {' → '.join(fb.reference_plan) or '（无）'}")
+            print(f"  Wrong assumption: {m}")
+        print(f"  My orchestration: {' → '.join(fb.my_plan) or '(none)'}")
+        print(f"  Referee orchestration: {' → '.join(fb.reference_plan) or '(none)'}")
         for s in fb.step_feedback:
-            flag = "✓调了" if s["used"] else "✗没调"
-            print(f"  步骤      : {flag} {s['tool']}"
-                  + (f" —— {s['note']}" if s["note"] else ""))
+            flag = "✓called" if s["used"] else "✗not called"
+            print(f"  Step         : {flag} {s['tool']}"
+                  + (f" — {s['note']}" if s["note"] else ""))
         print()
     return 0
 

@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""面板数据层：把 run_log.jsonl 聚合成面板要显示的视图。
+"""Dashboard data layer: aggregates run_log.jsonl into the views the dashboard displays.
 
-契约全部照猫娘伴学的 ui_api.py：
-- 无证据 = unassessed + None，**不是 0%**（ui_api.py:41-47）
-- 五档状态 weak/progress/good/mastered + unassessed（ui_api.py:62-73）
-- flags 徽标 false_mastery / low_confidence（knowledge_tracker.py:298-299, :274）
-- 掌握度变化显示成「掌握度 {before} -> {after}」（i18n zh-CN: ui.practice.mastery_delta_fmt）
+All contracts mirror the study companion's ui_api.py:
+- No evidence = unassessed + None, **not 0%** (ui_api.py:41-47)
+- Five-band status weak/progress/good/mastered + unassessed (ui_api.py:62-73)
+- flags badges false_mastery / low_confidence (knowledge_tracker.py:298-299, :274)
+- Mastery change displayed as "Mastery {before} -> {after}" (i18n zh-CN: ui.practice.mastery_delta_fmt)
 
-VLML 没有前端（仓库内无 html/tsx/jsx），所以面板形态取自伴学，数据取自 MVE。
+VLML has no frontend (no html/tsx/jsx in the repo), so the dashboard form comes from the study companion and the data from MVE.
 """
 
 from __future__ import annotations
@@ -25,20 +25,20 @@ ROOT = Path(__file__).resolve().parent
 
 
 def _task_library() -> list[dict[str, Any]]:
-    """题目清单（不 import vlml_env，面板启动不拉 VLML）。"""
+    """Question list (does not import vlml_env, so dashboard startup does not pull in VLML)."""
     try:
         import tasks
         return tasks.all_briefs()
     except Exception as e:
-        return [{"topic_id": "?", "question": f"题目注册表加载失败：{e}",
+        return [{"topic_id": "?", "question": f"Failed to load the question registry: {e}",
                  "difficulty": 0, "key_points": [], "weights": {},
                  "dims": [], "has_answer_spec": 0}]
 
 
 def _mc_thinking_view() -> dict[str, Any]:
-    """MC 思路学习入库情况：4 条域无关规划思维（topic=mc-thinking）是否已进共享库。
+    """MC thinking-learning import status: whether the 4 domain-agnostic planning thoughts (topic=mc-thinking) have entered the shared library.
 
-    面板「技能库」区据此显示「MC 思维入库 N 条」，让"思维积累入库"可见、可证。
+    The dashboard's "Skill library" section shows "MC thinking imported: N entries" based on this, making "thinking accumulation imported" visible and provable.
     """
     items = [s for s in skill_store.all_skills() if s.get("topic") == "mc-thinking"]
     skill_md = ROOT / "thought_store" / "SKILL.md"
@@ -55,13 +55,13 @@ def _mc_thinking_view() -> dict[str, Any]:
 
 
 def _referee_view(topic_id: str) -> dict[str, Any]:
-    """裁判（VLML0）的标准答案视图 —— 双层隔离（2026-10-12 纠偏）。
+    """The referee's (VLML0) standard-answer view — two-layer isolation (course-corrected 2026-10-12).
 
-      · `facts` / `narrative` = 客观裁判（DB 基准），Voyager 比对与面板判分都用它；
-      · `judge` = 给人看的 VLML 视角（叙事 + LLM 估算），**仅供参考、不参与判分**。
+      · `facts` / `narrative` = the objective referee (DB baseline), used by both Voyager comparison and dashboard scoring;
+      · `judge` = the VLML perspective for humans (narrative + LLM estimate), **for reference only, not part of scoring**.
 
-    只显示已经有了的（缓存命中）；没有就标 pending，不现场跑——
-    面板是读视图，不该在渲染时触发一次 LLM 编排。
+    Only show what already exists (cache hit); when absent mark pending, and do not run live —
+    the dashboard is a read view, and rendering should not trigger an LLM orchestration.
     """
     if not topic_id:
         return {"state": "pending", "facts": []}
@@ -97,7 +97,7 @@ def _referee_view(topic_id: str) -> dict[str, Any]:
         "judge": judge_view,
     }
 
-# 五档 UI 状态（照 ui_api.py:62-73 的阈值）
+# Five-band UI status (mirroring the thresholds in ui_api.py:62-73)
 def _ui_status(mastery: float | None, flags: list[str]) -> str:
     if mastery is None:
         return "unassessed"
@@ -111,30 +111,30 @@ def _ui_status(mastery: float | None, flags: list[str]) -> str:
 
 
 STATUS_LABEL = {
-    "unassessed": "未评估",
-    "weak": "薄弱",
-    "progress": "进行中",
-    "good": "熟练",
-    "mastered": "已掌握",
+    "unassessed": "Unassessed",
+    "weak": "Weak",
+    "progress": "In progress",
+    "good": "Proficient",
+    "mastered": "Mastered",
 }
 
 FLAG_LABEL = {
-    "false_mastery": "假性掌握",
-    # V1 的二元 flag（attempts<3）。V2 已改成连续折扣，不再产生它；
-    # 保留标签只为**旧日志**还能显示，新的快照不会再带这个。
-    "low_confidence": "样本不足（旧 V1）",
-    # 伴学 mastery_v2.py:285 —— 有没消化的错题，掌握度被封在 0.79
-    "unresolved_wrong_cap": "有未消化错题",
-    # V2 新增（mastery_v2.py:241、:274）
-    "no_evidence": "没有证据",
-    "zero_confidence_evidence": "证据权重为零",
+    "false_mastery": "False mastery",
+    # V1's binary flag (attempts<3). V2 has switched to continuous discounting and no longer produces it;
+    # the label is kept only so **old logs** still display; new snapshots will not carry it.
+    "low_confidence": "Insufficient sample size (legacy V1)",
+    # Study companion mastery_v2.py:285 — undigested wrong answers cap mastery at 0.79
+    "unresolved_wrong_cap": "Has undigested wrong answers",
+    # New in V2 (mastery_v2.py:241, :274)
+    "no_evidence": "No evidence",
+    "zero_confidence_evidence": "Zero evidence weight",
 }
 
 
 def _retention_view() -> dict[str, dict[str, Any]]:
-    """保持度（会忘）：每道题此刻还剩多少。
+    """Retention (forgetting): how much of each question remains right now.
 
-    V2 的投影只回答"现在掌握到什么程度"，这一层回答"过一阵还剩多少"。
+    V2's projection only answers "to what degree is it mastered now"; this layer answers "how much remains after a while".
     """
     try:
         import mastery_retention
@@ -149,15 +149,15 @@ def _pct(v: float | None) -> str | None:
 
 
 def _exam_view() -> dict[str, Any]:
-    """**真实水平曲线** —— 撤支架考核（exam_log.jsonl）。
+    """**True-level curve** — scaffold-removed exam (exam_log.jsonl).
 
-    为什么面板上必须另画这一条：以前那条 `coverage_track`（已下架）读的是 run_log，
-    那是**带着知识图谱**练出来的覆盖率 —— 实测给着图谱首轮就 100%，
-    连起来是一条从第一行就贴顶的平线。它量的是支架的高度，不是模型的水平。
-    撤掉图谱重考出来的数（`exam.py`）才是学习曲线该画的东西。
+    Why the dashboard must draw this separately: the old `coverage_track` (retired) read run_log,
+    which is coverage from practice **with the knowledge graph** — observed 100% in the first round with the graph,
+    forming a flat line pinned to the top from the very first row. It measures the height of the scaffold, not the model's level.
+    The numbers from re-examining without the graph (`exam.py`) are what the learning curve should plot.
 
-    画法按**题分行**，不是首尾相连：第 3 个数据点可能是本来就会的题，
-    第 4 个是本来 0% 的题，连成线的话形状由选题顺序决定，不由学习决定。
+    Plotted **per question row**, not connected end to end: the 3rd data point may be a question it already knew,
+    the 4th one originally at 0%; connecting them into a line makes the shape determined by question selection order, not by learning.
     """
     try:
         import exam
@@ -166,8 +166,8 @@ def _exam_view() -> dict[str, Any]:
     rows = exam.load()
     if not rows:
         return {"has_data": False,
-                "hint": "还没有裸考记录：python mve/exam.py --all（全库摸底）",
-                # 教学图谱（伴学出题/图谱移植）：无数据时也展示知识点图谱骨架
+                "hint": "No bare-exam records yet: python mve/exam.py --all (whole-library placement)",
+                # Teaching graph (study companion question generation / graph port): show the topic graph skeleton even with no data
                 "teaching": _teaching_payload()}
 
     by_topic: dict[str, list[dict[str, Any]]] = {}
@@ -176,10 +176,10 @@ def _exam_view() -> dict[str, Any]:
 
     tracks: list[dict[str, Any]] = []
     for t, seq in by_topic.items():
-        # 基线**锚定 placement**，不能取"第一条记录" —— 加了结业考（kind=final）
-        # 之后，一道题的记录里顺序不再保证摸底在最前（补摸底、--force 重跑
-        # 都会打乱）。"第一条 == 摸底"这个隐含假设一旦破了，基线就变成
-        # "练过之后的水平"，学习曲线凭空消失。
+        # Baseline **anchored to placement**, never "the first record" — after adding the final exam (kind=final),
+        # a question's record order no longer guarantees the placement comes first (make-up placements, --force reruns
+        # all shuffle it). Once the implicit assumption "first record == placement" breaks, the baseline becomes
+        # "the level after practice", and the learning curve vanishes into thin air.
         pl = [r for r in seq if str(r.get("kind") or "") == "placement"]
         anchor = pl[0] if pl else seq[0]
         base = float(anchor.get("coverage") or 0.0)
@@ -198,16 +198,16 @@ def _exam_view() -> dict[str, Any]:
                        "kind": str(r.get("kind") or "")}
                       for c, r in zip(rest_cov, rest)],
             "delta_pp": round((rest_cov[-1] - base) * 100) if rest_cov else None,
-            # 最新水平单独给一列：`profile()` 只留最后一次记录，练后重考 100%
-            # 会把摸底顶掉。只有 baseline 那列会让人以为"练了个寂寞"，
-            # 只有 latest 那列会让人以为"本来就会" —— 两列必须一起给。
+            # Latest level gets its own column: `profile()` keeps only the last record, so a post-practice re-exam at 100%
+            # displaces the placement. The baseline column alone makes people think "practiced for nothing",
+            # and the latest column alone makes people think "it already knew" — both columns must be given together.
             "latest": rest_cov[-1] if rest_cov else base,
             "latest_pct": _pct(rest_cov[-1] if rest_cov else base),
             "latest_level": exam.level_of(rest_cov[-1] if rest_cov else base),
-            # 结业考单独一列：带着技能库全库再考一遍，回答"学到现在还剩多少"
+            # Final exam gets its own column: re-examine the whole library with the skill library, answering "how much remains after learning so far"
             "final": finals[-1] if finals else None,
             "final_pct": _pct(finals[-1]) if finals else None,
-            # 练了裸考也不涨 → 已毕业让位（伴学没有这条，MVE 自有）
+            # Practiced but bare exam still does not rise → graduated and make way (the study companion has no such line; MVE's own)
             "exhausted": bool(exam.exhausted(t)),
         })
     tracks.sort(key=lambda x: (x["baseline"], x["topic_id"]))
@@ -229,17 +229,17 @@ def _exam_view() -> dict[str, Any]:
         "avg_delta_pp": round(sum(deltas) / len(deltas)) if deltas else None,
         "mastered": sum(1 for c in covs if c >= 0.80),
         "mastered_now": sum(1 for c in lates if c >= 0.80),
-        # 结业考：带着现有技能库全库重考。它和「练后重考」的差别是覆盖面 ——
-        # 练后重考只考刚练过的那一题，结业考是全库，所以均值才可比。
+        # Final exam: re-examine the whole library with the current skill library. Its difference from "post-practice re-exam" is coverage —
+        # the post-practice re-exam only tests the question just practiced; the final exam is the whole library, so the averages are comparable.
         "final": _final_view(tracks, covs),
-        # 迁移对照：没练过的题涨不涨 —— 分辨「记住了这道题」和「真学会了」
+        # Transfer control: do unpracticed questions rise — telling "memorized this question" from "truly learned"
         "transfer": {
             "count": len(tseq),
             "seq": [_pct(c) for c in tseq],
             "rose": bool(len(tseq) >= 2 and tseq[-1] > tseq[0] + 0.001),
-            # 迁移成功率：未练题独立考核里真正「独立做对」的占比。
-            # 考核记录没有 success 布尔，coverage≥1.0 就是它的达成形态
-            # （全部评分点覆盖且值正确）。这是判据区最硬的信号。
+            # Transfer success rate: the share truly "solved independently" in unpracticed questions' independent exams.
+            # Exam records have no success boolean; coverage≥1.0 is its achieved form
+            # (all rubric points covered with correct values). This is the hardest signal in the criterion area.
             "ok_count": sum(1 for c in tseq if c >= 1.0),
         } if tseq else None,
     }
@@ -247,11 +247,11 @@ def _exam_view() -> dict[str, Any]:
 
 def _final_view(tracks: list[dict[str, Any]],
                 baselines: list[float]) -> dict[str, Any] | None:
-    """结业考汇总：全库带着技能库撤图谱重考一遍之后的水平。
+    """Final exam summary: the level after re-examining the whole library with the skill library and without the graph.
 
-    为什么必须单列：`latest` 那列是"每题最后一次考核"，练后重考 100% 也在里面，
-    但它只覆盖了**练过的**题 —— 拿它当"现在的水平"会把没练过的题漏掉。
-    结业考是**全库**，所以它的均值才和摸底均值可比（同一个分母）。
+    Why it must be a separate column: the `latest` column is "each question's last exam", and post-practice re-exams at 100% are included,
+    but it covers only the **practiced** questions — using it as "the current level" leaves out unpracticed questions.
+    The final exam is the **whole library**, so its average is comparable with the placement average (same denominator).
     """
     vals = [float(t["final"]) for t in tracks if t.get("final") is not None]
     if not vals:
@@ -269,10 +269,10 @@ def _final_view(tracks: list[dict[str, Any]],
 
 
 def _human_imports(limit: int = 10) -> list[dict[str, Any]]:
-    """人导入的历史（直接读文件，不 import coach —— 那条会拉起整个 VLML）。
+    """History of human imports (reads the file directly, does not import coach — that pulls in the whole VLML).
 
-    助产士第二轮的原话：伴学面板里「学习者可以导入题干和内容以换得系统对此的
-    记忆和解释」，我们与之同构，只是记忆与解释的提供方换成 VLML。
+    The midwife's exact words from round two: in the study companion's dashboard "learners can import question text and content in exchange for the system's
+    memory and explanation of it"; ours is isomorphic, except the provider of memory and explanation is swapped to VLML.
     """
     log = ROOT / "coach_log.jsonl"
     if not log.exists():
@@ -290,16 +290,16 @@ def _human_imports(limit: int = 10) -> list[dict[str, Any]]:
 
 
 def _ability_universe_size() -> int:
-    """能力全集的大小（掌握度的**分母**）：图谱节点 + **消费侧**登记的能力项。
+    """The size of the full capability set (the **denominator** of mastery): graph nodes + capability items registered on the **consumption side**.
 
-    ⚠️ 为什么排掉练习线的 `runtime_*`：`runtime_topics.json` 是练习线
-    （`voyager_vlml/loop.py:_save_runtime_topic`）与消费线
-    （`voyager_vlml/consume.py:_runtime_topic_id`）**共用的同一个文件**，
-    线上 16 项里 **12 项是 `source="practice"`**。练习线登记的题是
-    "课程打算练的"，不是"人问过的"，算进分母只会稀释掌握度 —— 而且消费侧
-    大概率永远不会答那些题，等于分母里躺着 12 道拿不到的分。
+    ⚠️ Why the practice line's `runtime_*` entries are excluded: `runtime_topics.json` is **the same file shared** by the practice line
+    (`voyager_vlml/loop.py:_save_runtime_topic`) and the consumption line
+    (`voyager_vlml/consume.py:_runtime_topic_id`),
+    and of the 16 live entries, **12 are `source="practice"`**. Questions registered by the practice line are
+    "what the curriculum plans to practice", not "what humans asked", and counting them in the denominator only dilutes mastery — moreover the consumption side
+    will most likely never answer those questions, equivalent to 12 unearnable points lying in the denominator.
 
-    与 `consume._ability_universe()` 同口径（那里是集合、这里是大小）。
+    Same convention as `consume._ability_universe()` (a set there, a size here).
     """
     n = 0
     try:
@@ -320,38 +320,38 @@ def _ability_universe_size() -> int:
 
 
 def _consume_curve(limit: int = 40) -> list[dict[str, Any]]:
-    """**消费进步曲线** —— 用户 2026-10-13 定：「测 Voyager 的进步曲线和掌握度
-    全在消费这测就好了」。
+    """**Consumption progress curve** — decided by the user on 2026-10-13: "measuring Voyager's progress curve and mastery
+    can all just be measured on the consumption side".
 
-    为什么是消费而不是练习：
-      练习（run_log）不判分 —— VLML 的尺子不能进 Voyager 的反馈环，所以那条线
-      只有「取没取到数」，画出来的曲线是"链路通不通"，不是"水平高不高"。
-      消费（人问一句 → Voyager 用已积累的能力答）才是**交付**：人真的要一个答案，
-      这时候用 VLML0 裁判独立跑一遍量出覆盖率，才是真实的进步曲线。
+    Why consumption and not practice:
+      Practice (run_log) is not scored — VLML's ruler cannot enter Voyager's feedback loop, so that line
+      only has "was data retrieved or not", and the curve it plots is "is the pipeline working", not "is the level high".
+      Consumption (a human asks → Voyager answers with accumulated capability) is the **delivery**: the human really wants an answer,
+      and measuring coverage by having the VLML0 referee run independently at that point is the real progress curve.
 
-    曲线画的是**累计已掌握数**（`mastered_total`）—— 掌握不是覆盖率折算的分数，
-    而是「答完了 → 这题进能力库 → 掌握」（用户 2026-10-13 定义）。
-    所以进步 = 能力集合在变大，y 轴是"会做的题有几道"。
+    The curve plots the **cumulative mastered count** (`mastered_total`) — mastery is not a score discounted from coverage,
+    but "answered → this question enters the capability library → mastered" (defined by the user on 2026-10-13).
+    So progress = the capability set growing, with the y axis being "how many questions it can do".
 
-    ⚠️ **学习时不计入**（用户 2026-10-14 定，照原版 Voyager）：
-      原版 `voyager/agents/curriculum.py:135` 学习曲线 = `len(self.completed_tasks)`，
-      `:339` **只在成功时** append，且原版压根没有"考试"这回事 ——
-      学习曲线 = **能力集合的大小**，练习跑通只推进课程规划，不算能力变大。
-      MVE 的练习线（`curriculum.py:296` / `run_mve.py:463`）也在写
-      `MasteryStore` 的 `completed`，但那是**去重位**（"规划过了别再规划"），
-      不是掌握 —— 所以这条曲线**只数消费侧答出来的题**，不读 MasteryStore。
+    ⚠️ **Learning does not count** (decided by the user on 2026-10-14, mirroring the original Voyager):
+      The original `voyager/agents/curriculum.py:135` learning curve = `len(self.completed_tasks)`,
+      `:339` appends **only on success**, and the original has no concept of "exams" at all —
+      learning curve = **the size of the capability set**; a practice success only advances curriculum planning and does not count as capability growth.
+      MVE's practice line (`curriculum.py:296` / `run_mve.py:463`) also writes
+      `MasteryStore`'s `completed`, but that is a **dedup bit** ("planned already, do not plan again"),
+      not mastery — so this curve **only counts questions answered on the consumption side**, never reading MasteryStore.
 
-    ⚠️ `mastered_total` **在这里重算**，不信记录里当时算的那个数：
-      口径一改，历史记录里写死的旧数不会自己更新 —— 服务器上那条老记录是
-      `58 / 45`（129%，分子比分母大），直接画出来曲线第一点就贴顶还越过 100%。
-      重算规则就是原版那句：`len(completed_tasks)` —— 答出来了 +1，失败不计。
+    ⚠️ `mastered_total` is **recomputed here**, not trusting the number computed at record time:
+      once the convention changes, old numbers hard-written in history do not update themselves — that old server record is
+      `58 / 45` (129%, numerator bigger than denominator), and plotting it directly pins the curve's first point to the top and past 100%.
+      The recompute rule is the original's line: `len(completed_tasks)` — answered +1, failures not counted.
 
-    覆盖率另记一条（那是这次答得全不全的质量分，不是掌握度）。
-    老的人导入（纯 VLML 解释）没有这些字段，一律跳过 ——
-    不能拿 None 补 0，那会把"没测"画成"测得 0 分"。
+    Coverage is recorded on a separate line (that is the quality score of how completely this answer covered, not mastery).
+    Old human imports (pure VLML explanations) lack these fields and are skipped entirely —
+    None must not be filled in as 0, which would plot "not measured" as "measured 0".
     """
     out: list[dict[str, Any]] = []
-    # y 轴用累计掌握数（原版口径），`universe` 只作"总共多少题"的参照显示
+    # The y axis uses the cumulative mastered count (original convention); `universe` is only a reference display for "how many questions total"
     universe = _ability_universe_size()
     book: set[str] = set()
     for i, rec in enumerate(
@@ -359,7 +359,7 @@ def _consume_curve(limit: int = 40) -> list[dict[str, Any]]:
          if r.get("mode") == "voyager_consume"],
         start=1,
     ):
-        # 累计：只有**答出来了**才进能力集合（失败不计入，照原版 :339）
+        # Cumulative: only **answered** enters the capability set (failures not counted, mirroring the original :339)
         if rec.get("mastered") and str(rec.get("topic_id") or "").strip():
             book.add(str(rec.get("topic_id")).strip())
         cov = rec.get("coverage")
@@ -371,13 +371,13 @@ def _consume_curve(limit: int = 40) -> list[dict[str, Any]]:
             "coverage": float(cov) if cov is not None else None,
             "score": rec.get("score"),
             "verdict": str(rec.get("verdict") or ""),
-            # 掌握（能力集合）—— 在这**重算**，不信记录里写死的旧口径数
+            # Mastery (capability set) — **recomputed** here, not trusting the old-convention number hard-written in records
             "mastered": bool(rec.get("mastered")),
             "mastered_total": len(book),
             "ability_total": max(universe, len(book)),
             "skill_action": str(rec.get("skill_action") or ""),
             "reused": bool(rec.get("reused")),
-            # —— 方法与做法的比对结论（判分的依据，得让人看见"凭什么判这个分"）——
+            # —— Comparison conclusions of method vs approach (the basis of scoring; people must see "on what grounds this score was given") ——
             "judge": str(rec.get("judge") or ""),
             "method_reason": str(rec.get("method_reason") or ""),
             "method_diff": str(rec.get("method_diff") or ""),
@@ -394,7 +394,7 @@ def _consume_curve(limit: int = 40) -> list[dict[str, Any]]:
 
 
 def _db_view() -> dict[str, Any]:
-    """当前指向哪个库（不 import vlml_env，避免面板启动就拉起整个 VLML）。"""
+    """Which database is currently pointed at (does not import vlml_env, to avoid dashboard startup pulling in the whole VLML)."""
     try:
         import db_switch
         return {"path": db_switch.current_path(), "is_default": db_switch.is_default()}
@@ -404,10 +404,10 @@ def _db_view() -> dict[str, Any]:
 
 
 def _causal_view(limit: int = 25) -> dict[str, Any]:
-    """行动因果时间线（control / attempt / referee / narrative 同一条单调序列）。
+    """Action causal timeline (control / attempt / referee / narrative on the same monotonic sequence).
 
-    面板要显示它是因为：人导入**不进掌握度**，如果面板只有掌握度视图，
-    人就会觉得自己导入的东西石沉大海。这条线是「导入确实发生了」的唯一证据。
+    The dashboard must show it because: human imports **do not enter mastery**, and if the dashboard only had a mastery view,
+    people would feel their imports vanished without a trace. This line is the only evidence that "the import really happened".
     """
     try:
         rows = causal_timeline.for_panel(limit)
@@ -425,25 +425,25 @@ def _causal_view(limit: int = 25) -> dict[str, Any]:
 
 
 def _pilot_view() -> dict[str, Any]:
-    """驾驶舱状态（面板只读，不持有进程句柄）。
+    """Cockpit status (the dashboard only reads; it holds no process handle).
 
-    为什么不把进程挂在 dashboard 里：面板一重启句柄就丢了，人点过"启动"
-    却查不到在不在跑，比不给按钮更糟。所以状态写在文件里，这里只读文件。
+    Why not hang the process on the dashboard: a dashboard restart loses the handle, and after pressing "start"
+    the human cannot tell whether it is running, which is worse than not offering the button. So status is written to a file, and this only reads the file.
     """
     try:
         import pilot
         st = pilot.read()
         return {**st, "tail": pilot.tail(80)}
     except Exception as e:
-        return {"running": False, "tail": "", "why": f"驾驶舱不可用：{type(e).__name__}: {e}"[:160]}
+        return {"running": False, "tail": "", "why": f"Cockpit unavailable: {type(e).__name__}: {e}"[:160]}
 
 
 def _voyager_view() -> dict[str, Any]:
-    """Voyager 真实学习驾驶舱状态（面板只读，不持有进程句柄）。
+    """Voyager real-learning cockpit status (the dashboard only reads; it holds no process handle).
 
-    与 _pilot_view 同构：状态写在 voyager_pilot_state.json，进度由
-    run_voyager_learn.py 每任务写 voyager_progress.json。这里只读文件，
-    并附上技能库 / 课程进度 / 事件目录的**存在性**——让人一眼看清"现在库里有什么"。
+    Isomorphic to _pilot_view: status is written to voyager_pilot_state.json, and progress is
+    written to voyager_progress.json per task by run_voyager_learn.py. This only reads files,
+    and additionally attaches the **existence** of the skill library / curriculum progress / events directory — so people see at a glance "what is in the library now".
     """
     try:
         import voyager_pilot
@@ -457,28 +457,28 @@ def _voyager_view() -> dict[str, Any]:
             "events_dir_exists": EVENTS_DIR.exists(),
         }
     except Exception as e:
-        return {"running": False, "tail": "", "why": f"Voyager 驾驶舱不可用：{type(e).__name__}: {e}"[:160]}
+        return {"running": False, "tail": "", "why": f"Voyager cockpit unavailable: {type(e).__name__}: {e}"[:160]}
 
 
 def _next_recommend() -> dict[str, Any]:
-    """出题器当前推荐（带理由）。人导入之后这条应该跟着变。"""
+    """The question generator's current recommendation (with reason). After a human import, this should change accordingly."""
     try:
         import planner
         return planner.next_brief()
     except Exception as e:
         return {"topic_id": "", "reason": "unavailable",
-                "reason_label": "不可用", "explanation": f"{type(e).__name__}: {e}"[:160],
+                "reason_label": "Unavailable", "explanation": f"{type(e).__name__}: {e}"[:160],
                 "question": "", "difficulty": 0}
 
 
 def probe_env() -> dict[str, Any]:
-    """探测 VLML 是否可用。
+    """Probe whether VLML is available.
 
-    助产士第三轮的要求：MCP 连不上时面板必须说清楚，不能静默显示空。
-    这里不做重试，只报状态 + 原因，由人决定下一步。
+    The midwife's requirement from round three: when MCP is unreachable the dashboard must say so clearly, not silently display empty.
+    No retries here; only report status + reason, and let the human decide the next step.
     """
     try:
-        import vlml_env  # noqa: F401  (会 chdir + 打补丁)
+        import vlml_env  # noqa: F401  (chdirs + patches)
         from vlml_env import get_database_info
         import asyncio
 
@@ -486,7 +486,7 @@ def probe_env() -> dict[str, Any]:
         if isinstance(info, dict) and info.get("error"):
             return {"ok": False, "state": "degraded",
                     "reason": str(info["error"])[:200]}
-        # 返回结构核实过：available_tables(list) / statistics(dict) / usage_tips(list)
+        # Return structure verified: available_tables(list) / statistics(dict) / usage_tips(list)
         tables = list(info.get("available_tables") or [])
         stats = dict(info.get("statistics") or {})
         return {
@@ -498,7 +498,7 @@ def probe_env() -> dict[str, Any]:
             "usage_tips": len(info.get("usage_tips") or []),
             "reason": "",
         }
-    except Exception as e:  # 任何失败都要能被面板显示出来
+    except Exception as e:  # Any failure must be displayable on the dashboard
         return {"ok": False, "state": "unavailable",
                 "reason": f"{type(e).__name__}: {e}"[:200]}
 
@@ -506,16 +506,16 @@ def probe_env() -> dict[str, Any]:
 def build_state() -> dict[str, Any]:
     rows = run_log.load_all()
     memory = skill_store.load()
-    # 防膨胀/防幻觉能不能自证，就看这两个数
+    # Whether bloat/hallucination prevention is self-evident comes down to these two numbers
     skill_stats = skill_store.stats()
-    # 排序：**最有效（ok 多）的排最前**，其次被注入次数多的，完全没用过的排最后。
+    # Sort: **most effective (high ok) first**, then most injected, with never-used ones last.
     #
-    # 不排序的话这列表是插入序 —— 复用链接上之前 25 条全 0/0 看不出差别；
-    # 接上之后（实测 hits 9 / ok 5），真正被复用且帮上忙的那 2 条会淹在
-    # 31 条的最底下，人根本看不见「哪些经验是真在用的」。
-    # hits / ok 的语义（skill_store.py:313 / :327）：
-    #   hits = 被检索注入过几次 prompt；ok = 注入后这一轮判成功几次。
-    #   「hits 涨、ok 不涨」= 注入了但没帮上，是要它沉底的信号。
+    # Unsorted, this list is in insertion order — before the reuse link, all 25 entries showed 0/0 with no difference;
+    # after connecting (observed hits 9 / ok 5), the 2 entries truly reused and helpful would drown at
+    # the very bottom of 31 entries, and people could not see at all "which lessons are really in use".
+    # Semantics of hits / ok (skill_store.py:313 / :327):
+    #   hits = how many times injected into the prompt via retrieval; ok = how many times judged successful this round after injection.
+    #   "hits rise, ok does not" = injected but did not help, which is the signal to sink it to the bottom.
     _detail = [
         {
             "key": s.get("key", ""),
@@ -535,13 +535,13 @@ def build_state() -> dict[str, Any]:
     _detail.sort(key=lambda x: (-x["ok"], -x["hits"]))
     skill_detail = _detail
 
-    # 人导入通路：这两块在「还没跑过」时也要显示 —— 它正是让人开始的地方
+    # Human import path: these two blocks must display even when "nothing has run yet" — they are exactly where people start
     imports = _human_imports()
     recommend = _next_recommend()
     causal = _causal_view()
     pilot_view = _pilot_view()
     db = _db_view()
-    # 练习范围（知识图谱页上点「练习此知识点」设的）。面板只读，不推断。
+    # Practice scope (set by pressing "Practice this topic" on the knowledge graph page). The dashboard only reads, never infers.
     scope = practice_scope.get_scope()
 
     if not rows:
@@ -553,8 +553,8 @@ def build_state() -> dict[str, Any]:
             "voyager": _voyager_view(),
             "practice_scope": scope,
             "imports": imports,
-            # 消费进步曲线：run_log 为空（比如刚清库）也要照常给 ——
-            # 进步是在消费这条线上测的，练习没跑过不影响它
+            # Consumption progress curve: given as usual even when run_log is empty (e.g. right after clearing the library) —
+            # progress is measured on the consumption line, so practice never having run does not affect it
             "consume_curve": _consume_curve(),
             "recommend": recommend,
             "causal": causal,
@@ -563,20 +563,20 @@ def build_state() -> dict[str, Any]:
             "skill_stats": skill_stats,
             "skill_detail": skill_detail,
             "mc_thinking": _mc_thinking_view(),
-            # 摸底/考核走的是 exam_log.jsonl，**不写** run_log.jsonl（有意分开：
-            # run_log 是带图谱的练习覆盖率，恒 100%，画出来是假平线）。
-            # 所以"run_log 为空"≠"没有任何数据" —— 摸底跑完了一样要给看。
-            # 漏掉这一条的实测后果：线上摸底跑完 7 道题，总览页仍显示
-            # 「还没有任何运行记录」，真实水平曲线根本不出现。
+            # Placement/exams go through exam_log.jsonl and are **never written** to run_log.jsonl (deliberately separated:
+            # run_log is practice coverage with the graph, constant 100%, plotting as a fake flat line).
+            # So "run_log empty" ≠ "no data at all" — after a placement runs it must still be shown.
+            # Observed consequence of omitting this: after 7 placement questions ran live, the overview page still showed
+            # "No run records yet", and the true-level curve never appeared at all.
             "exam_curve": _exam_view(),
-            # 导航上的「轨迹 N 轮」读它；不给就是 "undefined 轮"
+            # The navigation's "trajectory N rounds" reads this; without it, it is "undefined rounds"
             "total_rounds": 0,
             "topic_id": "",
-            "hint": ("还没有练习记录。摸底/考核不入 run_log（走 exam_log）——"
-                     "有裸考数据时下面会照常显示。"),
+            "hint": ("No practice records yet. Placement/exams do not enter run_log (they go through exam_log) —"
+                     "the display below appears as usual once bare-exam data exists."),
         }
 
-    # ---- 全局进度序列（跨运行连续编号）----
+    # ---- Global progress sequence (continuously numbered across runs) ----
     series: list[dict[str, Any]] = []
     for i, r in enumerate(rows, start=1):
         flags = list(r.get("flags") or [])
@@ -585,19 +585,19 @@ def build_state() -> dict[str, Any]:
             "i": i,
             "ts": r.get("ts", ""),
             "mode": r.get("mode", ""),
-            # topic_id 必须带上：导出 md 的「掌握度（按题）」和轮次明细都靠它
-            # 分组/显示。之前只映射了 "task"（命令行传的 --topic，常为空），
-            # 结果导出里题目那一列全是空的。
+            # topic_id must be included: the exported md's "mastery (by question)" and round details both rely on it
+            # for grouping/display. Previously only "task" was mapped (the --topic passed on the command line, often empty),
+            # so the question column in exports was entirely empty.
             "topic_id": str(r.get("topic_id") or r.get("task") or ""),
             "task": r.get("task", ""),
             "round": r.get("round"),
             "coverage": r.get("coverage"),
             "score": r.get("score"),
             "verdict": r.get("verdict", ""),
-            # VLML 观测：全部评分点达成（考核尺子）。旧日志没有这一列 → False
+            # VLML observation: all rubric points achieved (exam ruler). Old logs lack this column → False
             "success": bool(r.get("success")),
-            # 判据层布尔：任务完成（Voyager 尺子：跑通编排 + 拿到数 + 没翻车，
-            # 不数覆盖点）。旧日志没有这一列 → False。
+            # Criterion-layer boolean: task done (Voyager's ruler: orchestration ran + data retrieved + no crash,
+            # coverage points not counted). Old logs lack this column → False.
             "done": bool(r.get("done")),
             "evidence": r.get("evidence_status", ""),
             "mastery": m,
@@ -606,13 +606,13 @@ def build_state() -> dict[str, Any]:
             "status_label": STATUS_LABEL[_ui_status(m, flags)],
             "level": r.get("level"),
             "flags": [{"key": f, "label": FLAG_LABEL.get(f, f)} for f in flags],
-            # V2 新增：证据条数 / recency（时间衰减后的新鲜度）/ 保持度
+            # New in V2: evidence count / recency (freshness after time decay) / retention
             "evidence_count": r.get("mastery_evidence_count"),
             "mastery_recency": r.get("mastery_recency"),
             "retention": _retention_view().get(str(r.get("topic_id") or "")),
             "facts": r.get("facts_count"),
             "judge": r.get("judge", ""),
-            # 叙事段（comparable 恒 False，不参与比对）
+            # Narrative section (comparable always False, not part of comparison)
             "narrative": r.get("narrative", ""),
             "insights": r.get("insights") or [],
             "caveats": r.get("caveats") or [],
@@ -626,22 +626,22 @@ def build_state() -> dict[str, Any]:
             "missing": r.get("missing") or [],
             "rejected": r.get("rejected_low_base") or [],
             "skill_count": r.get("skill_count"),
-            # 防幻觉：本轮被溯源校验丢掉的事实
+            # Hallucination prevention: facts dropped by provenance validation this round
             "hallucinations": r.get("hallucinations") or [],
             "hallucination_count": int(r.get("hallucination_count") or 0),
         })
 
     hallucination_total = sum(s["hallucination_count"] for s in series)
 
-    # ---- 判读：**撤支架考核优先** ----
+    # ---- Reading: **scaffold-removed exam takes priority** ----
     #
-    # 这一段原来只看 run_log 的覆盖率轨迹，判出来的话是错的 —— 实测：
-    # 服务器跑完 7 题摸底（平均 19%）+ 8 次练后重考（全 100%），
-    # 导出的「判读」写的是「首轮即满分：这个任务对模型太简单，测不出学习曲线」。
-    # 依据的那 8 个 100% 全是**带着知识图谱**练出来的（实测给着图谱首轮就满分），
-    # 量的是支架的高度，不是模型的水平。真实情况是 19% → 100%，涨了 81pp。
+    # This section used to look only at run_log's coverage trajectory, and what it judged was wrong — observed:
+    # after the server ran 7 placement questions (19% average) + 8 post-practice re-exams (all 100%),
+    # the exported "reading" said "perfect score in the first round: this task is too easy for the model to measure a learning curve".
+    # The 8 100% figures behind that were all practiced **with the knowledge graph** (observed: perfect score in the first round with the graph),
+    # measuring the height of the scaffold, not the model's level. The reality is 19% → 100%, a rise of 81pp.
     #
-    # 所以判读顺序改成：有撤支架考核数据就以它为准，run_log 那条降级为附注。
+    # So the reading order is changed: when scaffold-removed exam data exists, it takes precedence, and the run_log line is demoted to a footnote.
     cov = [s["coverage"] for s in series if s["coverage"] is not None]
     mas = [s["mastery"] for s in series if s["mastery"] is not None]
     exam_curve = _exam_view()
@@ -652,62 +652,62 @@ def build_state() -> dict[str, Any]:
         n = exam_curve["retested"]
         up = exam_curve["rose"]
         d = exam_curve["avg_delta_pp"] or 0
-        # 「+84pp」里的加号会被 export_md 的 escape_markdown 转义成 "\+84pp"，
-        # 用「涨/退」两个字代替符号。
-        word = "涨" if d > 0 else "退"
+        # The plus sign in "+84pp" gets escaped by export_md's escape_markdown into "\+84pp",
+        # so the two words "rose"/"fell" replace the symbol.
+        word = "rose" if d > 0 else "fell"
         if d > 0:
             reading = "learned"
             reading_text = (
-                f"撤支架考核：摸底 {b}% → 练后重考 {l}%（{n} 道重考里 {up} 道涨，"
-                f"平均{word} {abs(d)}pp）—— 真实水平上升了。"
+                f"Scaffold-removed exam: placement {b}% → post-practice re-exam {l}% ({up} of {n} re-examined questions rose,"
+                f"average {word} {abs(d)}pp) — the true level has risen."
             )
         elif d < 0:
             reading = "regressed"
-            reading_text = (f"撤支架考核：摸底 {b}% → 练后重考 {l}%（平均 {word} {abs(d)}pp）"
-                            f"—— 反而退步，检查技能库是否引入了错误经验。")
+            reading_text = (f"Scaffold-removed exam: placement {b}% → post-practice re-exam {l}% (average {word} {abs(d)}pp)"
+                            f" — regressed instead; check whether the skill library introduced wrong lessons.")
         else:
             reading = "flat"
-            reading_text = (f"撤支架考核：摸底 {b}% → 练后重考 {l}%（持平）—— "
-                            f"练了没涨，学习未发生或任务已饱和。")
+            reading_text = (f"Scaffold-removed exam: placement {b}% → post-practice re-exam {l}% (flat) — "
+                            f"practiced without rising; learning did not occur or the task is saturated.")
     elif exam_curve.get("has_data"):
         reading = "insufficient"
-        reading_text = (f"已摸底 {exam_curve['avg_baseline']}%（{len(exam_curve['tracks'])} 道），"
-                        f"还没重考过 —— 跑「学习单元」后才有 Δ。")
+        reading_text = (f"Placement done at {exam_curve['avg_baseline']}% ({len(exam_curve['tracks'])} questions),"
+                        f"not yet re-examined — run the \"learning units\" to get a Δ.")
     elif len(cov) >= 2:
         first_full = cov[0] >= 1.0
         if first_full:
             reading = "too_easy"
-            reading_text = ("练习首轮即满分：注意这是**带着知识图谱**跑的，量的是支架不是水平。"
-                            "要判学没学会，得跑摸底 + 练后重考（撤支架考核）。")
+            reading_text = ("Perfect score in the first practice round: note this was run **with the knowledge graph**, measuring the scaffold, not the level."
+                            "To judge whether learning happened, run placement + post-practice re-exam (scaffold-removed exam).")
         elif cov[-1] > cov[0]:
             reading = "learned"
-            reading_text = f"覆盖率 {cov[0]:.0%} → {cov[-1]:.0%}：补齐缺失后做得更全了。"
+            reading_text = f"Coverage {cov[0]:.0%} → {cov[-1]:.0%}: more complete after filling the gaps."
         elif cov[-1] < cov[0]:
             reading = "regressed"
-            reading_text = f"覆盖率 {cov[0]:.0%} → {cov[-1]:.0%}：反而退步了，检查技能库是否引入了错误经验。"
+            reading_text = f"Coverage {cov[0]:.0%} → {cov[-1]:.0%}: regressed instead; check whether the skill library introduced wrong lessons."
         else:
             reading = "flat"
-            reading_text = f"覆盖率稳定在 {cov[-1]:.0%}：没有变化，学习未发生或任务已饱和。"
+            reading_text = f"Coverage stable at {cov[-1]:.0%}: no change; learning did not occur or the task is saturated."
     else:
         reading = "insufficient"
-        reading_text = "样本不足（少于 2 次），无法判读进步。"
+        reading_text = "Insufficient sample size (fewer than 2 attempts); progress cannot be read."
 
-    # mastery 上升不能当证据：V2 里 confidence 随**证据权重之和**上升，
-    # 权重会被时间衰减和评价可信度拉低，但**刷轮次依然能把它推高**。
-    # 判据必须用判据层的 success（self-verification 布尔），不用覆盖率，
-    # 更不用 mastery —— 掌握度只做独立评估，不当学习判据。
+    # Rising mastery cannot be used as evidence: in V2, confidence rises with the **sum of evidence weights**,
+    # and weights are pulled down by time decay and evaluator confidence, but **grinding rounds can still push it up**.
+    # The criterion must use the criterion layer's success (self-verification boolean), not coverage,
+    # and certainly not mastery — mastery is only an independent assessment, never a learning criterion.
     mas_warning = (
-        "mastery 的 confidence = 1-exp(-证据权重和/4)，反复作答仍会把它推高；"
-        "它只做独立评估。判据看判据区的 success（全部评分点达成）。"
+        "mastery's confidence = 1-exp(-sum of evidence weights/4), which repeated answering still pushes up;"
+        "it is only an independent assessment. For the criterion, look at success (all rubric points achieved) in the criterion area."
         if len(mas) >= 2 else None
     )
 
-    # ⚠️ 「编排轨迹是否变复杂」这一路（traj_sizes / tool_sets / new_tools）已**下架**：
-    #   它读的 run_log.trajectory 只由已冻结的旧后端 mve/run_mve.py 写入，
-    #   新后端 voyager_vlml/loop.py 不把工具序列落进 run_log —— 线上 36 条记录里
-    #   恒为空，算出来永远是 [0,0,...] 和 []。面板上那张「编排轨迹」表随之下架。
-    #   「这轮调了哪些工具、成败、取到几行」改由 mve/loop_state.json 里的
-    #   循环心跳提供（tool_calls / tool_ok / tool_fail / rows），是真实在产的。
+    # ⚠️ The "does the orchestration trajectory get more complex" path (traj_sizes / tool_sets / new_tools) is **retired**:
+    #   the run_log.trajectory it reads is only written by the frozen old backend mve/run_mve.py,
+    #   while the new backend voyager_vlml/loop.py does not persist the tool sequence into run_log — across 36 live records it
+    #   is always empty, always computing to [0,0,...] and []. The dashboard's "orchestration trajectory" table is retired accordingly.
+    #   "which tools this round called, success/failure, rows retrieved" is instead provided by the
+    #   loop heartbeat in mve/loop_state.json (tool_calls / tool_ok / tool_fail / rows), which is genuinely produced.
     last = series[-1]
     prev_mastery = series[-2]["mastery"] if len(series) >= 2 else None
 
@@ -724,12 +724,12 @@ def build_state() -> dict[str, Any]:
         "practice_scope": scope,
         "question": rows[-1].get("question", ""),
         "topic_id": topic_id,
-        # 出题器：照伴学 practice_scope 的选题排序
+        # Question generator: mirrors the study companion's practice_scope selection ordering
         "referee": _referee_view(topic_id),
         "tasks": _task_library(),
-        # 人导入通路：导入过什么 + 出题器因此改成推哪题
+        # Human import path: what was imported + which question the question generator therefore changed to recommending
         "imports": imports,
-        # 消费进步曲线：进步与掌握度**在消费这条线上测**（练习不判分）
+        # Consumption progress curve: progress and mastery are **measured on the consumption line** (practice is not scored)
         "consume_curve": _consume_curve(),
         "recommend": recommend,
         "causal": causal,
@@ -740,48 +740,48 @@ def build_state() -> dict[str, Any]:
         "reading": reading,
         "reading_text": reading_text,
         "mastery_warning": mas_warning,
-        # ── 已下架的轨迹键（按后端索引，2026-10-10）──────────────────────
-        # 下面这几个顶层键原本是给面板画折线用的，现在**一个消费方都没有**
-        # （dashboard 直接在客户端从 series 现算，不再要服务端喂轨迹）：
+        # ── Retired trajectory keys (indexed by backend, 2026-10-10) ──────────────────────
+        # The following top-level keys were originally for the dashboard to draw lines, and now have **no consumers at all**
+        # (the dashboard computes live from series on the client, and no longer wants server-fed trajectories):
         #     runs / coverage_track / done_track / success_track /
         #     mastery_track / trajectory_sizes / new_tools
-        # 其中 coverage_track / mastery_track 在新后端上恒为空数组（练习线不判分），
-        # trajectory_sizes / new_tools 恒为 0 / []（new 后端不落 trajectory）。
-        # 留着它们就是给面板挂一排"0"和空数组，看着像"它没学会"，其实无人在产。
-        # 需要时从 series 现算即可，别再往 state 里塞。
+        # Of these, coverage_track / mastery_track are constant empty arrays on the new backend (the practice line is not scored),
+        # and trajectory_sizes / new_tools are constant 0 / [] (the new backend does not persist trajectory).
+        # Keeping them just hangs a row of "0"s and empty arrays on the dashboard, looking like "it did not learn", when in fact nobody produces them.
+        # Compute live from series when needed; do not stuff them into state again.
         "last_done": bool(series[-1]["done"]),
-        # VLML 观测：最近一次是否全部评分点达成（考核尺子）
+        # VLML observation: whether the most recent round achieved all rubric points (exam ruler)
         "last_success": bool(series[-1]["success"]),
         "skills": memory,
-        # 防膨胀：写入次数 vs 实际条目（bloat=1 表示每次写入都成了新条目，即没挡住）
+        # Bloat prevention: write count vs actual entries (bloat=1 means every write became a new entry, i.e. not blocked)
         "skill_stats": skill_stats,
         "skill_detail": skill_detail,
         "mc_thinking": _mc_thinking_view(),
-        # 防幻觉：被溯源校验拦下的编造数字
+        # Hallucination prevention: fabricated numbers caught by provenance validation
         "hallucination_total": hallucination_total,
-        # 注意：新后端（练习线）**不写 mastery**，所以这里通常是 None。
-        # 以前无 mastering 值时返回「掌握度 None」，导出 md 上就挂着一行噪音。
+        # Note: the new backend (practice line) **does not write mastery**, so this is usually None.
+        # Previously, with no mastery value it returned "Mastery None", hanging a line of noise on the exported md.
         "mastery_delta": (
-            f"掌握度 {_pct(prev_mastery)} -> {_pct(last['mastery'])}"
+            f"Mastery {_pct(prev_mastery)} -> {_pct(last['mastery'])}"
             if prev_mastery is not None and last["mastery"] is not None
-            else (f"掌握度 {_pct(last['mastery'])}" if last["mastery"] is not None else None)
+            else (f"Mastery {_pct(last['mastery'])}" if last["mastery"] is not None else None)
         ),
-        # 真实水平曲线（撤支架考核）—— 学习曲线该看的那一列
-        # （上面判读已经算过一次，这里复用，别再读一遍 exam_log）
+        # True-level curve (scaffold-removed exam) — the column the learning curve should look at
+        # (the reading above already computed it once; reuse it here, do not read exam_log again)
         "exam_curve": exam_curve,
-        # 教学图谱（伴学出题/图谱移植）：前置门控 + 薄弱优先 + 掌握度叠加。
-        # 与判分侧 /api/graph 并存：一个管"下一步学什么"，一个管"维度↔工具"。
-        # 惰性加载 + 异常兜底：topic_graph 读 JSON 种子，挂了也不拖垮整个面板。
+        # Teaching graph (study companion question generation / graph port): prerequisite gating + weak-first + mastery overlay.
+        # Coexists with the scoring side's /api/graph: one governs "what to learn next", the other "dimension↔tool".
+        # Lazy loading + exception fallback: topic_graph reads JSON seeds, and a failure does not drag down the whole dashboard.
         "teaching": _teaching_payload(),
     }
 
 
 def _teaching_payload() -> dict:
-    """教学图谱 payload（惰性加载）。失败返回空壳，自适应页签退化为「知识点图谱」。"""
+    """Teaching graph payload (lazy loading). On failure returns an empty shell, and the adaptive tab degrades to "topic graph"."""
     try:
         import topic_graph
         return topic_graph.get_graph().to_graph_payload()
-    except Exception as e:  # 绝不能因为教学图谱挂了拖垮整个面板
+    except Exception as e:  # The teaching graph failing must never drag down the whole dashboard
         return {"schema_version": 3, "difficulty_target": 1, "nodes": [],
                 "edges": [], "layers": {}, "total": 0,
                 "error": f"{type(e).__name__}: {e}"[:200]}

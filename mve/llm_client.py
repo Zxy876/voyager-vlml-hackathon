@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""LLM 最小客户端（黑客松支线：统一走 voyager_vlml.llm 网关）。
+"""Minimal LLM client (hackathon side branch: everything goes through the voyager_vlml.llm gateway).
 
-⚠️ 2026-10-14 支线改动：原来自带智谱端点逻辑（模块级常量）。黑客松规则要求
-   提交必须跑在 Nebius Token Factory + NVIDIA 开源模型上，这里改为委托
-   `voyager_vlml/llm.py`（Nebius 优先的唯一 LLM 出口）——本文件当前在 MVE
-   活动路径上无引用（保留是为兼容旧调用方），但绝不能留一个直连智谱的口子。
-密钥从 mve/.env 读取，不写进代码。
+⚠️ 2026-10-14 side-branch change: this file used to carry its own Zhipu endpoint logic
+   (module-level constants). Hackathon rules require submissions to run on
+   Nebius Token Factory + NVIDIA open-source models, so it now delegates to
+   `voyager_vlml/llm.py` (the single LLM egress, Nebius first) — this file is
+   currently unreferenced on MVE's active path (kept for backward compatibility
+   with old callers), but it must not leave a direct Zhipu connection open.
+Keys are read from mve/.env, never written into code.
 """
 
 from __future__ import annotations
@@ -32,7 +34,7 @@ load_env()
 
 
 class LLMError(RuntimeError):
-    """LLM 调用最终失败。调用方必须能看见它，不能静默降级成"无证据"。"""
+    """The LLM call failed for good. Callers must be able to see it; it must not silently degrade into "no evidence"."""
 
 
 def chat(
@@ -43,11 +45,12 @@ def chat(
     timeout: float = 90.0,
     retries: int = 3,
 ) -> str:
-    """带退避重试的 chat（委托 voyager_vlml.llm 网关；退避重试在网关内）。
+    """Chat with backoff retries (delegates to the voyager_vlml.llm gateway; backoff retries happen inside the gateway).
 
-    为什么必须重试：裁判（VLML0）和 Voyager 是并发打的，实测会撞上限流/超时，
-    表现为「模型规划返回空 → 一次工具都没调 → 判无证据」。
-    不重试的话，这种间歇故障会被误读成「Voyager 没学会」——那是假阴性。
+    Why retries are mandatory: the referee (VLML0) and Voyager run concurrently, and in practice
+    they hit rate limits/timeouts, which show up as "the model's planning returns empty → not a
+    single tool call → judged no evidence".
+    Without retries, this intermittent failure would be misread as "Voyager didn't learn" — a false negative.
     """
     from voyager_vlml.llm import chat as _gateway_chat
 
@@ -60,9 +63,9 @@ def chat(
 
 
 def chat_json(messages: list[dict[str, str]], **kw) -> dict:
-    """要求模型输出 JSON 对象；解析失败返回 {}（调用方负责降级）。"""
+    """Ask the model to output a JSON object; returns {} if parsing fails (callers handle degradation)."""
     text = chat(messages, **kw)
-    # 容忍 ```json ... ``` 包裹
+    # Tolerate ```json ... ``` wrapping
     m = re.search(r"```(?:json)?\s*(\{.*\})\s*```", text, re.S)
     raw = m.group(1) if m else text
     start, end = raw.find("{"), raw.rfind("}")

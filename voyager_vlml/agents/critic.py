@@ -160,9 +160,9 @@ def _suggest_names(error: str, schema: str) -> str:
     for b in dict.fromkeys(bad):
         near = difflib.get_close_matches(b, sorted(real), n=3, cutoff=0.55)
         if near:
-            out.append(f"`{b}` 不存在；库里最接近的是：{'、'.join('`'+n+'`' for n in near)}")
+            out.append(f"`{b}` does not exist; the closest in the library are: {', '.join('`'+n+'`' for n in near)}")
         else:
-            out.append(f"`{b}` 不存在；schema 里没有相近的名字，换一个列名/表名")
+            out.append(f"`{b}` does not exist; no similar name found in the schema — change the column or table name.")
     return "\n".join(out)
 
 
@@ -213,45 +213,45 @@ class VLMLCriticAgent:
         """
         lines: list[str] = []
         if task.get("task"):
-            lines.append(f"任务：{task['task']}")
+            lines.append(f"Task: {task['task']}")
 
         ok_calls = [o for o in observations if o.get("ok")]
         rows = sum(int(o.get("rows") or 0) for o in ok_calls)
 
         if not observations:
-            lines.append("本轮没有任何工具调用 —— 链路没跑通（不是「没学会」）。")
-            lines.append("下一步：先用 get_database_info() 摸清库里有哪些表，再写 SELECT。")
+            lines.append("This round made no tool calls —— the chain didn't run through (not 'did not learn').")
+            lines.append("Next step: first use get_database_info() to find out what tables are in the database, then write SELECT.")
             return "\n".join(lines)
 
         # 逐条回报「工具调用成功还是失败 / 取到几行」
-        lines.append("取数过程（可枚举）：")
+        lines.append("Data retrieval process (enumerable):")
         for o in observations:
             tool = o.get("tool", "?")
             if o.get("ok"):
-                lines.append(f"  ✓ {tool}：取到 {o.get('rows', 0)} 行")
+                lines.append(f"  ✓ {tool}: fetched {o.get('rows', 0)} rows")
             else:
-                lines.append(f"  ✗ {tool}：{o.get('error') or '调用失败'}")
+                lines.append(f"  ✗ {tool}: {o.get('error') or 'Call failed'}")
                 sug = _suggest_names(o.get("error") or "", schema)
                 if sug:
                     lines.append(f"    → {sug}")
 
         if not ok_calls:
-            lines.append("所有取数都失败了 —— 链路没跑通。检查表名/列名是否在库里、SQL 是否可执行。")
+            lines.append("All data retrievals failed —— the chain didn't run through. Check whether table/column names exist in the database and whether the SQL is executable.")
         elif not any(has_real_data(o) for o in ok_calls):
             lines.append(
-                f"取到了调用但结果里**没有任何真实值**（全 NULL / 除了 0 之外全 NULL，"
-                f"共 {rows} 行）—— 这通常是查了**空表**或过滤条件太窄："
-                f"聚合查询在空表上也会返回 1 行 (NULL, 0)，别被行数骗了。"
-                f"换一张 schema 里标注了行数的表，或放宽 WHERE 条件重试。")
+                f"Got calls but the result contains **no real values** (all NULL / all NULL except 0, "
+                f"{rows} rows total) —— this usually means querying an **empty table** or the filter is too narrow: "
+                f"an aggregate query on an empty table also returns 1 row (NULL, 0); don't be fooled by the row count. "
+                f"Use a table whose row count is annotated in the schema, or loosen the WHERE condition and retry.")
         elif rows < self.min_rows:
-            lines.append(f"取到了调用但结果为空（0 行）—— 口径或过滤条件可能不对，换 WHERE 条件重试。")
+            lines.append(f"Got calls but the result is empty (0 rows) —— the grain or filter may be wrong; retry with a different WHERE condition.")
         else:
-            lines.append(f"已从库里取到 {rows} 行 —— 方法跑通了。")
+            lines.append(f"Fetched {rows} rows from the database —— the method worked.")
 
         # SQL 语言的口径提示（不是答案）
         hints = task.get("hints") or []
         for h in hints[:4]:
-            lines.append(f"口径提示：{h}")
+            lines.append(f"Grain hint: {h}")
         return "\n".join(lines)
 
 

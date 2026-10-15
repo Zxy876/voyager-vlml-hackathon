@@ -1,60 +1,64 @@
 #!/usr/bin/env python3
-"""MVE 的知识图谱：维度 / 工具 / 表 三层，以及它们之间的边。
+"""MVE's knowledge graph: three layers — dimension / tool / table — plus the edges between them.
 
-MVE 的知识图谱是什么
---------------------
-用户问：「MVE 的知识图谱是什么？解决什么问题？内容依据其实就是 VLML 的
-数据建模表。」
+What MVE's knowledge graph is
+-----------------------------
+The user's question: "What is MVE's knowledge graph? What problem does it solve? The content it is
+based on is really just VLML's data modelling tables."
 
-对照猫娘伴学（`knowledge_graph_index.py` / `knowledge_graph_edges.py`）：
+Compared against the study companion (`knowledge_graph_index.py` / `knowledge_graph_edges.py`):
 
-  伴学的图谱 = 学科知识点之间的关系网
-    节点 = 知识点，节点上带 `skills` / `question_types` /
-           **`typical_misconceptions`**（`knowledge_graph_index.py:99-112`）
-    边   = 10 种语义关系（`knowledge_graph_edges.py:22-35`）：
+  The companion's graph = a network of relations between subject knowledge points
+    Nodes = knowledge points, carrying `skills` / `question_types` /
+           **`typical_misconceptions`** (`knowledge_graph_index.py:99-112`)
+    Edges = 10 semantic relations (`knowledge_graph_edges.py:22-35`):
            prerequisite / procedure_step / confusable / analogy / application /
            extends / co_occurs / supports / next / nearby
-    用途 = `build_relevant_subgraph()`（`knowledge_graph_index.py:220`）拿到
-           「这个知识点周围是什么」，供判题、讲解、出题使用
+    Purpose = `build_relevant_subgraph()` (`knowledge_graph_index.py:220`) returns
+           "what surrounds this knowledge point", for grading, explaining and question generation
 
-  MVE 的图谱 = 数据维度与取数手段之间的关系网
-    节点 = 维度（dimension）/ 工具（tool）/ 表（table）
-    边   = produced_by（维度由哪个工具出）
-           derived_from（维度由哪张表算出）   ← VLML 数据建模表在这里进入
-           confusable（易混维度）
-           co_occurs（同一题一起出现）
-           procedure_step（编排顺序）
-    用途 = **回答「这个维度该调哪个工具」**
+  MVE's graph = a network of relations between data dimensions and the means of retrieving them
+    Nodes = dimension / tool / table
+    Edges = produced_by (which tool produces this dimension)
+           derived_from (which table this dimension is computed from) ← VLML's data modelling
+                                        tables enter the graph here
+           confusable (confusable dimensions)
+           co_occurs (appear together in the same question)
+           procedure_step (orchestration order)
+    Purpose = **answering "which tool should this dimension call"**
 
-解决什么问题（这是建它的唯一理由）
-----------------------------------
-上一轮做的 `feedback.py` 已经能说清"错在哪一类"：
+What problem it solves (the only reason to build it)
+----------------------------------------------------
+`feedback.py` from the previous round can already state "which class of error it was":
 
-    eco_win_rate 不在观测里（我交了 null），不是算错 —— 要先补调一个能出
-    这个维度的工具。其中我没调过的是 pattern_detection_report。
+    eco_win_rate is not in the observations (I submitted null), it is not a computation error — a
+    tool that can produce this dimension has to be called first. The one I had not called is
+    pattern_detection_report.
 
-但那句"其中我没调过的是 X"是**事后反推**出来的 —— 它拿裁判的成功轨迹
-（`ref_plan`）和我的轨迹做差集。这有两个毛病：
+But that sentence "the one I had not called is X" is **reverse-engineered after the fact** — it takes
+the difference set between the referee's successful trajectory (`ref_plan`) and mine. That has two
+flaws:
 
-1. 裁判没跑过（或缓存里没有 `ref_plan`）时，这句话就没了 —— 离线重算
-   历史日志时 `裁判编排：（无）` 就是这个情况；
-2. 它说的是"裁判调了而我没有"，不是"这个维度**本来就该**由它出"。
-   万一裁判多调了一个无关工具，这个差集就会指错方向。
+1. When the referee never ran (or the cache holds no `ref_plan`), the sentence disappears — recomputing
+   historical logs offline is exactly this situation (`Referee orchestration: (none)`);
+2. It says "the referee called it and I did not", not "this dimension **ought to** be produced by
+   it". If the referee happens to have called one irrelevant extra tool, the difference set points
+   in the wrong direction.
 
-图谱把这件事变成**事前可查**：
+The graph turns this into something **queryable up front**:
     eco_win_rate --produced_by--> pattern_detection_report
 
-来源必须是**声明或实测**，不能是模型编的：
-- `produced_by`：读 `RubricPoint.answer_spec.tool`（`loop_core.py:185`），
-  这是服务端配好的取数配方，不是猜的；
-- `derived_from`：解析 `answer_spec.sql` 里的表名，并与 VLML 的
-  `DATA_DICTIONARY.json` 对账（认不出的表不写）；
-- `confusable`：同一题里"同后缀不同前缀"的维度（pistol_win_rate /
-  eco_win_rate —— 实测模型确实混过这两者）。
+The source must be **declaration or measurement**, never something the model made up:
+- `produced_by`: reads `RubricPoint.answer_spec.tool` (`loop_core.py:185`) — a retrieval recipe
+  configured server-side, not a guess;
+- `derived_from`: parses the table names out of `answer_spec.sql` and reconciles them against VLML's
+  `DATA_DICTIONARY.json` (tables it cannot recognise are not written);
+- `confusable`: dimensions in the same question sharing a suffix but differing in prefix
+  (pistol_win_rate / eco_win_rate — measured, the model has in fact confused those two).
 
-跑法
-----
-    python mve/knowledge_graph.py --build          # 重建并落盘
+How to run it
+-------------
+    python mve/knowledge_graph.py --build          # rebuild and persist
     python mve/knowledge_graph.py --who eco_win_rate
     python mve/knowledge_graph.py --topic pistol_eco_pattern
 """
@@ -76,38 +80,44 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 GRAPH_PATH = HERE / "knowledge_graph.json"
-# VLML 的数据建模表：schema 17 张 + transformations 13 张（派生动 schema 的 agg_*）
+# VLML's data modelling tables: 17 in schema + 13 in transformations (the derived-schema agg_*)
 DATA_DICT = (HERE.parent / "vlml" / "database" / "DATA_DICTIONARY.json")
 
-# 落盘格式版本。**改了节点的声明字段就必须 +1** —— 否则已经存在的
-# knowledge_graph.json 永远"看起来没过期"（指纹只覆盖 tasks.py），新声明就
-# 一辈子进不了图。这是"持久化"最容易踩的坑：写了代码，图里还是旧的。
-SCHEMA_VERSION = 2      # 2 = 表节点带 VLML 建模声明，维度节点带伴学式声明
+# Persisted format version. **Any change to a node's declared fields must bump this by1** —
+# otherwise an existing knowledge_graph.json always "looks up to date" (the fingerprint only covers
+# tasks.py) and the new declarations never make it into the graph. This is the easiest pitfall of
+# "persistence": you wrote the code, yet the graph is still the old one.
+SCHEMA_VERSION = 2      # 2 = table nodes carry the VLML modelling declaration, dimension nodes
+                        # carry companion-style declarations
 
 # --------------------------------------------------------------------------
-# 边的关系类型（比伴学的 10 种少：只保留 MVE 真的用得上的）
+# Edge relation types (fewer than the companion's 10: only the ones MVE actually uses)
 # --------------------------------------------------------------------------
-PRODUCED_BY = "produced_by"      # 维度 ← 工具
-DERIVED_FROM = "derived_from"    # 维度/表 ← 表
-CONFUSABLE = "confusable"        # 易混维度（对称）
-CO_OCCURS = "co_occurs"          # 同题共现（对称）
-PROCEDURE_STEP = "procedure_step"  # 编排顺序
-# 新增：VLML 的四层结构（工具 → 洞察 → SQL → 表）
-READS = "reads"                  # 洞察 ← 表
-COMPOSES = "composes"            # 工具 ← 洞察（这个 section 由它产出）
-FROM_SECTION = "from_section"    # 维度 ← 工具的某个 section
-# 伴学 10 种关系里的 `application`（`knowledge_graph_edges.py:31`）：
-# 知识点 → 应用场景，`FOCUSED_RELATION_DIRECTION` 规定焦点在 **from** 端。
-# MVE 用它记「这个洞察/工具在那张表上被实际应用过一次」—— 人导入的题就是
-# 这个"应用场景"，而**题本身不进图**（不建节点）。
+PRODUCED_BY = "produced_by"      # dimension ← tool
+DERIVED_FROM = "derived_from"    # dimension/table ← table
+CONFUSABLE = "confusable"        # confusable dimensions (symmetric)
+CO_OCCURS = "co_occurs"          # co-occurrence in the same question (symmetric)
+PROCEDURE_STEP = "procedure_step"  # orchestration order
+# Newly added: VLML's four-layer structure (tool → insight → SQL → table)
+READS = "reads"                  # insight ← table
+COMPOSES = "composes"            # tool ← insight (this section is produced by it)
+FROM_SECTION = "from_section"    # dimension ← a section of the tool
+# `application` out of the companion's 10 relations (`knowledge_graph_edges.py:31`):
+# knowledge point → application scenario, where `FOCUSED_RELATION_DIRECTION` fixes the focus on the
+# **from** end. MVE uses it to record "this insight/tool was actually applied once on that table" —
+# a human-imported question is exactly such an "application scenario", while **the question itself
+# does not enter the graph** (no node is created for it).
 APPLICATION = "application"
 
 SYMMETRIC = frozenset({CONFUSABLE, CO_OCCURS})
 
-# 阶段名（数据流分层）照伴学的 stage；从 vlml_schema 拿，避免两处各写一份。
-# 这个模块只 import 标准库，不连库，可以安全地在顶部导入。
+# Stage names (data-flow layering) mirror the companion's stage; taken from vlml_schema so the two
+# copies cannot drift apart.
+# This module only imports the standard library and does not connect to the database, so it is safe
+# to import at the top.
 try:
-    # 这个模块只 import 标准库 + 读文件，不连库，可以安全地在顶部导入。
+    # This module only imports the standard library + reads files, does not connect to the
+    # database, so it is safe to import at the top.
     import vlml_schema
     from vlml_schema import STAGE_LABEL, STAGE_ORDER  # noqa: F401
 except Exception:                                    # pragma: no cover
@@ -119,27 +129,28 @@ _RE_FROM = re.compile(r"\b(?:FROM|JOIN)\s+([A-Za-z_][A-Za-z0-9_]*)", re.IGNORECA
 
 @dataclass
 class GraphBudget:
-    """子图进 prompt 的预算 —— 照伴学 `SubgraphBudget`。
+    """The budget for a subgraph entering the prompt — mirrors the companion's `SubgraphBudget`.
 
-    伴学：focus_topics=3, max_depth=2, max_nodes=20, max_edges=30，
-          外加 relation_limits 逐关系限流。
-    这里同构：焦点维度数 / 节点数 / 边数 / 每个节点最多展示多少列。
-    目的都一样 —— 库可以涨，prompt 不能跟着涨。
+    Companion: focus_topics=3, max_depth=2, max_nodes=20, max_edges=30,
+          plus relation_limits throttling per relation.
+    Isomorphic here: number of focus dimensions / nodes / edges / how many columns each node shows.
+    The purpose is the same in both — the library may grow, the prompt must not grow with it.
     """
-    max_focus: int = 8          # 焦点维度（本题的评分点，按权重取前 N）
+    max_focus: int = 8          # focus dimensions (this question's scoring points, top N by weight)
     max_nodes: int = 20
     max_edges: int = 30
-    max_cols: int = 14          # 每张表最多展示多少列
-    max_confusable: int = 3     # 每个焦点维度最多带几个易混维度
-    max_insights: int = 3       # 一个 section 最多展开几个洞察（多了淹没口径行）
+    max_cols: int = 14          # how many columns to show at most per table
+    max_confusable: int = 3     # how many confusable dimensions per focus dimension
+    max_insights: int = 3       # how many insights to expand per section (more drowns the metric line)
     include_confusable: bool = True
 
 
 # --------------------------------------------------------------------------
-# 节点与边
+# Nodes and edges
 # --------------------------------------------------------------------------
 def _merge_detail(old: dict[str, Any], new: dict[str, Any]) -> dict[str, Any]:
-    """合并两个 detail：列表取并集、字典按 key 并集、标量保留已有的。"""
+    """Merge two details: lists take the union, dicts the union by key, scalars keep the existing
+    value."""
     out = dict(old)
     for k, v in (new or {}).items():
         if v is None or v == "" or v == []:
@@ -182,7 +193,7 @@ class Edge:
     src: str
     dst: str
     relation: str
-    # 来源必须可追溯：声明式（rubric 配的）还是实测（跑出来的）
+    # The source must be traceable: declarative (configured on the rubric) or observed (measured)
     origin: str = "declared"       # declared / observed
     reason: str = ""
     confidence: float = 1.0
@@ -207,14 +218,16 @@ class KnowledgeGraph:
         self._out: dict[str, list[Edge]] = {}
         self._in: dict[str, list[Edge]] = {}
 
-    # ---- 构建 ----
+    # ---- Construction ----
     def add_node(self, node: Node) -> None:
-        """合并式写入 —— 同一个节点会被多个评分点/多道题重复遇到。
+        """Merge-style write — the same node gets encountered repeatedly across scoring points and
+    across questions.
 
-        原来是直接覆盖，实测后果：`map_fb_conv` 同时出现在
-        fb_conversion_analysis 和 corrode_collapse，`map_rounds` 在一道题里有
-        三个评分点（Corrode/Haven/Lotus）—— 后者把前者整个盖掉，图谱上只剩
-        最后一个评分点的信息。多题共用的维度恰恰是最该记全的。
+        It used to overwrite outright, and the measured consequence was: `map_fb_conv` appears in
+        both fb_conversion_analysis and corrode_collapse, and `map_rounds` has three scoring points
+        in one question (Corrode/Haven/Lotus) — the latter overwrote the former entirely, leaving
+        only the last scoring point's information on the graph. And dimensions shared across
+        questions are precisely the ones that deserve to be recorded in full.
         """
         old = self.nodes.get(node.id)
         if old is None:
@@ -225,13 +238,13 @@ class KnowledgeGraph:
         old.detail = _merge_detail(old.detail, node.detail)
 
     def add_edge(self, edge: Edge) -> None:
-        # 两端必须都在图里 —— 悬挂边会让查询结果变成噪音
+        # Both ends must already be in the graph — dangling edges turn query results into noise
         if edge.src not in self.nodes or edge.dst not in self.nodes:
             return
         k = edge.key()
         if k in self._by_key:
             old = self._by_key[k]
-            # 实测证据可以升级声明式边，但反过来不行
+            # Measured evidence may upgrade a declarative edge, but not the other way round
             if edge.origin == "observed" and old.origin == "declared":
                 self.edges.remove(old)
                 old = edge
@@ -243,9 +256,9 @@ class KnowledgeGraph:
         self._out.setdefault(edge.src, []).append(edge)
         self._in.setdefault(edge.dst, []).append(edge)
 
-    # ---- 查询 ----
+    # ---- Queries ----
     def who_produces(self, dimension: str) -> list[str]:
-        """这个维度由哪些工具产出（这就是 feedback 缺的那条边）。"""
+        """Which tools produce this dimension (this is exactly the edge feedback.py was missing)."""
         out = []
         for e in self._in.get(f"dim:{dimension}", []):
             if e.relation == PRODUCED_BY and e.src.startswith("tool:"):
@@ -253,7 +266,7 @@ class KnowledgeGraph:
         return sorted(set(out))
 
     def tables_for(self, dimension: str) -> list[str]:
-        """这个维度是从哪些表算出来的（VLML 建模表在这里起作用）。"""
+        """Which tables this dimension is computed from (VLML's modelling tables come in here)."""
         out = []
         for e in self._in.get(f"dim:{dimension}", []):
             if e.relation == DERIVED_FROM and e.src.startswith("table:"):
@@ -261,7 +274,7 @@ class KnowledgeGraph:
         return sorted(set(out))
 
     def yields(self, tool: str) -> list[str]:
-        """这个工具能出哪些维度。"""
+        """Which dimensions this tool can produce."""
         out = []
         for e in self._out.get(f"tool:{tool}", []):
             if e.relation == PRODUCED_BY and e.dst.startswith("dim:"):
@@ -282,10 +295,12 @@ class KnowledgeGraph:
         return sorted(n.id[len("dim:"):] for n in self.nodes.values()
                       if n.kind == "dimension")
 
-    # ---- 阶段：照伴学 KnowledgeGraphIndex.stage_to_ids ----
-    # 伴学按 stage（primary / junior_high / senior_high）建索引 ——
-    # "学什么之前必须先会什么"。MVE 的同构物是**数据流顺序**：
-    # 算什么之前必须先有什么（raw → meta → agg → insight → tool → dimension）。
+    # ---- Stages: mirrors the companion's KnowledgeGraphIndex.stage_to_ids ----
+    # The companion indexes by stage (primary / junior_high / senior_high) —
+    # "what you must already know before learning this". MVE's isomorphic counterpart is the
+    # **data-flow order**:
+    # what you must already have before computing something (raw → meta → agg → insight → tool →
+    # dimension).
     def stage_index(self) -> dict[str, list[str]]:
         out: dict[str, list[str]] = {}
         for n in self.nodes.values():
@@ -297,7 +312,7 @@ class KnowledgeGraph:
         return out
 
     def upstream_tables(self, table: str, depth: int = 2) -> list[str]:
-        """这张表的上游（它的数据从哪来）—— 回答"22 张表之间的关系"。"""
+        """This table's upstream (where its data comes from) — answering "how the 22 tables relate"."""
         out: list[str] = []
         frontier = [f"table:{table}"]
         for _ in range(max(1, depth)):
@@ -322,7 +337,8 @@ class KnowledgeGraph:
                       if n.kind == "table")
 
     def subgraph_for(self, dimension: str) -> dict[str, Any]:
-        """照伴学 `build_relevant_subgraph`：给一个焦点，返回它周围的结构。"""
+        """Mirrors the companion's `build_relevant_subgraph`: given a focus, return the structure around
+    it."""
         focus = f"dim:{dimension}"
         if focus not in self.nodes:
             return {"focus": dimension, "nodes": [], "edges": [], "found": False}
@@ -341,35 +357,40 @@ class KnowledgeGraph:
                       if e.src in ids and e.dst in ids],
         }
 
-    # ---- 给模型的上下文：control_primitives 的等价物 ----
+# ---- Context for the model: the equivalent of control_primitives ----
     # ------------------------------------------------------------------
     def layering_rule(self, dimension: str) -> dict[str, Any] | None:
-        """从骨架里抽出「哪一层 WHERE 才允许出现某一列」——用于**硬校验**。
+        """Extract "at which WHERE layer is this column allowed to appear" from the skeleton — used
+    for **hard validation**.
 
-        为什么需要它：把骨架、致命错法、自检规则都写进 prompt，模型仍五次
-        写出一字不差的错法（把 `losing_team_name` 提前到最内层 WHERE）。
-        提示打不过强先验，那就换成**约束** —— 原版 Voyager 也是这么做的：
-        `process_ai_message` 用 babel 对代码做 AST 断言（必须是 async 函数、
-        参数必须叫 bot），不合法直接 retry，而不是"提醒模型注意"。
-        MVE 的同构物就是这条 SQL 分层断言。
+    Why it is needed: even with the skeleton, the fatal mistake patterns and the self-check rules
+    all written into the prompt, the model still produced the very same mistake five times over
+    (pulling `losing_team_name` up into the innermost WHERE). Prompts cannot beat a strong prior, so
+    switch to **constraints** instead — which is what the original Voyager does too:
+    `process_ai_message` uses babel to assert things about the code's AST (it must be an async
+    function, the parameter must be named bot) and retries directly when invalid, rather than
+    "reminding the model to pay attention". MVE's isomorphic counterpart is exactly this SQL
+    layering assertion.
 
-        判据来自图谱骨架（`recipe`），不硬编码 —— 换一道题照样生效。
-        """
+    The criterion comes from the graph's skeleton (`recipe`), not hard-coded — so it works for a
+    different question just the same.
+    """
         node = self.nodes.get(f"dim:{dimension}")
         if node is None:
             return None
         recipe = str(node.detail.get("recipe") or "")
         if "PARTITION BY" not in recipe.upper():
             return None
-        # 骨架里 `) t WHERE X='?'` 这种"外层 WHERE"的列
+        # Columns used in an "outer WHERE" like the skeleton's `) t WHERE X='?'`
         outer = re.findall(r"\)\s*\w+\s+WHERE\s+([A-Za-z_][\w]*)\s*=", recipe)
         if not outer:
             return None
         rule = {"outer_only": sorted(set(outer)),
                 "note": str(node.detail.get("recipe") or "")[:200]}
-        # 分段计算必须**分组**：骨架里的 `GROUP BY (rn - grp)`。
-        # 实测紧接着就踩了这条 —— 拦下 WHERE 位置之后，它改的时候把 GROUP BY
-        # 一起删了，于是所有输的回合又合成一整段（还是 13）。
+        # Per-segment computation must be **grouped**: the skeleton's `GROUP BY (rn - grp)`.
+        # This was tripped immediately in measurement — after the WHERE position was blocked, the
+        # model deleted the GROUP BY along with it while editing, so all losing rounds merged back
+        # into one single segment (13 again).
         mg = re.search(r"GROUP\s+BY\s*\(([^)]*)\)", recipe, re.IGNORECASE)
         if mg:
             ids = re.findall(r"[A-Za-z_]\w*", mg.group(1) or "")
@@ -379,7 +400,7 @@ class KnowledgeGraph:
         return rule
 
     def dims_of(self, topic_id: str) -> list[str]:
-        """这道题涉及哪些维度（按权重降序）。"""
+        """Which dimensions this question touches (descending by weight)."""
         return sorted(
             (n.id[len("dim:"):] for n in self.nodes.values()
              if n.kind == "dimension"
@@ -389,19 +410,21 @@ class KnowledgeGraph:
             key=lambda d: -float((self.nodes[f"dim:{d}"].detail.get("weight")
                                   or 0)),
         )
-    # 原版 Voyager 把 control_primitives 的**源码**拼进 system message
-    # （voyager/agents/action.py:render_system_message）：模型不只看到"有哪些
-    # 函数"，还看到每个函数**怎么实现的**。MVE 里同构的那份东西就是子图渲染：
-    # 不只说"有 query_sql"，还说清"这个指标怎么算、读哪张表、用哪些列、
-    # 别人通常错在哪"。
+    # The original Voyager splices control_primitives' **source code** into the system message
+    # (voyager/agents/action.py:render_system_message): the model sees not just "which functions
+    # exist" but also **how each is implemented**. The isomorphic thing in MVE is the subgraph
+    # rendering: it does not merely say "there is a query_sql", it spells out "how this metric is
+    # computed, which table it reads, which columns it uses, and where others usually go wrong".
     #
-    # 预算照伴学 `SubgraphBudget`（knowledge_graph_index.py 附近）：
+    # The budget mirrors the companion's `SubgraphBudget` (around knowledge_graph_index.py):
     #   focus_topics=3, max_depth=2, max_nodes=20, max_edges=30
-    # 全图塞进 prompt 会稀释注意力，也会把无关维度（易混的）一起喂进来。
+    # Squeezing the whole graph into the prompt dilutes attention and drags irrelevant (confusable)
+    # dimensions in along with it.
     # ------------------------------------------------------------------
     def subgraph_for_topic(self, topic_id: str,
                            budget: "GraphBudget | None" = None) -> dict[str, Any]:
-        """照伴学 build_relevant_subgraph：给一道题，返回它周围的结构。"""
+        """Mirrors the companion's build_relevant_subgraph: given a question, return the structure
+        around it."""
         b = budget or GraphBudget()
         focus = sorted(
             (n for n in self.nodes.values()
@@ -418,15 +441,15 @@ class KnowledgeGraph:
         ids: list[str] = []
         for n in focus:
             ids.append(n.id)
-            # 产出它的工具 + 它来自的表（depth=1）
+            # the tools that produce it + the tables it comes from (depth=1)
             ids += [f"tool:{t}" for t in self.who_produces(n.id[len("dim:"):])]
             ids += [f"table:{t}" for t in self.tables_for(n.id[len("dim:"):])]
-            # 易混维度（depth=1，但只取直接相连的）
+            # confusable dimensions (depth=1, but only directly connected ones)
             if b.include_confusable:
                 ids += [f"dim:{c}" for c in
                         self.confusable_with(n.id[len("dim:"):])][:b.max_confusable]
 
-        # 去重保序 + 截断
+        # dedupe while preserving order + truncate
         seen, ordered = set(), []
         for i in ids:
             if i in self.nodes and i not in seen:
@@ -444,9 +467,11 @@ class KnowledgeGraph:
             "edges": edges,
         }
 
-    # ---- 种子层：任意题干都能配上图谱（照伴学 match_topics） ----
+    # ---- Seed layer: any question stem can be matched to the graph (mirrors the companion's
+    #      match_topics) ----
     def facts(self) -> list[dict[str, Any]]:
-        """图谱里的「指标全集」。与题目无关，只由 VLML 结构决定。"""
+        """The graph's "complete set of metrics". Unrelated to any question, determined solely by
+        the VLML structure."""
         try:
             import graph_topics
         except Exception:
@@ -465,20 +490,22 @@ class KnowledgeGraph:
 
     def subgraph_for_query(self, query: str, *, mode: str = "plan",
                            limit: int = 3) -> dict[str, Any]:
-        """题干 → 焦点事实 → 一跳子图（逐关系限流 + 认方向 + 丢弃计数）。
+        """Question stem → focus fact → one-hop subgraph (per-relation throttling + direction awareness +
+    dropped-edge counts).
 
-        这是「图谱为所有题目所用」的入口：题目**不需要**先被出过、也不需要在
-        图谱里有对应维度，只要题干文本能匹配上种子事实就能出子图。伴学靠
-        同一招给任意新题配图（`build_knowledge_guidance_payload`）。
-        """
+    This is the entry point of "the graph serves every question": a question **need not** have been
+    generated before, nor have a matching dimension in the graph — as long as its stem text matches
+    a seed fact, a subgraph can be produced. The companion matches graphs for any new question the
+    same way (`build_knowledge_guidance_payload`).
+    """
         try:
             import graph_topics
         except Exception:
-            return {"query": query, "found": False, "reason": "graph_topics 不可用"}
+            return {"query": query, "found": False, "reason": "graph_topics unavailable"}
         matches = graph_topics.match_facts(self.facts(), query=query, limit=limit)
         if not matches:
             return {"query": query, "found": False,
-                    "reason": "题干没匹配到任何指标（seed 层无命中）"}
+                    "reason": "the stem matched no metrics at all (no hit at the seed layer)"}
         contexts = []
         for m in matches:
             ctx = graph_topics.focused_context(self, m["id"], query=query,
@@ -497,41 +524,45 @@ class KnowledgeGraph:
 
     def render_for_query(self, query: str, *, mode: str = "plan",
                          limit: int = 3) -> str:
-        """把「题干匹配出来的子图」渲染成给模型的文本。
+        """Render "the subgraph matched from the question stem" as text for the model.
 
-        与 `render_for_prompt` 的分工：
-        - `render_for_prompt(topic_id)` —— 出过的题，走 rubric 派生维度（信息最全）
-        - `render_for_query(题干)`      —— **任意题**，走种子事实（保证有东西可给）
-        两者可以并存：后者是兜底，也是"图谱真的为所有题目所用"的证明。
-        """
+    Division of labour with `render_for_prompt`:
+        - `render_for_prompt(topic_id)` — questions that have been generated, going through
+          rubric-derived dimensions (the most complete information)
+        - `render_for_query(stem)`       — **any question**, going through seed facts (guarantees
+          there is something to give)
+    The two can coexist: the latter is the fallback, and also the proof that "the graph really does
+    serve every question".
+    """
         sub = self.subgraph_for_query(query, mode=mode, limit=limit)
         if not sub.get("found"):
             return ""
         bucket_title = {
-            "produced_by": "用什么工具出",
-            "section": "取返回里的哪一段",
-            "composes": "由哪些计算单元拼成",
-            "reads": "这些单元读哪些表",
-            "derived_from": "数据来自哪些表",
-            "confusions": "容易和什么混",
-            "review_with": "常和什么一起出现",
+            "produced_by": "which tool produces it",
+            "section": "which section of the return value to take",
+            "composes": "which computation units compose it",
+            "reads": "which tables those units read",
+            "derived_from": "which tables the data comes from",
+            "confusions": "what it is easily confused with",
+            "review_with": "what it often appears together with",
         }
-        lines = ["【知识图谱 · 按题干匹配】下面是从 VLML 结构推出的口径，"
-                 "优先于你的猜测；'?' 是脱敏占位符，真实取值必须你自己查。"]
+        lines = ["[Knowledge graph · matched by question stem] Below are the metric definitions "
+                 "derived from the VLML structure; they take priority over your guesses. '?' is a "
+                 "redacted placeholder — the real values must be looked up by you."]
         for ctx in sub["contexts"]:
             if not ctx.get("focus", {}).get("label"):
                 continue
-            lines.append(f"· {ctx['focus']['label']}（匹配度 {ctx.get('score', 0)}）")
+            lines.append(f"· {ctx['focus']['label']} (match score {ctx.get('score', 0)})")
             for bucket, title in bucket_title.items():
                 vals = ctx.get(bucket) or []
                 if vals:
-                    lines.append(f"   {title}：{'、'.join(vals[:6])}")
+                    lines.append(f"   {title}: {', '.join(vals[:6])}")
             d = (ctx.get("summary") or {}).get("diagnostics") or {}
             dropped = sum(int(v or 0) for v in d.values())
             if dropped:
-                lines.append(f"   （已按 {ctx.get('mode')} 模式裁掉 {dropped} 条边："
-                             + "、".join(f"{k}={v}" for k, v in d.items() if v)
-                             + "）")
+                lines.append(f"   ({dropped} edges were pruned under the {ctx.get('mode')} mode: "
+                             + ", ".join(f"{k}={v}" for k, v in d.items() if v)
+                             + ")")
         if len(lines) == 1:
             return ""
         return "\n".join(lines)
@@ -543,107 +574,121 @@ class KnowledgeGraph:
                           with_section: bool = True,
                           with_stage: bool = True,
                           with_insight: bool = True) -> str:
-        """把子图渲染成给模型的文本 —— 这就是 MVE 的 control_primitives。
+        """Render the subgraph as text for the model — this is MVE's control_primitives.
 
-        `with_formula` = 口径层（怎么算 / 取第几列 / 骨架）的总开关。
-        伴学里这块是 **optional**：可以整段不给（见下面那段注释的取证）。
-        只给结构层 = 伴学的"知道有哪张表、有哪些列"，**不告诉它答案怎么写**。
-        """
+    `with_formula` = the master switch for the metric-definition layer (how it is computed /
+    which column to take / the skeleton).
+    In the companion this block is **optional**: it can be withheld entirely (see the evidence in
+    the comment block below).
+    Giving only the structural layer = the companion's "knowing which tables exist and which
+    columns they have", **without telling it how to write the answer**.
+    """
         b = budget or GraphBudget()
         sub = self.subgraph_for_topic(topic_id, b)
         if not sub.get("found"):
-            # 维度层里没有这道题的焦点（运行期题的维度**不建节点**，只落边）
-            # → 别返回空串，那等于把支架整个撤掉。支架信息就在边上。
-            # 实测：不兜底时 `plant_success_rate_lotus` 的图谱提示长度为 0。
+            # There is no focus for this question in the dimension layer (dimensions of runtime
+            # questions **create no nodes**, only edges)
+            # → do not return an empty string; that would amount to removing the scaffold entirely.
+            # The scaffold information is on the edges.
+            # Measured: without this fallback, the graph prompt for `plant_success_rate_lotus` had
+            # length 0.
             return _render_from_links(topic_id, self, with_formula=with_formula)
 
         by_id = {n["id"]: n for n in sub["nodes"]}
         lines: list[str] = []
-        # 焦点维度用到的列 → 展示表结构时排在前面（否则会被列数预算截掉；
-        # 实测 fb_team_won 就被 14 列的预算挤没了，而它正是要 AVG 的那一列）
-        # 按表分开记：同名列（series_id）张冠李戴会让人写出 Binder Error。
+        # Columns used by the focus dimensions → sorted first when showing table structures
+        # (otherwise they get cut off by the column budget; measured, fb_team_won was squeezed out
+        # by the 14-column budget even though it is exactly the column to be AVG'd)
+        # Recorded per table: misattributing same-named columns (series_id) yields a Binder Error.
         priority_cols: dict[str, list[str]] = {}
         for dim in sub["focus_dims"]:
             node = by_id.get(f"dim:{dim}")
             if node is None:
                 continue
             d = node["detail"]
-            head = f"· 维度 {dim}（权重 {d.get('weight')}）"
+            head = f"· Dimension {dim} (weight {d.get('weight')})"
             lines.append(head)
             by_topic = (d.get("points_by_topic") or {}).get(topic_id) or []
             pts = by_topic or d.get("points") or (
                 [d["point"]] if d.get("point") else [])
             if pts:
-                lines.append(f"   要拿什么：{'；'.join(str(p) for p in pts[:3])}")
-            # ---- 口径层：**答案模板**，必须能整段摘掉 ----
+                lines.append(f"   What to retrieve: {'; '.join(str(p) for p in pts[:3])}")
+            # ---- Metric-definition layer: **the answer template**, must be removable as a whole ----
             #
-            # 伴学的同构位：`knowledge_graph_guidance.py:1088-1104` 的
-            # `model_context` 里确实有 `procedure` 桶，但它给的是"步骤描述"，
-            # 而且整块图谱在出题 prompt 里属于 **optional 段** ——
-            # `llm_prompts.py:285-303` 在 token 超预算时**整段丢弃**，
-            # 判分契约（`prompt_templates.py:170-189` 十六条 requirements）
-            # 更是**一条都不提图谱**。
+            # The isomorphic position in the companion: `model_context` at
+            # `knowledge_graph_guidance.py:1088-1104` does have a `procedure` bucket, but what it
+            # gives is a "step description", and the whole graph block is an **optional** segment in
+            # the question-generation prompt — `llm_prompts.py:285-303` drops it **entirely** when
+            # over the token budget, and the grading contract (`prompt_templates.py:170-189`,
+            # sixteen requirements) **never mentions the graph at all**.
             #
-            # MVE 此前漏了这一层：「怎么算 / 取第几列 / 完整 SQL 骨架」是
-            # 常驻上下文，跟掌握度、覆盖率无关 —— 练到覆盖率 100%、掌握度
-            # 0.9 的题，Voyager 照样拿到答案模板，练习分必然贴顶
-            # （run_log 8/8 全 100，exam_log 26/26 全 100，两条曲线都是假平线）。
+            # MVE previously lacked this layer: "how to compute it / which column to take / the full
+            # SQL skeleton" is resident context, independent of mastery and coverage — so for a
+            # question practised up to 100% coverage and 0.9 mastery, Voyager still gets the answer
+            # template, and practice scores are bound to be pinned at the ceiling
+            # (run_log 8/8 all 100, exam_log 26/26 all 100 — both curves are fake flat lines).
             #
-            # 所以口径层不是"支架"，是**判据**：它只能在学生还不会的时候给
-            # （hint=full），会了就必须撤（hint=partial / none）。
+            # So the metric-definition layer is not "a scaffold", it is a **criterion**: it may only
+            # be given while the student does not know it yet (hint=full); once it does know it,
+            # it must be withdrawn (hint=partial / none).
             if with_formula and d.get("semantics"):
-                lines.append(f"   怎么算：{d['semantics']}")
+                lines.append(f"   How it is computed: {d['semantics']}")
             vcs = d.get("value_columns") or []
             if with_formula and vcs:
-                lines.append("   取结果的第 "
-                             + "、".join(str(v) for v in vcs)
-                             + " 列（从 0 开始数）")
+                lines.append("   Take the column(s) "
+                             + ", ".join(str(v) for v in vcs)
+                             + " of the result (counting from 0)")
             if with_formula and with_recipe and d.get("recipe"):
-                lines.append(f"   结构骨架：{d['recipe']}")
-                lines.append("   ⚠ 骨架里 WHERE 的**位置**就是口径：内层先编号、"
-                             "外层再筛。不要把所有过滤条件合并到最内层 —— "
-                             "合并了段就断了/连错了。")
-                lines.append(f"   自检：{SELF_CHECK_NOTE}")
+                lines.append(f"   Structural skeleton: {d['recipe']}")
+                lines.append("   ⚠ The **position** of WHERE in the skeleton is the metric "
+                             "definition: number in the inner layer first, filter in the outer one. "
+                             "Do not merge every filter condition into the innermost layer — once "
+                             "merged, the segments break apart / get joined wrongly.")
+                lines.append(f"   Self-check: {SELF_CHECK_NOTE}")
             tool = d.get("tool")
             if tool:
                 tnode = by_id.get(f"tool:{tool}") or {}
                 req = tnode.get("detail", {}).get("required_params") or []
                 hint = tnode.get("detail", {}).get("param_hint") or ""
                 lines.append(
-                    f"   取数工具：{tool}（按 {d.get('value_path')} 取值）"
-                    + (f"；**必填参数**：{', '.join(req)}" if req else "")
-                    + (f"；注意：{hint}" if hint else ""))
+                    f"   Retrieval tool: {tool} (take the value at {d.get('value_path')})"
+                    + (f"; **required parameters**: {', '.join(req)}" if req else "")
+                    + (f"; note: {hint}" if hint else ""))
             if d.get("tables"):
-                # 必须写破"表名 ≠ 工具名"：实测模型把图谱里的
-                # `来自表：agg_first_blood_stats` 直接写成了 calls[].tool，
-                # 连撞三次计划校验，整轮一个工具都没调成。
-                lines.append(f"   来自表（要用 query_sql 自己查，**表名不是工具名**）："
-                             f"{'、'.join(d['tables'])}")
+                # Must state outright that "a table name is not a tool name": measured, the model
+                # took the graph's `from table: agg_first_blood_stats` and wrote it straight into
+                # calls[].tool, failing plan validation three times and not landing a single tool
+                # call in the whole round.
+                lines.append(f"   Source tables (you must query these yourself with query_sql — "
+                             f"**a table name is not a tool name**): "
+                             f"{', '.join(d['tables'])}")
             if d.get("tool") == "query_sql" and not d.get("tables"):
-                lines.append("   取数工具：query_sql")
+                lines.append("   Retrieval tool: query_sql")
             cols = d.get("columns") or []
             if cols:
-                lines.append(f"   用到的列：{', '.join(cols[:b.max_cols])}")
+                lines.append(f"   Columns used: {', '.join(cols[:b.max_cols])}")
             for tbl, cs in (d.get("columns_by_table") or {}).items():
                 cur = priority_cols.setdefault(tbl, [])
                 for c in cs:
                     if c not in cur:
                         cur.append(c)
             if d.get("typical_errors"):
-                lines.append("   典型错法："
-                            + "；".join(str(e) for e in d["typical_errors"][:4]))
-            # 单位：伴学知识点自带 unit，MVE 以前没有 —— 模型于是把
-            # 「转换率」算成小数还是百分数全靠运气（实测交过 0.55 和 55 两种）。
+                lines.append("   Typical mistakes:"
+                            + "; ".join(str(e) for e in d["typical_errors"][:4]))
+            # Units: the companion's knowledge points carry a unit natively, MVE had none before —
+            # so whether the model computed a "conversion rate" as a fraction or as a percentage
+            # came down to luck (measured, it submitted both 0.55 and 55).
             if d.get("unit"):
-                lines.append(f"   单位：{d['unit']}"
-                             + ("（百分数，不是小数）" if d["unit"] == "%" else ""))
+                lines.append(f"   Unit: {d['unit']}"
+                             + (" (a percentage, not a fraction)" if d["unit"] == "%" else ""))
             if d.get("skills"):
-                lines.append(f"   要用到的 SQL 技能：{'、'.join(d['skills'])}")
+                lines.append(f"   SQL skills needed: {', '.join(d['skills'])}")
 
-        # 表结构：只列焦点维度真正读的表（写 SQL 时最需要的一份）
-        # 带上**它在数据流的哪一层、上游是谁** —— 这是"22 张表之间的关系"，
-        # 之前图谱里只有表名和列名，看不出 agg_player_game_stats 是从
-        # agg_player_round_stats 再聚合出来的。
+        # Table structures: only the tables the focus dimensions genuinely read (the one most
+        # needed when writing SQL)
+        # Carrying **which data-flow layer it sits in and what its upstream is** — this is "how the
+        # 22 tables relate"; previously the graph held only table and column names, so you could not
+        # tell that agg_player_game_stats is aggregated from agg_player_round_stats.
         tbl_nodes = [n for n in sub["nodes"] if n["kind"] == "table"]
         for t in tbl_nodes:
             cols = list(t["detail"].get("columns") or [])
@@ -655,34 +700,37 @@ class KnowledgeGraph:
             up = [u[len("table:"):] for u in
                   self.upstream_tables(t["label"], depth=2)]
             lines.append(
-                f"· 表 {t['label']}"
+                f"· Table {t['label']}"
                 + (f"［{STAGE_LABEL.get(stage, stage)}］" if (stage and with_stage)
                    else "")
-                + f"（{t['detail'].get('grain') or ''}"
-                + (f"；建模粒度 {gdoc}" if (gdoc := t["detail"].get("grain_doc")) else "")
-                + (f"；主键 {', '.join(pk)}" if (pk := t["detail"].get("pk") or []) else "")
-                + f"，{t['detail'].get('rows', 0)} 行）"
-                + (f" 上游：{'、'.join(up)}" if (up and with_stage) else "")
-                + f"\n   列：{', '.join(ordered[:b.max_cols])}"
-                + (f" …共 {t['detail'].get('n_columns', 0)} 列"
+                + f"({t['detail'].get('grain') or ''}"
+                + (f"; modelling grain {gdoc}" if (gdoc := t["detail"].get("grain_doc")) else "")
+                + (f"; primary key {', '.join(pk)}" if (pk := t["detail"].get("pk") or []) else "")
+                + f", {t['detail'].get('rows', 0)} rows)"
+                + (f" upstream: {', '.join(up)}" if (up and with_stage) else "")
+                + f"\n   Columns: {', '.join(ordered[:b.max_cols])}"
++ (f" …{t['detail'].get('n_columns', 0)} columns in total"
                    if t["detail"].get("n_columns", 0) > b.max_cols else ""))
-            # 列**含义**：VLML 建模文档写的口径。以前只有列名，模型只能按常识
-            # 猜（fb_player 猜成 player_name、map 猜成别的），撞了三次才改对。
+            # Column **meanings**: the metric definitions written in VLML's modelling doc.
+            # Previously there were only column names, so the model could only guess from common
+            # sense (guessed fb_player as player_name, map as something else) and needed three
+            # collisions to get it right.
             desc = t["detail"].get("column_desc") or {}
             if desc:
                 named = [c for c in ordered[:b.max_cols] if c in desc]
                 if named:
                     named = named[:b.max_cols]
-                    lines.append("   列的含义："
-                                 + "；".join(
+                    lines.append("   Column meanings:"
+                                 + "; ".join(
                                      f"{c}={str((desc[c] or {}).get('desc') or '')[:60]}"
                                      for c in named[:6]))
             if t["detail"].get("purpose"):
-                lines.append(f"   这张表是干什么的：{t['detail']['purpose']}")
+                lines.append(f"   What this table is for: {t['detail']['purpose']}")
 
-        # 取哪一段：value_path 的段首就是工具的 section（洞察目录）。
-        # 缺了这层，模型知道调 match_analysis_report，却不知道值在
-        # key_metrics 而不是 team_comparison 里。
+        # Which section to take: the head of value_path is the tool's section (the insight
+        # directory).
+        # Without this layer the model knows to call match_analysis_report but not that the value
+        # lives in key_metrics rather than team_comparison.
         for dim in sub["focus_dims"]:
             if not with_section:
                 break
@@ -693,10 +741,10 @@ class KnowledgeGraph:
             declared = str(node["detail"].get("tool") or "")
             if not sec:
                 continue
-            # FROM_SECTION 边可能不在子图里（那条边的工具未必是 produced_by
-            # 的工具），所以直接查全图；并且**只认它自己声明的那个工具** ——
-            # 不同工具的 section 可能同名（key_metrics 就有两份），
-            # 不认主会指到错误的工具上。
+            # The FROM_SECTION edge may not be inside the subgraph (the tool on that edge is not
+            # necessarily the produced_by tool), so query the whole graph directly; and **only
+            # accept the tool it declares itself** — sections of different tools can share a name
+            # (there are two key_metrics), and not respecting that points at the wrong tool.
             tools = sorted({
                 e.src[len("tool:"):]
                 for e in self._in.get(f"dim:{dim}", [])
@@ -704,8 +752,9 @@ class KnowledgeGraph:
                 and (not declared or e.src == f"tool:{declared}")
             })
             if tools:
-                lines.append(f"· {dim} 取自 {'、'.join(tools)} 的 `{sec}` 段"
-                             f"（不是整包返回里的任意位置）")
+                lines.append(f"· {dim} is taken from the `{sec}` section of "
+                             f"{', '.join(tools)}"
+                             f" (not any position in the returned package)")
                 if with_insight:
                     lines.extend(self._insight_lines(dim, sec, tools, b))
 
@@ -713,22 +762,24 @@ class KnowledgeGraph:
         if confusables:
             pairs = sorted({tuple(sorted((e["from"][4:], e["to"][4:])))
                             for e in confusables})
-            lines.append("· 易混维度："
-                         + "；".join(f"{a} ↔ {b}" for a, b in pairs[:6]))
+            lines.append("· Confusable dimensions:"
+                         + "; ".join(f"{a} ↔ {b}" for a, b in pairs[:6]))
 
         if not lines:
             return ""
-        return ("【知识图谱 · 本题相关子图】下面的口径来自服务端配方，"
-                "优先于你的猜测；其中 '?' 是脱敏占位符，真实取值必须你自己查。\n"
+        return ("[Knowledge graph · subgraph relevant to this question] The metric definitions below "
+                "come from the server-side recipes and take priority over your guesses; '?' is a "
+                "redacted placeholder — the real values must be looked up by you.\n"
                 + "\n".join(lines))
 
     def _insight_lines(self, dim: str, sec: str, tools: list[str],
                        b: "GraphBudget") -> list[str]:
-        """洞察层：这一段背后是哪些 SQL、它们读哪些表。
+        """The insight layer: which SQL sits behind this section, and which tables they read.
 
-        为什么要有这一段：`key_metrics` 段实际是 5 个洞察拼出来的
-        （team_round_metrics / team_economy_pistol / …），每个读不同的表。
-        不知道这层，模型只能"调工具 + 在返回里翻"，翻错了就交 null。
+    Why this layer is needed: the `key_metrics` section is actually composed of 5 insights
+    (team_round_metrics / team_economy_pistol / …), each reading a different table. Without knowing
+    this layer the model can only "call the tool + rummage through the return value", and when it
+    rummages wrong it submits null.
         """
         out: list[str] = []
         for tool in tools[:1]:
@@ -745,21 +796,21 @@ class KnowledgeGraph:
                     parts.append(name)
                     continue
                 purpose = str(inode.detail.get("purpose") or "")
-                # tables 里存的可能是裸表名，也可能带 "table:" 前缀 —— 实测
-                # 直接切 len("table:")=6 会把 agg_player_round_stats 切成
-                # "ayer_round_stats"，所以必须先看有没有前缀。
+                # What is stored in tables may be a bare table name or carry the "table:" prefix —
+                # measured, slicing len("table:")=6 directly would cut agg_player_round_stats into
+                # "ayer_round_stats", so the prefix must be checked first.
                 tbls = [t[6:] if t.startswith("table:") else t
                         for t in inode.detail.get("tables") or []]
                 tbls = [t for t in tbls if t]
                 parts.append(f"{name}"
-                             + (f"（{purpose}）" if purpose else "")
-                             + (f"→读 {','.join(tbls[:3])}" if tbls else ""))
+                             + (f" ({purpose})" if purpose else "")
+                             + (f"→reads {','.join(tbls[:3])}" if tbls else ""))
             if parts:
-                out.append(f"   `{sec}` 段由 {len(si)} 个洞察拼成："
-                           + "；".join(parts))
+                out.append(f"   The `{sec}` section is composed of {len(si)} insights: "
+                           + "; ".join(parts))
         return out
 
-    # ---- 持久化 ----
+    # ---- Persistence ----
     def to_dict(self) -> dict[str, Any]:
         return {
             "schema_version": SCHEMA_VERSION,
@@ -770,9 +821,10 @@ class KnowledgeGraph:
                 "tools": len(self.tools()),
                 "tables": len(self.tables()),
                 "edges": len(self.edges),
-                # 缓存过期判据：见 `load()` 里的 `_stale`。
-                # 两个指纹缺一不可：题变了要重建（tasks.py），
-                # VLML 建模文档变了也要重建（声明来自文档，不是来自题）。
+                # Cache-staleness criterion: see `_stale` in `load()`.
+                # Both fingerprints are mandatory: a change in the questions requires a rebuild
+                # (tasks.py), and so does a change in VLML's modelling doc (the declarations come
+                # from the doc, not from the questions).
                 "task_fingerprint": _task_fingerprint(),
                 "model_fingerprint": _model_fingerprint(),
             },
@@ -788,22 +840,25 @@ class KnowledgeGraph:
         if not path.exists():
             return g
         raw = json.loads(path.read_text(encoding="utf-8", errors="replace"))
-        # 过期守卫：图谱是 `build()` 的**落盘缓存**。加了一道新题却不重建，
-        # 图谱里就永远没有那个维度 —— 实测 `kast_adr_check` 就是这样：
-        # 图谱里没有 kast_pct / kd_ratio，提示整段为空，模型连着三轮在错分支
-        # 上重试。缓存必须自己知道过期。
+        # Staleness guard: the graph is a **persisted cache** of `build()`. Add a new question without
+        # rebuilding and the dimension never makes it into the graph — measured, that is exactly
+        # what happened with `kast_adr_check`: the graph held no kast_pct / kd_ratio, the whole
+        # prompt section was empty, and the model retried the same wrong branch three rounds
+        # running. The cache has to know it is stale on its own.
         #
-        # 三个判据，缺一个都会漏：
-        #   题指纹   —— 加题/改题（tasks.py 的 answer_spec 变了）
-        #   建模指纹 —— VLML 的建模文档改了（表节点与维度节点的声明来自文档）
-        #   格式版本 —— 节点的声明字段本身改了（题没变、文档也没变，但**代码**变了）
+        # Three criteria, and missing any one of them leaks:
+        #   task fingerprint   — questions added/changed (answer_spec in tasks.py changed)
+        #   model fingerprint  — VLML's modelling doc changed (the table/dimension node declarations
+        #                        come from the doc)
+        #   format version     — the node declaration fields themselves changed (questions and doc
+        #                        both unchanged, but **the code** changed)
         if _stale(raw):
             try:
                 g = build()
                 g.save(path)
                 return g
             except Exception:
-                pass          # 重建失败就退回旧图，总比没有强
+                pass          # if the rebuild fails, fall back to the old graph — better than nothing
         for n in raw.get("nodes") or []:
             g.add_node(Node(id=n["id"], kind=n["kind"],
                             label=n.get("label", ""), detail=n.get("detail") or {}))
@@ -816,12 +871,13 @@ class KnowledgeGraph:
 
 
 # --------------------------------------------------------------------------
-# 构建
+# Construction
 # --------------------------------------------------------------------------
 def _task_fingerprint() -> str:
-    """tasks.py 里「题目 → 维度 → 声明路径」的指纹。
+    """The "question → dimension → declaration path" fingerprint in tasks.py.
 
-    图谱的输入就是这个指纹覆盖的东西；指纹变了说明加/改了题，缓存必须重建。
+    The graph's inputs are exactly what this fingerprint covers; a changed fingerprint means
+    questions were added or changed, so the cache must be rebuilt.
     """
     try:
         from tasks import TASKS
@@ -839,9 +895,10 @@ def _task_fingerprint() -> str:
 
 
 def _model_fingerprint() -> str:
-    """VLML 四份建模文档的指纹（`vlml_schema.model_specs()`）。
+    """The fingerprint of VLML's four modelling documents (`vlml_schema.model_specs()`).
 
-    表节点与维度节点的声明是从这些文档解析出来的 —— 文档改了，图就得重建。
+    The table node and dimension node declarations are parsed out of these documents — when the
+    documents change, the graph must be rebuilt.
     """
     try:
         return str(vlml_schema.model_specs().get("fingerprint") or "")
@@ -850,7 +907,7 @@ def _model_fingerprint() -> str:
 
 
 def _stale(raw: dict[str, Any]) -> bool:
-    """三判据：格式版本 / 题指纹 / 建模文档指纹。"""
+    """Three criteria: format version / task fingerprint / modelling-doc fingerprint."""
     if int(raw.get("schema_version") or 0) != SCHEMA_VERSION:
         return True
     summary = raw.get("summary") or {}
@@ -858,22 +915,26 @@ def _stale(raw: dict[str, Any]) -> bool:
     if fp and str(summary.get("task_fingerprint") or "") != fp:
         return True
     mf = _model_fingerprint()
-    # 建模指纹为空（文档读不到）时不判过期 —— 否则每次 load 都重建，慢且吵
+    # An empty model fingerprint (the doc could not be read) is not treated as stale — otherwise
+    # every load rebuilds, which is slow and noisy
     if mf and str(summary.get("model_fingerprint") or "") != mf:
         return True
     return False
 
 
 def _create_table_columns(text: str) -> dict[str, list[str]]:
-    """从 CREATE TABLE 语句里解析列名（schema/*.sql 是唯一权威来源之一）。
+    """Parse column names out of CREATE TABLE statements (schema/*.sql is one of the sole
+    authoritative sources).
 
-    为什么需要它：VLML 的 `DATA_DICTIONARY.json` 只有 13 张表，**不含派生表**
-    （agg_first_blood_stats 就不在里面）。而 fb_conversion_analysis 四个评分点
-    全读这张表 —— 缺了它，图谱就给不出列名，Voyager 只能猜（实测猜成
-    `fb_conv` / `round_number` 这类不存在的列）。
+    Why it is needed: VLML's `DATA_DICTIONARY.json` holds only 13 tables and **excludes the derived
+    tables** (agg_first_blood_stats is not among them). Yet all four scoring points of
+    fb_conversion_analysis read that table — without this the graph cannot supply column names and
+    Voyager can only guess (measured, it guessed non-existent columns like `fb_conv` /
+    `round_number`).
 
-    只取"CREATE TABLE 名字（"到配对的 ");" 之间的第一段，逐行取首个标识符，
-    跳过注释行与约束行（PRIMARY/FOREIGN/UNIQUE/CHECK/CONSTRAINT）。
+    Takes only the first segment between "CREATE TABLE name (" and its matching ");", takes the
+    leading identifier of each line, and skips comment lines and constraint lines
+    (PRIMARY/FOREIGN/UNIQUE/CHECK/CONSTRAINT).
     """
     out: dict[str, list[str]] = {}
     for m in re.finditer(
@@ -908,21 +969,25 @@ def _create_table_columns(text: str) -> dict[str, list[str]]:
 
 
 def _known_tables() -> dict[str, dict[str, Any]]:
-    """VLML 的数据建模表 → {grain, columns, pk, source}。认不出的表名不进图。
+    """VLML's data modelling tables → {grain, columns, pk, source}. Table names that cannot be
+    recognised do not enter the graph.
 
-    三个来源都要扫，只扫一个会漏：
-    - `DATA_DICTIONARY.json`：13 张，带 grain/字段说明，但**不含派生表**；
-    - `database/schema/*.sql`：17 张建表语句（含 agg_first_blood_stats），
-      用 `_create_table_columns` 解析列名；
-    - `database/transformations/*.sql`：13 张派生转换，文件名就是表名
-      （`01_` 这类序号前缀要剥掉），至少能让表名进图。
+    All three sources must be scanned; scanning only one misses things:
+    - `DATA_DICTIONARY.json`: 13 tables, with grain/field descriptions, but **excluding derived
+      tables**;
+    - `database/schema/*.sql`: 17 CREATE TABLE statements (including agg_first_blood_stats), whose
+      column names are parsed by `_create_table_columns`;
+    - `database/transformations/*.sql`: 13 derived transformations, where the file name is the table
+      name (a numeric prefix like `01_` must be stripped) — at least this lets the table name into
+      the graph.
 
-    实测漏掉的后果：fb_conversion_analysis 的四个评分点全读
-    `agg_first_blood_stats`，而它不在数据字典里 → derived_from 边全丢，
-    图谱里只剩 1 张表，Voyager 写 SQL 时没有任何列名可依。
+    Measured consequence of missing them: all four scoring points of fb_conversion_analysis read
+    `agg_first_blood_stats`, which is not in the data dictionary → every derived_from edge is lost,
+    only one table remains in the graph, and Voyager has no column names at all to write SQL with.
 
-    返回结构从「表名 → 说明字符串」升级成「表名 → 结构字典」：
-    图谱要能回答"这张表有哪些列"，光有 grain 不够。
+    The return structure was upgraded from "table name → description string" to "table name →
+    structural dict": the graph must be able to answer "which columns does this table have", and
+    grain alone is not enough.
     """
     out: dict[str, dict[str, Any]] = {}
     if DATA_DICT.exists():
@@ -938,7 +1003,7 @@ def _known_tables() -> dict[str, dict[str, Any]]:
             col_names = [str(c) for c in cols] if isinstance(cols, dict) else []
             out[name] = {
                 "grain": str(row.get("grain") or "").strip()
-                         or f"{len(col_names)} 列",
+                         or f"{len(col_names)} columns",
                 "columns": col_names,
                 "pk": [str(p) for p in (row.get("pk") or [])],
                 "source": "DATA_DICTIONARY.json",
@@ -952,9 +1017,10 @@ def _known_tables() -> dict[str, dict[str, Any]]:
             parsed: dict[str, list[str]] = {}
             try:
                 if sub == "schema":
-                    # 实测服务器上的 schema/*.sql 有一个是 GBK（0xa3 开头，
-                    # 中文注释），本地副本恰好全是 UTF-8 所以一直没暴露。
-                    # 列名全是 ASCII，坏字节换掉不影响解析结果。
+                    # Measured: one of the server's schema/*.sql files is GBK-encoded (starts with
+                    # 0xa3, Chinese comments), while the local copy happened to be all UTF-8, so it
+                    # was never exposed. Column names are pure ASCII, so replacing the bad bytes
+                    # does not affect the parse result.
                     parsed = _create_table_columns(
                         path.read_text(encoding="utf-8", errors="replace"))
             except OSError:
@@ -962,21 +1028,23 @@ def _known_tables() -> dict[str, dict[str, Any]]:
             cols = parsed.get(name) or []
             if name not in out:
                 out[name] = {
-                    "grain": (f"{sub} 定义（{path.name}）" if not cols
-                              else f"{len(cols)} 列 · {sub} 定义"),
+                    "grain": (f"defined in {sub} ({path.name})" if not cols
+                              else f"{len(cols)} columns · defined in {sub}"),
                     "columns": cols,
                     "pk": [],
                     "source": f"{sub}/{path.name}",
                 }
             elif not out[name]["columns"] and cols:
-                # 数据字典里有 grain 但没列（或列为空）→ 用建表语句补上
+                # The data dictionary has a grain but no columns (or empty columns) → fill them in
+                # from the CREATE TABLE statement
                 out[name]["columns"] = cols
                 out[name]["source"] += f" + {sub}/{path.name}"
     return out
 
 
 def _tables_in_sql(sql: str, known: dict[str, Any]) -> list[str]:
-    """从 SQL 里抽表名，只保留数据字典认得的表（防止把 CTE 名当表）。"""
+    """Extract table names from SQL, keeping only the tables the data dictionary recognises (so CTE
+    names are not mistaken for tables)."""
     found = []
     for name in _RE_FROM.findall(sql or ""):
         if name.lower() in {"select", "where", "group", "order", "limit"}:
@@ -987,22 +1055,24 @@ def _tables_in_sql(sql: str, known: dict[str, Any]) -> list[str]:
 
 
 # --------------------------------------------------------------------------
-# 指标语义：把 answer_spec 变成"这个指标怎么算/从哪取"
+# Metric semantics: turning answer_spec into "how this metric is computed / where to read it from"
 # --------------------------------------------------------------------------
-# 为什么必须有这一段（这是本轮的核心改动）：
+# Why this block is mandatory (this is the core change of this round):
 #
-#   TOOL_CATALOG 只给了工具签名和几张表的列名，却没说 **指标本身是什么**。
-#   实测 corrode_collapse 第 2 轮：模型照着点名调了 query_sql，却把
-#   `fb_conv`（要算的指标）当成列名写进 SELECT，把 `round_number` 当成
-#   agg_first_blood_stats 的列 —— 它知道要查什么，不知道这个数是怎么来的。
+#   TOOL_CATALOG only gave tool signatures and a few tables' column names, and never said **what
+#   the metric itself is**. Measured on corrode_collapse round 2: the model duly called query_sql
+#   by name, but wrote `fb_conv` (the metric to compute) into the SELECT as if it were a column
+#   name, and treated `round_number` as a column of agg_first_blood_stats — it knew what to look
+#   up but not how that number comes about.
 #
-#   原版 Voyager 怎么解决同类问题？它把 control_primitives 的**源码**拼进
-#   system message —— 模型能看到每个技能函数的实现，而不是只有函数名。
-#   MVE 的同构物就是这里：把每个维度的「计算式 / 取值路径 / 用哪些列」交底。
+#   How does the original Voyager solve the same class of problem? It splices control_primitives'
+#   **source code** into the system message — the model sees each skill function's implementation
+#   rather than just its name. MVE's isomorphic counterpart is right here: hand over each
+#   dimension's "formula / value path / which columns it uses".
 #
-#   泄题边界：SQL 里的**字面量一律抹成 '?'**。给口径、给结构，不给答案。
-#   （WHERE series_id='?' AND map_name='?' 只说明"要按这两列过滤"，
-#     至于具体哪张图、哪个队，得它自己查。）
+#   The answer-leak boundary: **every literal in the SQL is redacted to '?'**. Metric definitions
+#   and structure are given; answers are not. (WHERE series_id='?' AND map_name='?' only says
+#   "filter by these two columns" — which map and which team it must look up itself.)
 # --------------------------------------------------------------------------
 
 _LITERAL_RE = re.compile(r"'[^']*'")
@@ -1010,12 +1080,12 @@ _WS_RE = re.compile(r"\s+")
 
 
 def _desensitize(sql: str) -> str:
-    """抹掉 SQL 里的字符串字面量 —— 给口径，不给数值。"""
+    """Redact the string literals in SQL — metric definitions are given, values are not."""
     return _LITERAL_RE.sub("'?'", sql or "")
 
 
 def _sql_semantics(sql: str) -> str:
-    """最外层 SELECT 的表达式（含别名），脱敏后截断。"""
+    """The outermost SELECT expression (including aliases), desensitized and truncated."""
     m = re.search(r"\bselect\b(.*?)\bfrom\b", sql or "", re.IGNORECASE | re.DOTALL)
     if not m:
         return ""
@@ -1024,16 +1094,17 @@ def _sql_semantics(sql: str) -> str:
 
 
 def _sql_recipe(sql: str, limit: int = 700) -> str:
-    """整条 SQL 的脱敏骨架 —— 复杂指标（窗口函数/嵌套）才需要它。
+    """The desensitised skeleton of the whole SQL — only complex metrics (window functions /
+    nesting) need it.
 
-    `semantics` 只给最外层 SELECT，遇到 gaps-and-islands 这种写法
-    （max_losing_streak 用 ROW_NUMBER() OVER (PARTITION BY ...) 分组）
-    就看不出结构了 —— 那正是 18 轮全 0% 卡住的地方。整条骨架给出去，
-    模型才知道"连败要用窗口函数分段，不是 COUNT 一下"。
+    `semantics` gives only the outermost SELECT, which fails to convey the structure for the
+    gaps-and-islands style (max_losing_streak groups with ROW_NUMBER() OVER (PARTITION BY ...)) —
+    and that is exactly where 18 rounds of 0% got stuck. Handing over the full skeleton is what
+    lets the model know "a losing streak needs a window function to segment, not just a COUNT".
 
-    limit 为什么是 700 而不是 400：实测 400 会把骨架尾巴截成
-    `... ORDER BY cnt DESC, st…` —— 给了半条 SQL 比不给更糟，模型只能
-    自己补后半段。骨架要么完整给，要么不给。
+    Why limit is 700 rather than 400: measured, 400 truncates the skeleton's tail into
+    `... ORDER BY cnt DESC, st…` — half an SQL is worse than none, because the model can only
+    guess the second half itself. The skeleton is given either in full or not at all.
     """
     if not sql:
         return ""
@@ -1042,7 +1113,8 @@ def _sql_recipe(sql: str, limit: int = 700) -> str:
 
 
 def _has_structure(sql: str) -> bool:
-    """这条 SQL 有没有"结构"（嵌套子查询 / 窗口函数）？没有就只给 semantics。"""
+    """Does this SQL have any "structure" (nested subquery / window function)? If not, only
+    semantics is given."""
     return bool(re.search(r"\bover\s*\(|\bfrom\s*\(|\brow_number\b|\brank\s*\(|"
                           r"\bdense_rank\b|\blag\s*\(|\blead\s*\(",
                           sql or "", re.IGNORECASE))
@@ -1050,13 +1122,15 @@ def _has_structure(sql: str) -> bool:
 
 def _used_columns(sql: str, tables: list[str],
                   known: dict[str, Any]) -> dict[str, list[str]]:
-    """这条 SQL 在**每张表上**真正用到哪些列。
+    """Which columns this SQL genuinely uses **on each table**.
 
-    不靠正则猜标识符（猜出来的列会带进函数别名和关键字），而是拿已知列名单
-    逐个 `\b` 匹配。列名单来自 DATA_DICTIONARY / 建表语句，都是可追溯的。
+    Rather than guessing identifiers with regexes (guessed columns pick up function aliases and
+    keywords), every known column name is matched with `\b`. The column lists come from
+    DATA_DICTIONARY / the CREATE TABLE statements, so they are traceable.
 
-    返回「表 → 列」而不是一列扁平列表：两张表可能有同名列（series_id），
-    混在一起会把 A 表的列算到 B 表头上，模型照着写就 Binder Error。
+    Returns "table → columns" rather than one flat list: two tables can have identically named
+    columns (series_id), and merging them charges table A's columns to table B's header, which makes
+    the model write a Binder Error.
     """
     out: dict[str, list[str]] = {}
     for t in tables:
@@ -1069,91 +1143,114 @@ def _used_columns(sql: str, tables: list[str],
 
 
 # --------------------------------------------------------------------------
-# 典型错法：照伴学 knowledge_seeds 里的 `typical_misconceptions`
+# Typical mistakes: mirrors the companion's `typical_misconceptions` in knowledge_seeds
 # --------------------------------------------------------------------------
-# 伴学怎么写（`static/knowledge_seeds/history.json`）：
-#   "typical_misconceptions": ["把郡县制与分封制混为一谈", "只写措施不说明作用"]
-# 特点：①**人工维护的种子**，不是模型生成的；②写的是"错法"，不是"正确答案"；
-#      ③在出题、讲解、认知诊断里都会被读（`targeted_question_contract.py:27-29`）。
+# How the companion writes them (`static/knowledge_seeds/history.json`):
+#   "typical_misconceptions": ["conflating the commandery system with the enfeoffment system", ...]
+# Characteristics: ① **hand-maintained seeds**, not model-generated; ② they state "the mistake",
+#      not "the correct answer"; ③ they are read in question generation, explanation and cognitive
+#      diagnosis alike (`targeted_question_contract.py:27-29`).
 #
-# MVE 的同构项就是这里：每个维度"模型实际踩过的坑"。前四条来自实测日志
-# （53 轮诊断：max_losing_streak 算出 14/13 而真值是 8、start_round 算出 1
-#   而真值是 7），其余来自 LOCAL_SQL_NOTES 里记录的三类幻觉。
+# MVE's isomorphic counterpart is right here: the pitfalls each dimension has actually produced.
+# The first four come from measured logs (53-round diagnosis: max_losing_streak computed as 14/13
+# when the truth was 8, start_round computed as 1 when the truth was 7); the rest come from the
+# three classes of hallucination recorded in LOCAL_SQL_NOTES.
 #
-# 这不是"答案"，是"陷阱清单" —— 给它看，等于伴学把常见错误列在知识点上。
+# This is not "the answer", it is "a list of traps" — showing it to the model is the same as the
+# companion listing common mistakes on the knowledge point.
 # --------------------------------------------------------------------------
+# The dict keys are dimension names looked up in the graph — never translate the keys, only the
+# human-readable values.
 DIM_PITFALLS: dict[str, list[str]] = {
     "max_losing_streak": [
-        # 致命顺序按**实测命中率**排，不是按"通用→具体"排。
-        # 渲染只取前 N 条，把最致命的排在后面等于没写 —— 实测这条排第 4 位
-        # 时被 [:3] 切掉，模型写出一字不差的旧错法。
-        # 现象：算出 13，真值 8。它照抄了骨架，却把队伍过滤**提前**到最内层
-        # WHERE —— 那时只剩 Cloud9 输的回合，编号自然连续，整段被当成一块。
-        # 顺序是口径的一部分：内层只按 series+map 过滤、先编号，外层才筛队伍。
-        "把 losing_team_name 的过滤提前到最内层 WHERE —— 必须先对**全部回合**"
-        "编号（内层只过滤 series_id + map_name），再在外层筛目标队输的回合；"
-        "提前筛会把所有输的回合连成一整段",
-        "把「全场一共输了多少回合」当成最长连败（要数**连续**的一段）",
-        "跨图累加：回合号按全 series 排序，没先按 map_name 分开算",
-        "按半场（第 12 回合）重置 —— 口径不重置",
+        # The fatal mistake patterns are ordered by **measured hit rate**, not by
+        # "generic → specific". Rendering takes only the first N, so putting the most fatal ones
+        # last is the same as not writing them — measured, when this one sat at position 4 it was
+        # sliced off by [:3] and the model reproduced the very same old mistake.
+        # Symptom: it computed 13 when the truth was 8. It copied the skeleton faithfully but moved
+        # the team filter **forward** into the innermost WHERE — at that point only Cloud9's losing
+        # rounds remained, the numbering came out contiguous, and the whole thing was treated as
+        # one segment. Order is part of the metric definition: the inner layer filters by
+        # series+map only and numbers first; the outer layer filters the target team's losses.
+        "moving the losing_team_name filter forward into the innermost WHERE — **all** rounds must "
+        "be numbered first (the inner layer filters by series_id + map_name only), and only then "
+        "does the outer layer pick the target team's losing rounds; filtering early joins all "
+        "losing rounds into one single segment",
+        "treating \"how many rounds the team lost in total\" as the longest losing streak (it must "
+        "count a **consecutive** run)",
+        "accumulating across maps: round numbers are ordered over the whole series, so it must be "
+        "split by map_name first",
+        "resetting per half (round 12) — the metric definition does not reset",
     ],
     "streak_start_round": [
-        "用 MIN(round_number) 取起点 —— 那拿到的是全场最小回合号，"
-        "不是**最长那一段**的起点",
-        "同上：队伍过滤提前到内层会让段长算错，起点跟着错",
-        "取了另一段（较短那段）的起点",
+        "using MIN(round_number) for the start — that yields the smallest round number of the whole "
+        "match, not the start of the **longest** run",
+        "same thing: moving the team filter into the inner layer makes the run lengths wrong, and "
+        "the start is wrong with them",
+        "taking the start of a different (shorter) run",
     ],
     "conversion.fb_conv": [
-        "把首血次数当转换率（转换率 = 赢了的首血 / 首血总数）",
-        "漏乘 100（题目要求 0-100 的百分比，如 25.0）",
-        "把 fb_team_won 当布尔字符串比较，而不是 AVG 它",
+        "treating the first-blood count as the conversion rate (conversion rate = first bloods won "
+        "/ total first bloods)",
+        "forgetting to multiply by 100 (the question asks for a percentage 0-100, such as 25.0)",
+        "comparing fb_team_won as a boolean string instead of AVG-ing it",
     ],
     "map_fb_conv": [
-        "用全场数据算分图转换率（必须加 map_name 过滤）",
-        "分母用成全 series 的首血数",
+        "computing the per-map conversion rate from whole-series data (a map_name filter is "
+        "mandatory)",
+        "using the first-blood count of the whole series as the denominator",
     ],
     "opening_duels.fb": [
-        "拿全库首血数当这支队的（必须按 fb_team 过滤）",
+        "taking the whole-database first-blood count as this team's (it must be filtered by fb_team)",
     ],
     "map_rounds": [
-        "三张图求和时重复计数（rounds 表一行 = 一个回合，按 map_name 分组数）",
+        "double counting when summing across the three maps (one rounds row = one round, so count "
+        "groups by map_name)",
     ],
     "map_win_rate": [
-        "用 games 表的胜负算回合胜率（胜率是**回合级**的，要用 rounds 表）",
-        "漏乘 100",
+        "computing a round win rate from the games table's win/loss (the win rate is **round-level** "
+        "and needs the rounds table)",
+        "forgetting to multiply by 100",
     ],
     "total_rounds": [
-        "把两张图的回合数相加重复计数",
-        "用 games 表数回合（games 一行 = 一张图）",
+        "double counting by adding the round counts of two maps",
+        "counting rounds from the games table (one games row = one map)",
     ],
     "rounds_won": [
-        "用 games.winning_team_name 数回合（那是整图胜者，不是回合数）",
+        "counting rounds with games.winning_team_name (that is the whole-map winner, not a round "
+        "count)",
     ],
     "pistol_win_rate": [
-        "和 eco_win_rate 混用（同一个 key_metrics.economy 下的两个不同键）",
-        "自己按回合硬算（工具内部已有聚合口径，直接取 key_metrics）",
+        "confusing it with eco_win_rate (two different keys under the same key_metrics.economy)",
+        "hard-computing it from rounds by hand (the tool already has the aggregation internally, "
+        "so take key_metrics directly)",
     ],
     "eco_win_rate": [
-        "和 pistol_win_rate 混用",
+        "confusing it with pistol_win_rate",
     ],
     "pattern_rounds": [
-        "拿全 series 回合数当样本数（要取工具返回的 scope.rounds）",
+        "taking the whole-series round count as the sample size (take scope.rounds from the tool's "
+        "return value)",
     ],
     "pattern_confidence": [
-        "自己编一个置信度标签 —— 必须原样取工具返回的 scope.confidence",
-        "把 confidence 当成数值（它是 moderate / strong / weak / insufficient）",
+        "inventing a confidence label of its own — it must be taken verbatim from the tool's "
+        "returned scope.confidence",
+        "treating confidence as a number (it is moderate / strong / weak / insufficient)",
     ],
 }
 
 
-# 带**内联注释**的骨架：自动抽取的骨架只能显示字符串，说不出"哪一层该有什么"。
+# Skeletons **with inline comments**: an auto-extracted skeleton can only show a string, it cannot
+# say "what belongs on which layer".
 #
-# 为什么需要手写版：实测把完整骨架 + "WHERE 位置是口径"的一般警告都给了，
-# 模型仍然四次写出一字不差的错法 —— 把 `losing_team_name='Cloud9'` 提前到
-# 最内层 WHERE。它读到了骨架，但把三层 WHERE 当成"三个等价的过滤条件"合并了。
-# 一般警告打不过这个先验；只有在**出错的那一行上**写注释才拦得住。
+# Why a hand-written version is needed: measured, even with the complete skeleton plus the generic
+# warning "the WHERE position is the metric definition" all handed over, the model still produced
+# the very same mistake four times — moving `losing_team_name='Cloud9'` forward into the innermost
+# WHERE. It read the skeleton but merged the three WHERE layers as "three equivalent filter
+# conditions". A generic warning cannot beat that prior; only a comment **on the exact line it got
+# wrong** stops it.
 #
-# 与 DIM_PITFALLS 同源：都是人工维护的种子，不是模型生成的。
+# Same source as DIM_PITFALLS: hand-maintained seeds, not model-generated.
 DIM_RECIPE_NOTES: dict[str, str] = {
     "max_losing_streak":
         "SELECT cnt AS max_streak, start_round FROM ("
@@ -1162,35 +1259,40 @@ DIM_RECIPE_NOTES: dict[str, str] = {
         " ROW_NUMBER() OVER (ORDER BY round_number) AS rn,"
         " ROW_NUMBER() OVER (PARTITION BY losing_team_name ORDER BY round_number) AS grp"
         "  FROM rounds WHERE series_id='?' AND map_name='?'"
-        "  /* ↑ 内层：只许 series_id + map_name。写 losing_team_name 就全错 */"
+        "  /* ↑ inner layer: only series_id + map_name allowed. Writing losing_team_name here is"
+        "     wrong throughout */"
         " ) t WHERE losing_team_name='?'"
-        " /* ↑ 外层：队伍过滤只能在这里，编号之后 */"
+        " /* ↑ outer layer: the team filter may only go here, after the numbering */"
         " GROUP BY (rn - grp)"
         ") x ORDER BY cnt DESC, start_round ASC LIMIT 1",
     "streak_start_round":
-        "同上（同一条 SQL，取第 1 列）：内层 WHERE 只有 series_id + map_name，"
-        "losing_team_name 必须在外层 ) t WHERE 之后",
+        "same as above (the same SQL, take column 1): the inner WHERE holds only series_id + "
+        "map_name, and losing_team_name must come after the outer ) t WHERE",
 }
 
-# 自检规则：给一条**它自己能判定**的检查，而不是一句"别写错"。
-# 光警告"不要合并"没有可操作的判据；有了这条，它能在写完 SQL 后自己比对。
+# Self-check rule: give a check **it can decide by itself**, rather than a sentence saying
+# "don't get it wrong".
+# Merely warning "do not merge" offers no actionable criterion; with this rule it can compare by
+# itself after writing the SQL.
 SELF_CHECK_NOTE = (
-    "写完后自检：最内层 WHERE（FROM 之后那个）里只允许出现 series_id、map_name；"
-    "如果那里出现了要筛的队伍列（losing_team_name / winning_team_name），"
-    "删掉它——它属于外层。自检办法：先单独 COUNT 一下该队在这张图输了多少回合，"
-    "若你的 max_streak 正好等于这个数，说明你没分段。"
+    "Once written, self-check: only series_id and map_name may appear in the innermost WHERE (the "
+    "one right after FROM); if the team column being filtered (losing_team_name / "
+    "winning_team_name) shows up there, delete it — it belongs to the outer layer. How to check: "
+    "first COUNT on its own how many rounds that team lost on this map; if your max_streak comes "
+    "out exactly equal to that number, you have not segmented."
 )
 
 
 def _required_params(tool: str) -> list[str]:
-    """这个工具**必填**哪些参数（没写默认值、也不是 *args/**kwargs 的）。
+    """Which parameters this tool **requires** (those without a default and not *args/**kwargs).
 
-    为什么图谱要记这个：实测 pistol_eco_pattern 那道题，模型确实照图谱调了
-    `pattern_detection_report`，但**一个参数都没传** —— 工具返回空 pattern，
-    于是手枪局胜率交了 null、样本数 0、置信度 insufficient，覆盖率 0%。
-    图谱给了"调哪个工具、取哪条路径"，却没说"不传 team_name 就什么都拿不到"。
+    Why the graph needs to record this: measured on the pistol_eco_pattern question, the model did
+    call `pattern_detection_report` following the graph, but **passed not a single parameter** — the
+    tool returned an empty pattern, so the pistol-round win rate came back null, sample size 0,
+    confidence insufficient, coverage 0%. The graph said "which tool to call, which path to read",
+    but never said "without team_name you get nothing at all".
 
-    参数表从函数签名抽（可追溯），不是手写。
+    The parameter list is extracted from the function signature (traceable), not hand-written.
     """
     import inspect
 
@@ -1218,75 +1320,86 @@ def _required_params(tool: str) -> list[str]:
 
 
 # --------------------------------------------------------------------------
-# 参数的"语义必要性"：签名抓不到，只能人工标注
+# Parameters that are "semantically necessary": the signature cannot catch these, so they are
+# annotated by hand
 # --------------------------------------------------------------------------
-# `_required_params()` 抽的是**语法必填**（没有默认值的参数）。但真正坑人的
-# 是那些有默认值、不传也不报错、可结果为空的参数：
-#   pattern_detection_report(team_name=None, player_name=None, ...) 全都有默认值，
-#   实测模型一个参数都不传 → 返回空 pattern → 手枪局胜率交 null、样本数 0、
-#   置信度 insufficient → 覆盖率 0%，而它明明"照图谱调对了工具"。
-# 这条只能像 DIM_PITFALLS 一样人工写，来源标注为 seed。
+# `_required_params()` extracts **syntactically required** parameters (those without a default).
+# But what really traps people are parameters that have a default, raise no error when omitted, and
+# can still return an empty result:
+#   pattern_detection_report(team_name=None, player_name=None, ...) all have defaults; measured,
+#   the model passed not one of them → empty pattern → pistol-round win rate null, sample size 0,
+#   confidence insufficient → coverage 0%, even though it "called the right tool following the
+#   graph". This one can only be hand-written like DIM_PITFALLS, with its source marked as seed.
 # --------------------------------------------------------------------------
 TOOL_PARAM_HINTS: dict[str, str] = {
     "pattern_detection_report":
-        "至少要传 team_name（或 player_name）才会有有效 scope；"
-        "不传 → scope.rounds=0、confidence=insufficient，四个评分点全空。"
-        "series_ids 要传**数组** ['2843069']，传字符串会被逐字符拆开"
-        "（实测 → rounds=0）",
+        "at least team_name (or player_name) must be passed for the scope to be valid; passing "
+        "nothing → scope.rounds=0, confidence=insufficient, and all four scoring points empty. "
+        "series_ids must be passed as an **array** ['2843069']; passing a string splits it into "
+        "individual characters (measured → rounds=0)",
     "query_sql":
-        "sql_query 必填，且必须以 SELECT 开头（不支持 CTE）",
+        "sql_query is required and must start with SELECT (CTEs are not supported)",
     "match_rounds_report":
-        "数据集大时必须用 round_start/round_end 分页，否则会很慢或截断",
+        "on large datasets you must page with round_start/round_end, otherwise it is very slow or "
+        "truncated",
 }
 
-# 同上，但这是**可机检**的那部分：这些参数至少要传一个，否则结果必为空。
-# 有了它，校验层就能在调用发出之前拦下（而不是等裁判说"你交了 null"）。
-# 实测：pattern_detection_report() 不传参 → scope=null；
-#       传 team_name='Cloud9' → scope={rounds:59, confidence:moderate}（真值）。
+# Same as above, but this is the **machine-checkable** part: at least one of these parameters must
+# be passed, or the result is necessarily empty.
+# With it the validation layer can block the call before it is issued (rather than waiting for the
+# referee to say "you submitted null").
+# Measured: pattern_detection_report() with no arguments → scope=null;
+#           team_name='Cloud9' → scope={rounds:59, confidence:moderate} (the truth).
 TOOL_NEEDS_ANY_OF: dict[str, list[str]] = {
     "pattern_detection_report": ["team_name", "player_name"],
 }
 
-# 参数**类型**的坑：语法上不报错，语义上全错。
-# 实测：series_ids 传字符串 '2843069' → 被当成逐字符拆开 →
-#   scope 变成 {series: 7, rounds: 0, confidence: insufficient}，四个评分点全空；
-#   传数组 ['2843069'] → {series: 1, rounds: 59, confidence: moderate}（真值）。
-# 模型写 JSON 时习惯给字符串，这条必须在调用前拦下。
+# The trap of parameter **types**: no error syntactically, completely wrong semantically.
+# Measured: passing series_ids as the string '2843069' → it is split into individual characters →
+#   scope becomes {series: 7, rounds: 0, confidence: insufficient} and all four scoring points are
+#   empty;
+#   passing the array ['2843069'] → {series: 1, rounds: 59, confidence: moderate} (the truth).
+# The model habitually writes strings when emitting JSON, so this must be blocked before the call.
 TOOL_PARAM_TYPES: dict[str, dict[str, str]] = {
     "pattern_detection_report": {"series_ids": "list"},
 }
 
 
 def build(*, observe: bool = False, with_schema: bool = True) -> KnowledgeGraph:
-    """从 tasks 的 rubric + VLML 数据字典 + VLML 源码结构构建图谱。
+    """Build the graph from the tasks' rubrics + VLML's data dictionary + VLML's source structure.
 
-    observe=True 时会额外跑一遍裁判，用**实测**的编排顺序补 procedure_step
-    边（慢，且要联网/连库），默认只用声明式信息。
-    with_schema=True 时把 VLML 的 21 张表 / 46 个洞察 / 7 个工具一起进图
-    （实查 information_schema + 解析源码；连不上库时自动退回文件解析）。
+    With observe=True an extra referee run is performed to fill in the procedure_step edges with
+    the **measured** orchestration order (slow, and needs network/database access); by default only
+    declarative information is used.
+    With with_schema=True, VLML's 21 tables / 46 insights / 7 tools all enter the graph (queried
+    live from information_schema + source parsing; it automatically falls back to file parsing when
+    the database is unreachable).
     """
-    import vlml_env  # noqa: F401  引导环境
+    import vlml_env  # noqa: F401  bootstrap the environment
     from tasks import TASKS
 
     g = KnowledgeGraph()
     known_tables = _known_tables()
 
-    # ---- VLML 的真实结构：21 张表 + 46 个洞察 + 7 个工具 ----
-    # 之前只从**我们自己的 rubric SQL** 反推，结果图谱里只有 2 张表 ——
-    # 等于"出过题的才进图"，VLML 真正的建模一概没进。
-    # 实查 information_schema + 解析源码（表/派生/洞察/工具）补齐四层。
+    # ---- VLML's real structure: 21 tables + 46 insights + 7 tools ----
+    # Previously it was reverse-engineered from **our own rubric SQL** only, which left just 2
+    # tables in the graph — amounting to "only questions that have been generated enter the graph",
+    # with none of VLML's actual modelling in it.
+    # Querying information_schema + parsing the source (tables/derived/insights/tools) fills in all
+    # four layers.
     schema: dict[str, Any] = {}
     if with_schema:
         try:
             import vlml_schema
             schema = asyncio.run(vlml_schema.discover())
-        except Exception as e:                      # 连不上库就退回文件解析
-            print(f"（VLML 结构发现失败，退回文件解析：{type(e).__name__}: {e}）")
+        except Exception as e:                      # fall back to file parsing if the DB is down
+            print(f"(VLML structure discovery failed, falling back to file parsing: "
+                  f"{type(e).__name__}: {e})")
             schema = {}
     if schema.get("tables"):
-        known_tables = schema["tables"]             # 实查的列比文件解析更准
+        known_tables = schema["tables"]             # live columns are more accurate than file parsing
 
-    # --- 工具节点：vlml_env 暴露的报告工具 ---
+    # --- Tool nodes: the report tools exposed by vlml_env ---
     tool_names = [
         "match_summary_report", "match_analysis_report", "match_economy_report",
         "match_players_report", "match_rounds_report", "pattern_detection_report",
@@ -1306,10 +1419,11 @@ def build(*, observe: bool = False, with_schema: bool = True) -> KnowledgeGraph:
             detail["param_types"] = dict(types)
         g.add_node(Node(id=f"tool:{t}", kind="tool", label=t, detail=detail))
 
-    # `requires_tools` 是**题级**声明（"这道题要用到这些工具"），不是维度级的
-    # "由它产出"。之前照样建 produced_by，结果 query_sql 因为是每道题的
-    # requires_tools 而出现在所有维度的产出者里 —— who_produces 就废了。
-    # 正确做法：记在工具节点的 detail 上，不建边。
+    # `requires_tools` is a **question-level** declaration ("this question needs these tools"), not a
+    # dimension-level "produced by it". It used to create produced_by edges all the same, so
+    # query_sql — being in every question's requires_tools — showed up as a producer of every
+    # dimension, which ruined who_produces.
+    # The right approach: record it in the tool node's detail, create no edge.
     for topic_id, task in TASKS.items():
         for tool in getattr(task, "requires_tools", []) or []:
             nid = f"tool:{tool}"
@@ -1321,19 +1435,23 @@ def build(*, observe: bool = False, with_schema: bool = True) -> KnowledgeGraph:
                 req.append(topic_id)
             node.detail["required_by"] = sorted(req)
 
-    # --- 维度节点 + produced_by / derived_from / co_occurs / confusable ---
+    # --- Dimension nodes + produced_by / derived_from / co_occurs / confusable ---
     #
-    # ⚠️ 运行期题（generated_tasks.json 采纳的）的维度**不建节点**。
-    # 照伴学 `knowledge_tracker.py:1548/1555`：
-    #     topic_id = self._ensure_topic(...)          # 先解析，解析不到才建
+    # ⚠️ The dimensions of runtime questions (those adopted from generated_tasks.json) **create no
+    # nodes**.
+    # Mirroring the companion (`knowledge_tracker.py:1548/1555`):
+    #     topic_id = self._ensure_topic(...)          # resolve first, only create if unresolvable
     #     is_known_topic = bool(self.store.get_topic(topic_id))
-    #     qa_topic_id = topic_id if is_known_topic else ""     ← 新建的不进答题记录
-    # 即伴学运行期新建的知识点是**空壳（source=runtime，声明全空）+ 不进掌握度
-    # + 进待审候选队列**（`upsert_candidate`, evidence=MENTIONED）。
-    # MVE 更严：连空壳都不建 —— 维度层的权威来源是**种子题的 rubric**，
-    # 运行期的新名字一律走**边**（`link_import`），不占节点位。
-    # 不这么做的话，每采纳一道新题就多一个维度节点（实测 15 → 16），
-    # 等于"题目派生图谱"，正好是伴学的反面。
+    #     qa_topic_id = topic_id if is_known_topic else ""     ← newly created ones do not enter
+    # the answering record
+    # i.e. a knowledge point the companion creates at runtime is an **empty shell (source=runtime,
+    # all declarations empty) + does not count towards mastery + enters the pending-review candidate
+    # queue** (`upsert_candidate`, evidence=MENTIONED).
+    # MVE is stricter: not even an empty shell is created — the authoritative source of the
+    # dimension layer is the **rubrics of the seed questions**, and new names from the runtime all
+    # travel as **edges** (`link_import`), taking no node slot.
+    # Otherwise every adopted question adds a dimension node (measured 15 → 16), which amounts to
+    # "the graph derives from the questions" — exactly the opposite of the companion.
     try:
         from tasks import RUNTIME_TOPICS
         runtime_topics = set(RUNTIME_TOPICS)
@@ -1351,9 +1469,11 @@ def build(*, observe: bool = False, with_schema: bool = True) -> KnowledgeGraph:
             if topic_id in runtime_topics:
                 resolved = _resolve_existing_dim(dim, g)
                 if resolved:
-                    dim = resolved                  # 复用已有维度（同构 _resolve_topic_id）
+                    dim = resolved                  # reuse an existing dimension (isomorphic to
+                                                # _resolve_topic_id)
                 else:
-                    # 不建节点，只记待审候选 —— 面板可查，人来决定要不要转正
+                    # Create no node, only record a pending-review candidate — queryable on the
+                    # dashboard, and a human decides whether to promote it
                     spec0 = getattr(p, "answer_spec", None)
                     sql0 = str(getattr(spec0, "sql", "") or "")
                     pending[dim] = {
@@ -1368,7 +1488,8 @@ def build(*, observe: bool = False, with_schema: bool = True) -> KnowledgeGraph:
                         "at": datetime.now().isoformat(timespec="seconds"),
                         "source": "runtime",
                     }
-                    # 待审维度也是"VLML / Voyager 跑出来的条目"，同样要挂到学科下
+                    # A pending dimension is also an "entry produced by VLML / by a Voyager run",
+                    # so it must be attached to a subject in the same way
                     try:
                         import subjects
                         pending[dim]["entities"] = subjects.entities_in_sql(sql0)
@@ -1378,15 +1499,18 @@ def build(*, observe: bool = False, with_schema: bool = True) -> KnowledgeGraph:
                     continue
             dim_here.append(dim)
 
-            # 维度节点：把"这个指标是什么、怎么算、用哪些列"一次写全
+            # Dimension node: write out in one go "what this metric is, how it is computed, which
+            # columns it uses"
             detail: dict[str, Any] = {
                 "topic_id": topic_id,
                 "topics": [topic_id],
                 "point": p.point,
                 "points": [p.point],
-                # 同一维度会被多道题共用（map_fb_conv 同时属于两道题）。
-                # 渲染子图时只显示**当前这道题**的评分点，否则会把别题的
-                # subject 一起带进来（实测：corrode 题里冒出 Haven 的评分点）。
+                # The same dimension is shared by several questions (map_fb_conv belongs to two
+                # questions at once).
+                # When rendering the subgraph, only show **this question's** scoring points,
+                # otherwise another question's subject gets dragged in as well (measured: Haven's
+                # scoring points surfaced inside the corrode question).
                 "points_by_topic": {topic_id: [p.point]},
                 "weight": p.weight,
             }
@@ -1402,27 +1526,28 @@ def build(*, observe: bool = False, with_schema: bool = True) -> KnowledgeGraph:
                     detail["semantics"] = _sql_semantics(spec.sql)
                     if _has_structure(spec.sql):
                         detail["recipe"] = _sql_recipe(spec.sql)
-                        # 有手写注释版就用手写版 —— 它能标出"哪一层该有什么"
+                        # If an annotated version exists by hand, use that — it can point out "what
+                        # belongs on which layer"
                         note = DIM_RECIPE_NOTES.get(dim)
                         if note:
                             detail["recipe"] = note
                             detail["recipe_origin"] = "annotated"
                     detail["tolerance"] = spec.numeric_tolerance
-                    # 同一条 SQL 会被多个评分点共用，各自取不同的列
-                    # （max_losing_streak 取第 0 列、streak_start_round 取第 1 列）。
-                    # 不说清"取第几列"，模型会拿错。
+                    # The same SQL is shared by several scoring points, each taking a different
+                    # column (max_losing_streak takes column 0, streak_start_round takes column 1).
+                    # Without saying "which column to take", the model grabs the wrong one.
                     detail["value_columns"] = [spec.value_column]
                     if spec.base_column is not None:
                         detail["base_columns"] = [spec.base_column]
                 elif spec.tool:
-                    # 工具内部聚合的指标（pistol/eco/confidence）：没有 SQL，
-                    # 语义就写在"从返回结构的哪条路径取值"上。
+                    # Metrics aggregated inside the tool (pistol/eco/confidence): with no SQL, the
+                    # semantics live in "which path of the return structure the value is read from".
                     detail["tool"] = spec.tool
                     detail["value_path"] = spec.value_path
                     detail["semantics"] = (
-                        f"由 {spec.tool} 内部聚合，按点分路径取值："
+                        f"aggregated internally by {spec.tool}, value read at the dotted path: "
                         f"{spec.value_path}"
-                        + ("（百分比：num/denom*100）" if spec.percent else "")
+                        + (" (percentage: num/denom*100)" if spec.percent else "")
                     )
             pitfalls = DIM_PITFALLS.get(dim)
             if pitfalls:
@@ -1435,14 +1560,14 @@ def build(*, observe: bool = False, with_schema: bool = True) -> KnowledgeGraph:
             if spec is None:
                 continue
             if spec.tool:
-                # 声明式：服务端配好的取数配方（loop_core.py:185）
+                # Declarative: the retrieval recipe configured server-side (loop_core.py:185)
                 if f"tool:{spec.tool}" not in g.nodes:
                     g.add_node(Node(id=f"tool:{spec.tool}", kind="tool",
                                     label=spec.tool))
                 g.add_edge(Edge(
                     src=f"tool:{spec.tool}", dst=f"dim:{dim}",
                     relation=PRODUCED_BY, origin="declared",
-                    reason=f"{topic_id} 的 rubric 声明：按 {spec.value_path} 取值",
+                    reason=f"the rubric of {topic_id} declares it: value read at {spec.value_path}",
                     confidence=1.0))
             elif spec.sql:
                 for tbl in _tables_in_sql(spec.sql, known_tables):
@@ -1456,19 +1581,20 @@ def build(*, observe: bool = False, with_schema: bool = True) -> KnowledgeGraph:
                     g.add_edge(Edge(
                         src=f"table:{tbl}", dst=f"dim:{dim}",
                         relation=DERIVED_FROM, origin="declared",
-                        reason=f"{topic_id} 的确定性 SQL 读这张表",
+                        reason=f"the deterministic SQL of {topic_id} reads this table",
                         confidence=1.0))
         dims_by_topic[topic_id] = sorted(set(dim_here))
 
-        # co_occurs：同一题一起出现的维度（对称）
+        # co_occurs: dimensions appearing together in the same question (symmetric)
         uniq = sorted(set(dim_here))
         for i, a in enumerate(uniq):
             for b in uniq[i + 1:]:
                 g.add_edge(Edge(src=f"dim:{a}", dst=f"dim:{b}",
                                 relation=CO_OCCURS, origin="declared",
-                                reason=f"同题 {topic_id} 要求一起覆盖",
+                                reason=f"question {topic_id} requires covering them together",
                                 confidence=0.9))
-        # confusable：同后缀不同前缀的维度（pistol_win_rate / eco_win_rate）
+        # confusable: dimensions with the same suffix but a different prefix
+        # (pistol_win_rate / eco_win_rate)
         for a in uniq:
             for b in uniq:
                 if a >= b:
@@ -1479,11 +1605,12 @@ def build(*, observe: bool = False, with_schema: bool = True) -> KnowledgeGraph:
                 if sa[1:] == sb[1:] and sa[0] != sb[0]:
                     g.add_edge(Edge(src=f"dim:{a}", dst=f"dim:{b}",
                                     relation=CONFUSABLE, origin="declared",
-                                    reason="同后缀不同前缀，易混",
+                                    reason="same suffix, different prefix — easily confused",
                                     confidence=0.8))
 
-    # --- 工具节点反查：这个工具能出哪些维度 ---
-    # who_produces 是"维度 → 工具"，这里补反向索引，渲染时直接读 detail。
+    # --- Reverse lookup on tool nodes: which dimensions can this tool produce ---
+    # who_produces is "dimension → tool"; this adds the reverse index, read straight off detail
+    # when rendering.
     for e in g.edges:
         if (e.relation == PRODUCED_BY and e.src.startswith("tool:")
                 and e.dst.startswith("dim:")):
@@ -1500,14 +1627,16 @@ def build(*, observe: bool = False, with_schema: bool = True) -> KnowledgeGraph:
         _add_vlml_schema(g, schema)
         _add_seed_facts(g, schema)
 
-    # VLML 的建模声明：**读文件**，连不上库也在。放在 schema 之后是因为
-    # 它要往已经建好的表节点上补声明（实查的列名 + 文档的口径合起来才完整）。
+    # VLML's modelling declarations: **read from files**, so they work even when the database is
+    # unreachable. Placed after schema because it adds declarations onto the already-created table
+    # nodes (live column names + the doc's metric definitions only combine into something complete).
     model: dict[str, Any] = {}
     if vlml_schema is not None:
         try:
             model = vlml_schema.model_specs()
-        except Exception as e:        # 文档读不到就只缺声明，不能整图崩掉
-            print(f"（VLML 建模声明解析失败：{type(e).__name__}: {e}）")
+        except Exception as e:        # if the doc cannot be read, only the declarations are missing;
+                                       # the whole graph must not collapse
+            print(f"(VLML modelling declaration parsing failed: {type(e).__name__}: {e})")
     if model:
         _add_model_declarations(g, model)
     _add_dimension_declarations(g, model)
@@ -1515,57 +1644,69 @@ def build(*, observe: bool = False, with_schema: bool = True) -> KnowledgeGraph:
     if observe:
         asyncio.run(_observe_procedure(g))
     _merge_imported_links(g)
-    # 运行期题带进来的新维度名：登记为待审候选，不进维度层
+    # New dimension names brought in by runtime questions: registered as pending-review candidates,
+    # they do not enter the dimension layer
     n_pending = _save_pending_dimensions(pending)
     if n_pending:
-        print(f"（运行期题的新维度 {n_pending} 个 → 待审候选，未建节点："
-              f"{'、'.join(sorted(pending))[:120]}）")
+        print(f"({n_pending} new dimensions from runtime questions → pending-review candidates, "
+              f"no nodes created: {', '.join(sorted(pending))[:120]})")
     return g
 
 
 # --------------------------------------------------------------------------
-# 人导入的问题 → 图谱**边**（不是节点）
+# Human-imported questions → knowledge graph **edges** (not nodes)
 # --------------------------------------------------------------------------
-# ⚠️ 这一段的建谱依据被**推翻重建过一次**，改之前先读这段注释。
+# ⚠️ The basis for graph construction in this section was **overturned and rebuilt once**; read
+# this comment block before changing anything.
 #
-# 【错的做法（v1，已废）】匹配不到就往图谱里加一个 `dim:` **维度节点**。
-#   依据是从 `TASKS[].rubric` 反推（tasks.py:361「出过题的才进图」）——
-#   这个依据本身就是错的：它让维度层永远只能装下"已经出过题"的方向，
-#   人问的新方向天然无处落脚，于是只能靠造节点续命。
+# [The wrong approach (v1, abandoned)] when the match failed, add a `dim:` **dimension node** to
+#   the graph.
+#   The basis was reverse-engineering from `TASKS[].rubric` (tasks.py:361, "only questions that
+#   have been generated enter the graph") — and that basis is itself wrong: it means the dimension
+#   layer can only ever hold directions that already have a question, so a new direction a human
+#   asks about has nowhere to land and can only be kept alive by inventing nodes.
 #
-# 【对的依据（v2，现在）】**VLML 的表展开到工具集那层，图谱是完全覆盖的**。
-#   实测：46 个 `insight` 节点 = VLML 的 `tools/sql/*.sql`，每个都声明了
-#   `tables`（读哪些表）和 `reports`（被哪些报告工具 composes）—— 表 × 工具集
-#   这一层没有缺口。所以收录判据不是"图谱里有没有同名的维度"，而是
-#   **「VLML 能不能用表内覆盖的工具集完成这个工作」**：
-#     人问的题 → VLML 真跑了一次取数 → 拿到真实 SQL / 工具 / 表
-#     → 查哪些 insight 覆盖了这些表（且被这个工具用）
-#     → 命中就是"工具集覆盖得到" → **收录**
+# [The right basis (v2, current)] **VLML's tables expanded out to the tool-set layer: the graph has
+#   full coverage.**
+#   Measured: 46 `insight` nodes = VLML's `tools/sql/*.sql`, each declaring `tables` (which tables
+#   it reads) and `reports` (which report tools compose it) — the table × tool-set layer has no
+#   gap. So the inclusion criterion is not "does a dimension of the same name exist in the graph"
+#   but **"can VLML complete this work with a tool set covered by those tables"**:
+#     a human asks a question → VLML really runs a retrieval → real SQL / tool / table obtained
+#     → look up which insights cover those tables (and are used by this tool)
+#     → a hit means "the tool set covers it" → **include it**
 #
-# 【落法】既然覆盖层不需要补，就**不建节点，建边**（用户原话）：
-#     伴学 `MaterialTopicMapper` 映射不上时交回 UI 让人选节点，从不为材料
-#     新建知识点；MVE 同理 —— 人的题是一个**应用场景**，场景挂在边上，
-#     不占节点位。
+# [How it lands] Since the coverage layer needs no patching, we **create no node, we create edges**
+# (the user's own words):
+#     The companion's `MaterialTopicMapper` hands unmapped material back to the UI for a human to
+#     pick a node, and never creates a new knowledge point for a material; MVE is the same — a
+#     human's question is an **application scenario**, and scenarios hang off edges, taking no node
+#     slot.
 #
-#   实际落的三类边（全部 origin=observed，因为都来自真实取数）：
-#     insight:I --application--> table:T    这个洞察在这张表上被用过一次
-#     tool:X    --composes-----> insight:I  该工具这次确实用了这个洞察（补全）
-#     insight:A --co_occurs----> insight:B  同一道题要求这两个洞察一起用（对称）
-#   退化情形（纯 query_sql 直查表，没有 insight 覆盖）：
-#     tool:X    --application--> table:T    按**表级**收录，置信度下调到 0.8
+#   The three kinds of edges actually created (all origin=observed, since they all come from real
+#   data retrieval):
+#     insight:I --application--> table:T    this insight has been used once on this table
+#     tool:X    --composes-----> insight:I  this tool really used this insight this time (backfill)
+#     insight:A --co_occurs----> insight:B  one question requires both insights together (symmetric)
+#   Degenerate case (pure query_sql reading a table directly, with no covering insight):
+#     tool:X    --application--> table:T    included at the **table** level, confidence lowered to
+#                             0.8
 #
-# 同构关系：
-#   伴学  MaterialTopicMapper → 映射到已有知识点 / 映射不上交回人选，**不建节点**
-#   MVE   link_import()       → 判工具集覆盖 / 覆盖就**建边**，不建节点
+# Isomorphic relations:
+#   Companion  MaterialTopicMapper → map to an existing knowledge point / hand unmapped material
+#              back to the human, **creating no node**
+#   MVE       link_import()        → judge tool-set coverage / if covered, **create an edge**, no
+#              node
 IMPORTED_LINKS = HERE / "imported_links.json"
-IMPORTED_DIMS = HERE / "imported_dimensions.json"   # v1 遗留，仅用于一次性迁移
+IMPORTED_DIMS = HERE / "imported_dimensions.json"   # v1 leftover, used only for a one-off migration
 
 
 def load_imported_links() -> list[dict[str, Any]]:
-    """人导入落的**边**（持久化，build 时并回图谱）。
+    """The **edges** persisted for human imports (merged back into the graph at build time).
 
-    v1 的 `imported_dimensions.json`（造节点的旧机制）在这里**一次性迁移**
-    成边记录，然后把旧文件改名收尾 —— 老数据不丢，但不再走建节点那条路。
+    v1's `imported_dimensions.json` (the old node-inventing mechanism) is migrated here **once**
+    into edge records, and then the old file is renamed and retired — old data is not lost, but it
+    no longer travels the node-creating path.
     """
     try:
         raw = json.loads(IMPORTED_LINKS.read_text(encoding="utf-8"))
@@ -1617,7 +1758,8 @@ def load_imported_links() -> list[dict[str, Any]]:
 
 
 def _insight_index(g: KnowledgeGraph) -> list[tuple[str, set[str], set[str]]]:
-    """(insight 节点 id, 它读的表, 用它的报告工具) —— 工具集覆盖的依据。"""
+    """(insight node id, the tables it reads, the report tools that use it) — the basis of tool-set
+    coverage."""
     out: list[tuple[str, set[str], set[str]]] = []
     for nid, node in g.nodes.items():
         if not nid.startswith("insight:"):
@@ -1632,24 +1774,26 @@ def _insight_index(g: KnowledgeGraph) -> list[tuple[str, set[str], set[str]]]:
 def coverage_of(*, tables: list[str] | set[str], tool: str = "",
                 g: KnowledgeGraph | None = None,
                 max_hits: int = 3) -> dict[str, Any]:
-    """**收录判据**：VLML 能不能用「表内覆盖的工具集」完成这个工作？
+    """**Inclusion criterion**: can VLML complete this work with a "tool set covered by the tables"?
 
-    ⚠️ `max_hits` 是必须的，不是优化。实测：一次问「回合胜率」用到
-    `rounds` + `games` 两张**主干表**，46 个 insight 里 16 个都读它们 ——
-    不限流的话一次导入就落 32 条 application + 16 条 composes +
-    C(16,2)=120 条 co_occurs = **168 条边**，直接把图谱淹掉，也爆掉伴学
-    `GraphBudget.max_edges=30` 的预算。
+    ⚠️ `max_hits` is mandatory, not an optimisation. Measured: a single question about "round win
+    rate" touches two **core tables**, `rounds` + `games`, and 16 of the 46 insights read them —
+    without throttling, one import lands 32 application + 16 composes + C(16,2)=120 co_occurs =
+    **168 edges**, drowning the graph and blowing the companion's `GraphBudget.max_edges=30`
+    budget too.
 
-    所以这里取的是**最小覆盖集**：按「这次用到的表被它覆盖了多少」排序，
-    只留最靠前的 `max_hits` 个 —— 这才是"哪个工具集完成了这个工作"的
-    精确答案，而不是"哪些工具碰过这些表"。
+    So what is taken here is a **minimum cover set**: sorted by "how much of this retrieval's
+    tables it covers", keeping only the top `max_hits` — that is the precise answer to "which tool
+    set completed this work", not "which tools happened to touch these tables".
 
-    返回值里的 `level`：
-      - `insight` —— 有 insight 覆盖了这次取数读到的表（最理想，工具集覆盖）
-      - `table`   —— 没有 insight 覆盖，但表本身在图里（一般是用 query_sql
-                     直查；工具集 = 通用 SQL，也算覆盖得到，置信度下调）
-      - `none`    —— 连表都不在图谱里 → **覆盖不到，不收录**，如实交回
-                     （伴学同款：映射不上不硬造，交回 UI 让人处理）
+    The `level` in the return value:
+      - `insight` — an insight covers the tables this retrieval read (ideal: tool-set coverage)
+      - `table`   — no insight covers it, but the table itself is in the graph (usually a direct
+                     query_sql lookup; the tool set is generic SQL, which still counts as coverage,
+                     with lowered confidence)
+      - `none`    — not even the table is in the graph → **not covered, not included**, handed
+                     back honestly (the same as the companion: when mapping fails it does not
+                     force anything, it hands back to the UI for a human to handle)
     """
     try:
         g = g or KnowledgeGraph.load()
@@ -1665,7 +1809,8 @@ def coverage_of(*, tables: list[str] | set[str], tool: str = "",
         ov = itabs & tset
         if not ov:
             continue
-        # 覆盖度 = 这次的表被它覆盖的比例；调用的工具确实声明了这个洞察则加权
+        # Coverage ratio = the share of this retrieval's tables it covers; extra weight when the calling
+        # tool actually declares this insight
         s = len(ov) / max(1, len(tset)) + (0.5 if (tool and tool in ireps) else 0.0)
         scored.append((s, len(ov), nid))
     scored.sort(key=lambda x: (-x[0], -x[1], x[2]))
@@ -1685,13 +1830,15 @@ def coverage_of(*, tables: list[str] | set[str], tool: str = "",
 
 
 # --------------------------------------------------------------------------
-# 运行期题的维度 → 待审候选（伴学 `upsert_candidate` 的同构物，**不建节点**）
+# Dimensions from runtime questions → pending-review candidates (isomorphic to the companion's
+# `upsert_candidate`, **creating no node**)
 # --------------------------------------------------------------------------
 PENDING_DIMS = HERE / "pending_dimensions.json"
 
 
 def load_pending_dimensions() -> list[dict[str, Any]]:
-    """运行期题带进来、但没解析到已有维度的维度名 —— 只登记，不进维度层。"""
+    """Dimension names brought in by runtime questions that did not resolve to an existing
+    dimension — registered only, they do not enter the dimension layer."""
     try:
         raw = json.loads(PENDING_DIMS.read_text(encoding="utf-8"))
         return raw if isinstance(raw, list) else []
@@ -1708,11 +1855,13 @@ def _dim_tokens(d: str) -> set[str]:
 
 
 def _resolve_existing_dim(dim: str, g: KnowledgeGraph) -> str:
-    """运行期题的维度名先解析到**已有**维度 —— 伴学 `_resolve_topic_id` 的同构。
+    """Resolve a runtime question's dimension name to an **existing** dimension first — isomorphic to
+    the companion's `_resolve_topic_id`.
 
-    只认两档硬匹配：完全同名 / 归一化同名（去标点与大小写）。
-    **不做模糊匹配**：把两个不同的量并成一个，比多留一个待审候选
-    代价大得多 —— 那会直接污染掌握度与出题口径。
+    Only two tiers of hard match count: exactly the same name / the same normalised name (punctuation
+    and case removed). **No fuzzy matching**: merging two different quantities costs far more than
+    leaving one extra pending-review candidate — it would directly pollute mastery and question
+    routing.
     """
     if f"dim:{dim}" in g.nodes:
         return dim
@@ -1724,9 +1873,11 @@ def _resolve_existing_dim(dim: str, g: KnowledgeGraph) -> str:
 
 
 def _nearest_dim(dim: str, g: KnowledgeGraph) -> str:
-    """给待审候选一个"最像的已有维度"建议 —— 只用于提示，不自动合并。
+    """Suggest the "most similar existing dimension" for a pending-review candidate — for hints only,
+    never an automatic merge.
 
-    照伴学 `_suggest_dims`（只说"换一个维度"模型换不对，要给候选）。
+    Mirrors the companion's `_suggest_dims` (merely saying "pick another dimension" does not make
+    the model pick correctly — candidates have to be offered).
     """
     toks = _dim_tokens(dim)
     if not toks:
@@ -1744,14 +1895,18 @@ def _nearest_dim(dim: str, g: KnowledgeGraph) -> str:
 
 def _render_from_links(topic_id: str, g: "KnowledgeGraph",
                        with_formula: bool = True) -> str:
-    """维度层没有这道题的焦点时，用**边上的载荷**渲染提示。
+    """When the dimension layer has no focus for this question, render the prompt from the **payload on
+    the edges**.
 
-    运行期题的维度不建节点（照伴学：运行期知识点不进权威层），所以
-    `subgraph_for_topic` 会 `found=False`。但支架信息并没有丢 —— 它在
-    `imported_links.json` / `pending_dimensions.json` 里：那次真实取数的
-    SQL 能解析出表、列、口径、结构骨架。不给这段，模型做题时就是裸奔。
+    The dimensions of runtime questions create no nodes (mirroring the companion: runtime knowledge
+    points do not enter the authoritative layer), so `subgraph_for_topic` returns `found=False`.
+    But the scaffold information is not lost — it lives in `imported_links.json` /
+    `pending_dimensions.json`: the SQL from that real retrieval can be parsed into tables, columns,
+    metric definitions and a structural skeleton. Without this block the model works naked while
+    solving.
 
-    实测：不兜底时新题的图谱提示长度为 0（等于支架被撤），出了题却练不了。
+    Measured: without this fallback the graph prompt for a new question has length 0 (equivalent to
+    the scaffold being withdrawn), so the question can be generated but not practised.
     """
     recs: list[dict[str, Any]] = []
     try:
@@ -1777,28 +1932,33 @@ def _render_from_links(topic_id: str, g: "KnowledgeGraph",
         seen.add(dim)
         sql = str(r.get("sql") or "")
         sh = sql_shape(sql, list(r.get("tables") or []))
-        lines.append(f"· 维度 {dim}（运行期题带来的新维度，**未进维度层**，"
-                     "口径来自它入库时真实跑通的取数）")
+        lines.append(f"· Dimension {dim} (a new dimension brought in by a runtime question, "
+                     "**not in the dimension layer**; its metric definition comes from the "
+                     "retrieval that genuinely ran when it was admitted)")
         if r.get("point"):
-            lines.append(f"   要拿什么：{r['point']}")
+            lines.append(f"   What to retrieve: {r['point']}")
         if sh["tables"]:
-            lines.append("   来自表（要用 query_sql 自己查，"
-                         "**表名不是工具名**）：" + "、".join(sh["tables"]))
+            lines.append("   Source tables (you must query these yourself with query_sql — "
+                         "**a table name is not a tool name**): "
+                         + ", ".join(sh["tables"]))
         if sh["columns"]:
-            lines.append("   用到的列：" + ", ".join(sh["columns"][:b.max_cols]))
-        # 与 `render_for_prompt` 同口径：口径层受 `with_formula` 管，
-        # 运行期题（只落边不建节点）走这条兜底路径时也不能例外 ——
-        # 否则撤了支架的题一落到这条路径上，答案模板又回来了。
+            lines.append("   Columns used: " + ", ".join(sh["columns"][:b.max_cols]))
+        # Same metric definition policy as `render_for_prompt`: that layer is governed by
+        # `with_formula`, and a runtime question (edges only, no nodes) taking this fallback path
+        # must be no exception —
+        # otherwise a question whose scaffold was withdrawn gets its answer template back the
+        # moment it lands on this path.
         if with_formula and sh["semantics"]:
-            lines.append(f"   怎么算：{sh['semantics']}")
+            lines.append(f"   How it is computed: {sh['semantics']}")
         if with_formula and sh["recipe"]:
-            lines.append(f"   结构骨架：{sh['recipe']}")
-            lines.append(f"   自检：{SELF_CHECK_NOTE}")
+            lines.append(f"   Structural skeleton: {sh['recipe']}")
+            lines.append(f"   Self-check: {SELF_CHECK_NOTE}")
     return "\n".join(lines) if len(lines) > 1 else ""
 
 
 def _save_pending_dimensions(pending: dict[str, dict[str, Any]]) -> int:
-    """待审候选落盘。仍"运行期且未解析"的才留着，其余自然消失。"""
+    """Persist the pending-review candidates. Only those still "runtime and unresolved" are kept;
+    the rest disappear on their own."""
     if not pending:
         return 0
     try:
@@ -1816,11 +1976,13 @@ def _save_pending_dimensions(pending: dict[str, dict[str, Any]]) -> int:
 
 
 def sql_shape(sql: str, tables: list[str] | None = None) -> dict[str, Any]:
-    """从一段**真实跑过的** SQL 解析出「出题形状」：表 / 列 / 口径 / 骨架 / 难度。
+    """Parse the "question-authoring shape" out of a **genuinely executed** SQL:
+    tables / columns / metric definition / skeleton / difficulty.
 
-    人导入的题不建节点，所以出题器没有 `dim:` 节点可翻 —— 它翻的是**边**，
-    而边上的信息就是这份 shape。数据来源同样是实测：解析那段真跑过的 SQL，
-    不是模型写的。
+    Human-imported questions create no nodes, so the question generator has no `dim:` node to look
+    through — what it looks through are the **edges**, and the information on those edges is exactly
+    this shape. The data source is measured just the same: it parses that SQL which really ran, not
+    something the model wrote.
     """
     known = _known_tables()
     txt = str(sql or "")
@@ -1838,11 +2000,12 @@ def sql_shape(sql: str, tables: list[str] | None = None) -> dict[str, Any]:
 
 
 def _entry_id(rec: dict[str, Any]) -> str:
-    """条目在学科登记册里的稳定 id —— 重建图谱 / 换库都要能认出是同一条。
+    """The entry's stable id in the subject registry — it must be recognisable as the same entry across
+    graph rebuilds and database swaps.
 
-    两类条目分开前缀：运行期题带进来的待审维度（source="runtime"）走
-    `pending:`，人导入落下的边走 `human:` —— 同一个维度名两边都出现时
-    不该被并成一条。
+    The two kinds of entry get different prefixes: pending-review dimensions brought in by runtime
+    questions (source="runtime") use `pending:`, while edges left by human imports use `human:` —
+    when the same dimension name appears on both sides they should not be merged into one entry.
     """
     dim = str(rec.get("dimension") or "").strip()
     q = str(rec.get("question") or "").strip()
@@ -1851,12 +2014,13 @@ def _entry_id(rec: dict[str, Any]) -> str:
 
 
 def _attach_entry(rec: dict[str, Any], entry_id: str = "") -> list[str]:
-    """把这个条目挂到它能挂上的学科下。
+    """Attach this entry to whichever subject it can be attached to.
 
-    挂不上就登记成**未归属**（空列表），等人在面板上填那个学科 ——
-    绝不硬塞进某个默认学科：那会让"学科"重新退化成枚举。
-    同构伴学 `store.py:1506`：非 seed 条目的 subject 允许被后来的写入改，
-    所以这里重复 attach 是幂等且可升级的。
+    When it cannot be attached it is registered as **unassigned** (an empty list), waiting for a
+    human to fill that subject in on the dashboard — it is **never** force-fitted into some default
+    subject: that would degrade "subject" back into an enum.
+    Isomorphic to the companion's `store.py:1506`: a non-seed entry's subject may be overwritten by
+    a later write, so repeating attach here is idempotent and upgradable.
     """
     try:
         import subjects
@@ -1875,14 +2039,15 @@ def link_import(*, question: str, dimension: str = "", sql: str = "",
                 tool: str = "", tables: list[str] | None = None,
                 topic_id: str = "", value: Any = None,
                 subject: dict[str, Any] | None = None) -> dict[str, Any]:
-    """把人导入的问题**收进图谱的边上**，不建任何节点。返回落盘记录。
+    """Take a human-imported question **onto the graph's edges**, creating no node at all. Returns the
+    persisted record.
 
-    判据（见 `coverage_of`）：VLML 用真实取数读到的表，有没有被图谱里
-    「表内覆盖的工具集」（insight）覆盖到。覆盖得到 → 收录 → 建边。
-    覆盖不到 → `adopted=False` 如实返回，**绝不静默造一个节点顶上**。
+    The criterion (see `coverage_of`): are the tables that VLML's real retrieval read covered by the
+    graph's "tool set covered by those tables" (insights)? Covered → include → create edges. Not
+    covered → return `adopted=False` honestly, **never silently inventing a node to stand in**.
 
-    边的来源必须是实测（origin="observed"）：这些表/洞察不是声明出来的，
-    是这次取数**真的**读到了、真的用了。
+    The edges' origin must be measured (origin="observed"): these tables/insights are not declared,
+    they were genuinely read and genuinely used by this retrieval.
     """
     known = _known_tables()
     tbls = list(tables or []) or (_tables_in_sql(sql, known) if sql else [])
@@ -1903,9 +2068,10 @@ def link_import(*, question: str, dimension: str = "", sql: str = "",
         "linked_at": datetime.now().isoformat(timespec="seconds"),
         "origin": "human_import",
     }
-    # --- 归属到学科（人填的容器）---
-    # 实体有两个来源：出题器显式传的 subject={"team": "NRG"}，和这次真实
-    # 跑过的 SQL 里的字面量。两个合并再去登记册里找学科。
+    # --- Attach to a subject (the container a human filled in) ---
+    # Entities have two sources: the subject={"team": "NRG"} the question generator passes
+    # explicitly, and the literals in the SQL that genuinely ran this time. The two are merged and
+    # then looked up in the registry.
     ents = {str(k).lower(): str(v) for k, v in (subject or {}).items()
             if k and v}
     try:
@@ -1917,13 +2083,14 @@ def link_import(*, question: str, dimension: str = "", sql: str = "",
     rec["entities"] = ents
     if not rec["covered"]:
         rec["adopted"] = False
-        rec["reason"] = ("工具集覆盖不到：这次取数读的表 "
-                         f"{sorted(set(tbls)) or '（没解析出表）'} "
-                         "既不在任何 insight 覆盖范围里、也不全在图内 "
-                         "→ 不收录，也不建节点")
-        # ⚠️ 归属必须**在确认收录之后**再写。覆盖不到的题不落盘，若这里先
-        # attach，`subjects.json` 就会留下一条没有对应记录的幽灵条目，
-        # 之后重建图谱永远认不回来（实测踩过）。
+        rec["reason"] = ("tool set does not cover it: the tables this retrieval read "
+                         f"{sorted(set(tbls)) or '(no tables parsed)'} "
+                         "are neither within any insight's coverage nor entirely inside the graph "
+                         "→ not included, and no node created")
+        # ⚠️ Attachment must happen **only after** inclusion is confirmed. A question that is not
+        # covered is not persisted, so attaching here first would leave a ghost entry in
+        # `subjects.json` with no matching record, which could never be recognised again after a
+        # graph rebuild (hit in measurement).
         rec["subject_ids"] = []
         return rec
     rec["subject_ids"] = _attach_entry(rec)
@@ -1938,50 +2105,59 @@ def link_import(*, question: str, dimension: str = "", sql: str = "",
     except Exception:
         pass
 
-    # 光落盘不够：**当前这张图里也必须立刻有这些边**。出题器读的是
-    # `KnowledgeGraph.load()` 出来的对象，不是 json 文件。指纹没变 → 下次
-    # load 不重建 → 补丁留得住；指纹一变，build() 里的
-    # `_merge_imported_links` 会从 json 重新并边，不会丢。
+    # Persisting is not enough: **these edges must also exist in the current graph right away**. The
+    # question generator reads the object returned by `KnowledgeGraph.load()`, not the JSON file.
+    # Fingerprint unchanged → the next load does not rebuild → the patch survives; if the
+    # fingerprint changes, `_merge_imported_links` inside build() re-merges the edges from the JSON,
+    # so nothing is lost.
     try:
         g = KnowledgeGraph.load()
         n = _merge_imported_links(g)
         g.save()
         rec["edges_added"] = n
     except Exception:
-        pass                                                 # 打补丁失败不影响落盘
+        pass                                                 # a failed patch does not affect persistence
     rec["adopted"] = True
     return rec
 
 
 def _merge_imported_links(g: KnowledgeGraph) -> int:
-    """build 时把人导入落的**边**并回图 —— 不建一个节点。
+    """Merge the **edges** left by human imports back into the graph at build time — creating not a
+    single node.
 
-    为什么要持久化而不是只在导入时改一次图：图谱是 `build()` 的产物，
-    指纹一变（加了新题、VLML 文档变了）就整体重建，直接在图对象上打的
-    补丁会被冲掉。落盘成 `imported_links.json`，与
-    `question_gen.generated_tasks.json` 是同一种持久化思路。
+    Why persist rather than patching the graph once at import time: the graph is a product of
+    `build()`, and the moment the fingerprint changes (a new question added, VLML's doc changed) it
+    is rebuilt wholesale, wiping any patch applied to the graph object. Persisting as
+    `imported_links.json` is the same persistence idea as
+    `question_gen.generated_tasks.json`.
     """
     added = 0
     for rec in load_imported_links():
-        # --- 归属到学科：每次合并都重算 ---
-        # 人后来填了一个学科（或换了数据源、同步了新的可填值），**旧条目要
-        # 自动挂上去** —— 这才是"学科是容器"而不是"枚举"的意义所在。
-        # 与覆盖同理：判据的输入都在记录里，重算是免费的。
-        # 同样放在覆盖判定**之后**：覆盖不到的条目根本不落盘，先 attach 只会
-        # 留下没有对应记录的幽灵条目（实测踩过，见 link_import 里的注释）。
-        # **覆盖要在合并时重算，不能信落盘时的旧结论**。实测：图谱重建前
-        # 服务器上 insight 层是空的，一条人导入被判成 table 级；重建后
-        # insight 补齐了，可那条记录还写着 table 级 —— 边就永远停在低置信上。
-        # 判据的输入（真实 SQL / 工具 / 表）都存在记录里，重算是免费的。
+        # --- Attachment to a subject: recomputed on every merge ---
+        # When a human later fills in a subject (or swaps the data source, or syncs new fillable
+        # values), **old entries should attach automatically** — that is what "subject is a
+        # container" rather than an enum means.
+        # Same as with coverage: every input to the criterion lives in the record, so recomputing
+        # is free.
+        # Placed after the coverage decision for the same reason: entries that are not covered never
+        # get persisted, so attaching first would only leave ghost entries with no matching record
+        # (hit in measurement; see the comment in link_import).
+        # **Coverage must be recomputed at merge time; the old conclusion from persist time cannot
+        # be trusted.** Measured: before the graph was rebuilt the insight layer on the server was
+        # empty and a human import was judged at table level; after the rebuild the insights were
+        # complete, yet the record still said table level — so the edges stayed stuck at low
+        # confidence. Every input to the criterion (real SQL / tool / table) is in the record, so
+        # recomputing is free.
         tbls0 = [str(t) for t in (rec.get("tables") or [])]
         cov = coverage_of(tables=tbls0, tool=str(rec.get("tool") or ""), g=g)
         if not cov["covered"]:
-            continue                     # 覆盖不到的不进图（伴学：映射不上不硬造）
+            continue                     # not covered does not enter the graph (as the companion
+                                         # does: when mapping fails it forces nothing)
         rec["subject_ids"] = _attach_entry(rec)
         dim = str(rec.get("dimension") or "").strip()
         q = str(rec.get("question") or "")[:40]
-        tag = f"人导入「{q}」"
-        dim_tag = f"（维度 {dim}）" if dim else ""
+        tag = f"human import \"{q}\""
+        dim_tag = f" (dimension {dim})" if dim else ""
         ins = [f"insight:{i}" for i in (cov.get("insights") or [])
                if f"insight:{i}" in g.nodes]
         tbls = [f"table:{t}" for t in (cov.get("tables") or [])
@@ -1990,124 +2166,143 @@ def _merge_imported_links(g: KnowledgeGraph) -> int:
         tool_id = f"tool:{tool}" if tool else ""
         tset = set(tbls)
 
-        # 1) application：这个洞察在这张表上被实际应用过一次
-        #    （伴学 `application` 的焦点在 from 端 —— from 是洞察，没反）
+        # 1) application: this insight has actually been applied once on this table
+        #    (as in the companion's `application`, the focus is on the from end — from is the
+        #    insight, so no flip is needed)
         for i in ins:
             node = g.nodes.get(i)
             itset = {f"table:{t}" for t in ((node.detail or {}).get("tables") or [])}
             for t in sorted(itset & tset):
                 g.add_edge(Edge(src=i, dst=t, relation=APPLICATION,
                                 origin="observed",
-                                reason=f"{tag} 实测：这个洞察在该表上被用到{dim_tag}",
+                                reason=f"{tag} measured: this insight was used on that table"
+                                       f"{dim_tag}",
                                 confidence=0.9))
-            # 2) composes：这个工具这次确实用了这个洞察（补声明里没写的）
+            # 2) composes: this tool really used this insight this time (backfilling what the
+            #    declarations left out)
             if tool_id:
                 g.add_edge(Edge(src=tool_id, dst=i, relation=COMPOSES,
                                 origin="observed",
-                                reason=f"{tag} 实测：{tool} 这次用了这个洞察",
+                                reason=f"{tag} measured: {tool} used this insight this time",
                                 confidence=0.9))
 
-        # 3) co_occurs（对称）：同一道题要求这两个洞察一起用 —— 伴学语义
-        #    「同题共现」，MVE 原来只用在维度上，这里同构地用到洞察层
+        # 3) co_occurs (symmetric): one question requires these two insights together — the
+        #    companion's semantics of "co-occurring in the same question". MVE originally used it
+        #    only on dimensions; here it is applied isomorphically at the insight layer.
         for a in range(len(ins)):
             for b in range(a + 1, len(ins)):
                 g.add_edge(Edge(src=ins[a], dst=ins[b], relation=CO_OCCURS,
                                 origin="observed",
-                                reason=f"{tag} 实测：这两个洞察一起被用到",
+                                reason=f"{tag} measured: these two insights were used together",
                                 confidence=0.9))
 
-        # 4) 退化情形：没有 insight 覆盖（多为 query_sql 直查）→ 按表级收录
+        # 4) Degenerate case: no insight covers it (mostly a direct query_sql lookup) → include at
+        #    table level
         if not ins and tool_id:
             for t in sorted(tset):
                 g.add_edge(Edge(src=tool_id, dst=t, relation=APPLICATION,
                                 origin="observed",
-                                reason=(f"{tag} 实测：{tool} 直查该表"
-                                        "（无 insight 覆盖，按表级收录）" + dim_tag),
+                                reason=(f"{tag} measured: {tool} queried this table directly "
+                                        "(no insight covers it, included at table level)"
+                                        + dim_tag),
                                 confidence=0.8))
         added += 1
     return added
 
 
-# v1 的名字，留着做兼容壳：任何还在调 `adopt_dimension` 的地方自动走新逻辑
-# （建边，不建节点）。参数沿用 v1 的命名，行为以 `link_import` 为准。
+# v1's name, kept as a compatibility shim: anywhere still calling `adopt_dimension` automatically
+# goes through the new logic (creating edges, no nodes). The parameters keep v1's naming; the
+# behaviour is defined by `link_import`.
 def adopt_dimension(*, dimension: str = "", sql: str = "", tool: str = "",
                     question: str = "", subject: dict[str, Any] | None = None,
                     value: Any = None, **_: Any) -> dict[str, Any]:
-    """**已废弃**：v1 的「建维度节点」。现在一律走 `link_import` 建边。"""
+    """**Deprecated**: v1's "create a dimension node". Everything now goes through `link_import`,
+    which creates edges."""
     if not str(dimension or "").strip():
         return {}
     return link_import(question=question, dimension=dimension, sql=sql,
                        tool=tool, subject=subject, value=value)
 
 
-_GRAIN_ZH = {"round": "回合", "game": "图", "series": "series", "player": "选手",
-             "team": "队伍", "map": "地图", "date": "日", "tournament": "赛事",
-             "entity_type": "实体类型", "entity": "实体", "factor": "因子"}
+_GRAIN_LABEL = {"round": "round", "game": "map", "series": "series", "player": "player",
+                "team": "team", "map": "map", "date": "day", "tournament": "tournament",
+                "entity_type": "entity type", "entity": "entity", "factor": "factor"}
 
 
 def _zh_grain(doc: str) -> str:
-    """把建模文档写的粒度（`(round_id, team_name)`）翻成中文行粒度。
+    """Translate the grain written in the modelling doc (`(round_id, team_name)`) into a readable
+    row grain.
 
-    `_grain_of_table()` 只认 `agg_{主体}_{粒度}_stats` 这种命名，
-    7 张派生表名字不合约定就一律退化成"聚合表"三个字 —— 而
-    agg_first_blood_stats 恰恰是**一回合一行**，说成"聚合表"，模型就会
-    再 JOIN 一次 rounds，行数翻倍。文档里有精确粒度，用它。
+    `_grain_of_table()` only recognises the naming `agg_{subject}_{grain}_stats`, so the 7 derived
+    tables whose names do not follow the convention all degrade to the words "aggregate table" —
+    and agg_first_blood_stats is precisely **one row per round**; described as an "aggregate table"
+    the model JOINs rounds once more and the row count doubles. The doc holds the precise grain, so
+    use it.
     """
     toks = re.findall(r"[a-z_][a-z_0-9]*", (doc or "").lower())
     if not toks:
         return "", 0
     keys = [t[:-3] if t.endswith("_id") else
             (t[:-5] if t.endswith("_name") else t) for t in toks]
-    # "One row per round" 这类英文散文不是键列表 —— 认不全就别硬翻，
-    # 否则会翻出「每（one × row × per × 回合）一行」这种鬼话（实测）。
-    if any(k not in _GRAIN_ZH for k in keys):
+    # English prose like "One row per round" is not a key list — if it cannot all be recognised, do
+    # not force a translation, otherwise it produces monstrosities like "one (one × row × per ×
+    # round) row" (measured).
+    if any(k not in _GRAIN_LABEL for k in keys):
         return "", 0
-    zh = [_GRAIN_ZH[k] for k in keys]
-    return (f"每{zh[0]}一行" if len(zh) == 1
-            else "每（" + " × ".join(zh) + "）一行"), len(zh)
+    zh = [_GRAIN_LABEL[k] for k in keys]
+    return (f"one row per {zh[0]}" if len(zh) == 1
+            else "one row per (" + " × ".join(zh) + ")"), len(zh)
 
 
 def _add_model_declarations(g: KnowledgeGraph, specs: dict[str, Any]) -> None:
-    """把 VLML 的**建模声明**写进表节点 —— 伴学 knowledge_seeds 的同构物。
+    """Write VLML's **modelling declarations** into the table nodes — isomorphic to the companion's
+    knowledge_seeds.
 
-    伴学的 457 个知识点节点自带 19 个字段（difficulty / question_types /
-    typical_misconceptions / prerequisites / unit / depth / …），出题器读节点
-    声明来定题型与口径，模型只写题面。VLML 里同层的"作者声明"就是
-    `database/` 下四份建模文档：
+    The companion's 457 knowledge point nodes carry 19 fields (difficulty / question_types /
+    typical_misconceptions / prerequisites / unit / depth / …); the question generator reads the
+    node declarations to decide question type and metric definitions, and the model only writes the
+    question text. The "author declarations" at the same layer in VLML are the four modelling docs
+    under `database/`:
 
-        DATA_MODEL.md          粒度 Grain + 用途 Use cases + 主干血缘
-        DERIVED_TABLES.md      7 张派生表的粒度/上游/关键列/示例查询
-        column_definitions.yaml 列级口径
-        DATA_DICTIONARY.json   主键 / 列类型 / **指标公式**（sum/denom）
+        DATA_MODEL.md          grain + use cases + core lineage
+        DERIVED_TABLES.md      grain/upstream/key columns/example queries of the 7 derived tables
+        column_definitions.yaml column-level metric definitions
+        DATA_DICTIONARY.json   primary keys / column types / **metric formulas** (sum/denom)
 
-    之前这些一概没进图：表节点只有"列名 + 行数 + 中文粒度"，`pk` 全是空
-    数组（实测 `table:rounds` 的 pk=[] ，而文档白纸黑字写着 round_id），
-    派生表连粒度都只写"聚合表"三个字。出题时模型只能猜列的含义 ——
-    这正是它把 `fb_player` 写成 `player_name` 的根源。
+    Previously none of that entered the graph: table nodes only had "column names + row count + a
+    coarse grain", `pk` was an empty array everywhere (measured: `table:rounds` had pk=[] while the
+    doc plainly says round_id), and derived tables carried no more than the words "aggregate table".
+    While authoring questions the model could only guess what columns mean — which is precisely the
+    root of it writing `fb_player` as `player_name`.
     """
     tbl_specs = specs.get("tables") or {}
     if not tbl_specs:
         return
-    declared_by = ("VLML 建模文档：DATA_MODEL.md / DERIVED_TABLES.md / "
+    declared_by = ("VLML modelling docs: DATA_MODEL.md / DERIVED_TABLES.md / "
                    "metadata/column_definitions.yaml / DATA_DICTIONARY.json")
 
-    # 第一遍：先把节点建齐（上游表可能排在下游表后面，边要等两端都在）
+    # First pass: create all nodes first (an upstream table may be sorted after a downstream one,
+    # and edges need both ends present)
     for name, s in sorted(tbl_specs.items()):
         nid = f"table:{name}"
         if nid not in g.nodes:
             g.add_node(Node(id=nid, kind="table", label=name, detail={}))
         node = g.nodes[nid]
         grain_doc = s.get("grain") or ""
-        # 命名约定推不出来（"聚合表"/"参考/字典表"）就换成文档写的精确粒度；
-        # 文档粒度有三个以上键时（如 agg_team_map_stats 是 队伍×地图×赛事）
-        # 约定版也表达不了，同样以文档为准。
+        # When the naming convention cannot derive it ("aggregate table" / "reference or dictionary
+        # table"), swap in the precise grain the doc writes;
+        # when the doc's grain has three or more keys (e.g. agg_team_map_stats is team × map ×
+        # tournament) the convention version cannot express it either, so the doc wins again.
         zh_grain, n_keys = _zh_grain(grain_doc)
-        if zh_grain and (node.detail.get("grain") in ("", None, "聚合表", "参考/字典表")
+        # NOTE: the two literals below are the exact coarse-grain strings returned by
+        # vlml_schema._grain_of_table() (vlml_schema.py:126-127). They are compared
+        # against, so they must stay verbatim and in sync with vlml_schema.py.
+        if zh_grain and (node.detail.get("grain") in ("", None, "aggregate table", "reference/dictionary table")
                          or n_keys >= 3):
             node.detail["grain"] = zh_grain
         node.detail.update({
             "purpose": s.get("purpose") or node.detail.get("purpose") or "",
-            "grain_doc": grain_doc,             # 建模文档写的精确粒度
+            "grain_doc": grain_doc,             # the precise grain the modelling doc writes
             "pk": list(s.get("pk") or node.detail.get("pk") or []),
             "column_desc": dict(s.get("column_desc") or {}),
             "metrics": dict(s.get("metrics") or {}),
@@ -2118,31 +2313,36 @@ def _add_model_declarations(g: KnowledgeGraph, specs: dict[str, Any]) -> None:
             "declared_by": declared_by,
         })
 
-    # 第二遍：建模文档声明的上游（DERIVED_TABLES 的 Source + 主干父表）。
-    # 为什么要单独建一遍：`discover()` 的 lineage 来自实查 transformations，
-    # 断库就没了；这条来自文档，永远在。origin 标 "model" 以示区别。
+    # Second pass: the upstreams declared by the modelling docs (DERIVED_TABLES' Source + core
+    # parent tables).
+    # Why a separate pass: `discover()`'s lineage comes from querying transformations live, so it
+    # vanishes when the database is down; this one comes from the doc and is always there. origin
+    # is marked "model" to show the difference.
     for name, s in sorted(tbl_specs.items()):
         for up in s.get("upstream") or []:
             if f"table:{up}" not in g.nodes:
                 continue
             g.add_edge(Edge(src=f"table:{up}", dst=f"table:{name}",
                             relation=DERIVED_FROM, origin="model",
-                            reason=f"建模文档声明：{name} 由 {up} 算出",
+                            reason=f"declared by the modelling doc: {name} is computed from {up}",
                             confidence=1.0))
 
 
 # --------------------------------------------------------------------------
-# 维度节点的伴学式声明
+# Companion-style declarations on dimension nodes
 # --------------------------------------------------------------------------
-# 伴学节点 19 个字段里，能在这里**真填**的 12 个；剩下 7 个（aliases /
-# curriculum_tags / curriculum_version / exam_region / exam_type 等）在
-# MVE 里没有同构物 —— 不编、不填。填了假声明比不填更危险。
+# Of the companion node's 19 fields, 12 can be genuinely filled here; the other 7 (aliases /
+# curriculum_tags / curriculum_version / exam_region / exam_type etc.) have no isomorphic
+# counterpart in MVE — they are neither invented nor filled. A fabricated declaration is more
+# dangerous than no declaration.
 def _sql_difficulty(sql: str) -> int:
-    """这条 SQL 的难度档（1-4），判据可数，不靠模型自评。
+    """The difficulty tier (1-4) of this SQL. The criterion is countable, not the model's
+    self-assessment.
 
-    与 `question_gen.DIFFICULTY_RUBRIC` 同一套分档（1 单表聚合 / 2 分组 /
-    3 JOIN 或条件分支 / 4 窗口函数或嵌套子查询）。图谱自带难度，出题器
-    就不用各处重新数一遍关键字了 —— 伴学的 difficulty 也是长在节点上的。
+    Same tier scheme as `question_gen.DIFFICULTY_RUBRIC` (1 single-table aggregation / 2 grouping /
+    3 JOIN or conditional branch / 4 window function or nested subquery). With difficulty carried by
+    the graph, the question generator no longer has to count keywords in each place — the
+    companion's difficulty also grows on the node.
     """
     low = (sql or "").lower()
     if "over (" in low or "over(" in low or "from (select" in low:
@@ -2155,117 +2355,135 @@ def _sql_difficulty(sql: str) -> int:
 
 
 def _unit_of(dim: str, d: dict[str, Any]) -> str:
-    """这个指标的单位（伴学 `unit` 的同构物）。按命名与口径文本推，可查。
+    """The unit of this metric (isomorphic to the companion's `unit`). Derived from the naming and
+    the metric definition text, and traceable.
 
-    判据顺序有讲究：`max_losing_streak` 里的 "losing_**s**treak" 含 `_s`，
-    先判时间就会把它错标成"秒"（实测就是这么错的）。先判连败/回合。
+    The order of the criteria matters: the "losing_**s**treak" inside `max_losing_streak` contains
+    `_s`, so checking time first would wrongly label it "seconds" (measured, that is exactly how it
+    went wrong). Check losing streak / rounds first.
     """
     text = " ".join(str(d.get(k) or "") for k in ("point", "semantics")).lower()
+    # NOTE: the English literals below ("rate" / "ratio" / "round" / "second") are matched against the
+    # rubric point text in tasks.py (e.g. "Overall first-blood conversion rate",
+    # "Longest losing-streak round count", "Total rounds across the match") and the metric semantics
+    # built from those rubric points. They were translated from the Chinese forms 率 / 比值 / 回合 / 秒
+    # and must stay aligned with the wording used in tasks.py.
     if ("pct" in dim or "rate" in dim or "conv" in dim or "kast" in dim
-            or "adr" in dim or "%" in text or "率" in text):
+            or "adr" in dim or "%" in text or "rate" in text):
         return "%"
-    if "ratio" in dim or "share" in dim or "比值" in text:
-        return "比值"
-    if "streak" in dim or "rounds" in dim or "回合" in text:
-        return "回合"
-    if dim.endswith("_s") or "time" in dim or "delay" in dim or "秒" in text:
-        return "秒"
-    return "计数"
+    if "ratio" in dim or "share" in dim or "ratio" in text:
+        return "ratio"
+    if "streak" in dim or "rounds" in dim or "round" in text:
+        return "rounds"
+    if dim.endswith("_s") or "time" in dim or "delay" in dim or "second" in text:
+        return "seconds"
+    return "count"
 
 
 def _skills_of(sql: str) -> list[str]:
     low = (sql or "").lower()
     out = []
     if "over (" in low or "over(" in low or "row_number" in low:
-        out.append("窗口函数")
+        out.append("window function")
     if "from (select" in low or "from(select" in low:
-        out.append("嵌套子查询")
+        out.append("nested subquery")
     if " join " in low:
-        out.append("多表 JOIN")
+        out.append("multi-table JOIN")
     if "case when" in low or "coalesce(" in low:
-        out.append("条件分支")
+        out.append("conditional branch")
     if "group by" in low:
-        out.append("分组聚合")
+        out.append("grouped aggregation")
     if any(k in low for k in ("count(", "avg(", "sum(", "max(", "min(")):
-        out.append("聚合函数")
+        out.append("aggregate function")
     return out
 
 
-LAYER_LABEL = {"core": "主干表", "derived": "派生表", "agg": "聚合表",
-               "ref": "参考/字典表"}
+LAYER_LABEL = {"core": "core table", "derived": "derived table", "agg": "aggregate table",
+               "ref": "reference / dictionary table"}
 
 # --------------------------------------------------------------------------
-# 伴学的四层组织：**阶段（stage）→ 学科（subject）→ 章节（chapter）→ 知识点**
+# The companion's four-layer organisation: **stage → subject → chapter → knowledge point**
 # --------------------------------------------------------------------------
-# 伴学 `static/knowledge_seeds/math.json` 实测的层级：
-#   stage   = 学段 primary/junior_high/senior_high/college  ← **梯度**
-#   subject = 学科 math/physics/…（11 个，各一个 seed 文件）
-#   chapter = 学科内章节（math 一个学科就有 37 个：一次函数、三角函数…）
-#   topic   = 知识点，带 depth / difficulty / prerequisites / skills / …
+# The hierarchy measured in the companion's `static/knowledge_seeds/math.json`:
+#   stage   = school stage primary/junior_high/senior_high/college  ← **the gradient**
+#   subject = subject math/physics/… (11 of them, one seed file each)
+#   chapter = a chapter within a subject (math alone has 37: linear functions, trigonometry…)
+#   topic   = knowledge point, carrying depth / difficulty / prerequisites / skills / …
 #
-# MVE 的同构映射（用户指定的语义）：
-#   stage   → **梯度的工具集**：要拿下这个知识点，最低得动用哪一级手段
-#             raw(原始事件表) → agg(派生聚合) → insight(洞察 SQL) → tool(报告工具)
-#             同构点：都是**进阶梯度**，不是节点种类。
-#   subject → **赛事 / 团队 / 选手**：实体域，从取数用的列自动派生
-#   chapter → **实体域下的主题域**：首血 / 经济 / 手枪局 / 连败 / 爆弹 …
-#   topic   → 维度节点（VLML 对数据的建模），脚手架此前已照搬过
+# The isomorphic mapping in MVE (semantics specified by the user):
+#   stage   → **the tool set of the gradient**: to master this knowledge point, what is the lowest
+#             level of means required
+#             raw (raw event tables) → agg (derived aggregates) → insight (insight SQL) → tool
+#             (report tools)
+#             Isomorphic point: both are **entering a gradient**, not a kind of node.
+#   subject → **tournament / team / player**: the entity domain, auto-derived from the columns used
+#             for retrieval
+#   chapter → **the topic domain under the entity domain**: first blood / economy / pistol round /
+#             losing streak / plant …
+#   topic   → dimension nodes (VLML's modelling of the data); the scaffold was ported earlier
 #
-# ⚠️ 一个语义错位必须点明：此前 `chapter` 存的是 LAYER_LABEL（主干表/派生表/
-# 聚合表）—— 那其实是**梯度**，占的是伴学 `stage` 的位。所以这次是把它归位：
-# stage 接手梯度，chapter 回到"主题域"。
+# ⚠️ A semantic misalignment must be called out: previously `chapter` held LAYER_LABEL values
+# (core table / derived table / aggregate table) — which is really the **gradient**, occupying the
+# companion's `stage` slot. So this round puts it back in place:
+# stage takes over the gradient, chapter returns to being the "topic domain".
 TOOLSET_STAGE_LABEL = {
-    "raw": "原始事件表", "agg": "派生聚合表", "insight": "洞察 SQL",
-    "tool": "报告工具（工具内聚合）",
+    "raw": "raw event table", "agg": "derived aggregate table", "insight": "insight SQL",
+    "tool": "report tool (aggregation inside the tool)",
 }
 SUBJECT_LABEL = {
-    "player": "选手", "team": "团队", "map": "地图", "series": "赛事",
-    "round": "回合", "game": "对局", "tournament": "赛事总览",
+    "player": "Player", "team": "Team", "map": "Map", "series": "Series",
+    "round": "Round", "game": "Game", "tournament": "Tournament",
 }
-# 主题域：先具体后泛 —— 顺序一旦反了，"回合"会把"首血"全吃掉。
+# Topic domain: specific before general — reverse the order and "round" swallows all of "first
+# blood".
 DOMAIN_HINTS: list[tuple[str, tuple[str, ...]]] = [
-    ("首血对枪", ("first_blood", "fb_", "opening_duel")),
-    ("下包/爆弹", ("plant", "defuse")),
-    ("手枪局", ("pistol",)),          # 要在"经济局"之前：更具体
-    ("经济局", ("eco", "economy")),
-    ("模式识别", ("pattern",)),
-    ("连胜连败", ("streak",)),
-    ("选手表现", ("kast", "kd_ratio", "adr", "impact", "player")),
-    ("胜负与比分", ("win", "won", "score")),
-    ("地图", ("map",)),
-    ("技能/道具", ("ability",)),
-    ("回合", ("round",)),
-    ("赛事/系列赛", ("series", "tournament")),
+    ("first blood duels", ("first_blood", "fb_", "opening_duel")),
+    ("plant / defuse", ("plant", "defuse")),
+    ("pistol rounds", ("pistol",)),          # must come before "eco rounds": more specific
+    ("eco rounds", ("eco", "economy")),
+    ("pattern detection", ("pattern",)),
+    ("win / losing streaks", ("streak",)),
+    ("player performance", ("kast", "kd_ratio", "adr", "impact", "player")),
+    ("results and score", ("win", "won", "score")),
+    ("maps", ("map",)),
+    ("abilities / items", ("ability",)),
+    ("rounds", ("round",)),
+    ("series / tournaments", ("series", "tournament")),
 ]
-# 章节 → 学科的兜底：工具内聚合的维度没有列可认（pistol_win_rate /
-# eco_win_rate），但伴学每个知识点都有 subject，不能留空。
+# Chapter → subject fallback: dimensions aggregated inside a tool have no recognisable column
+# (pistol_win_rate / eco_win_rate), but every knowledge point in the companion has a subject, so it
+# must not be left empty.
 CHAPTER_SUBJECT = {
-    "选手表现": "player", "地图": "map", "首血对枪": "team",
-    "经济局": "team", "手枪局": "team", "连胜连败": "team",
-    "胜负与比分": "team", "下包/爆弹": "team", "模式识别": "round",
-    "回合": "round", "赛事/系列赛": "series", "技能/道具": "player",
+    "player performance": "player", "maps": "map", "first blood duels": "team",
+    "eco rounds": "team", "pistol rounds": "team", "win / losing streaks": "team",
+    "results and score": "team", "plant / defuse": "team", "pattern detection": "round",
+    "rounds": "round", "series / tournaments": "series", "abilities / items": "player",
 }
 
 
 def _data_source() -> str:
-    """当前接的是哪个**库**（vlml0 / vlml_vlr / 将来别的源）。
+    """Which **database** is currently connected (vlml0 / vlml_vlr / some future source).
 
-    ⚠️ 2026-10-08 改过一次映射：原先把它当作伴学的 `course_family`（课程族），
-    那是**错的**。看伴学 `entry_tutor_question_entries.py:1043-1051`：
+    ⚠️ The mapping was changed once on 2026-10-08: it used to be treated as the companion's
+    `course_family` (course family), which was **wrong**. See the companion's
+    `entry_tutor_question_entries.py:1043-1051`:
 
         store.list_topics(5000, scope.subject, scope.stage,
                           chapter=scope.chapter, unit=scope.unit,
                           course_family=scope.course_family)
 
-    —— subject / stage / chapter / unit / course_family **全是 `list_topics`
-    的筛选参数**，不是知识点身上的层级归属。知识点库是**共享的一份**，
-    换课程族只是"筛哪些来练"，知识点本身不重建。
+    —— subject / stage / chapter / unit / course_family are **all `list_topics` filter
+    parameters**, not hierarchical ownership on the knowledge points. The knowledge point store is
+    **one shared copy**; switching course family only decides "which ones get practised", and the
+    knowledge points themselves are never rebuilt.
 
-    所以：
-      * 赛事号（系列赛）= 伴学 `course_family`（来源/版本，知识点照旧共享）
-      * 团队 / 选手 / 地图的具体值 = 伴学 `_semantic_routing.py:149` 的
-        `entity`（运行期字段，**不在 topics 表里**，不进知识结构）
-      * 接的是哪个库 = **MVE 自己的 `data_source`**，伴学没有对应物
+    So:
+      * series id = the companion's `course_family` (source/version, knowledge points still shared)
+      * concrete team / player / map values = the companion's `entity`
+        (`_semantic_routing.py:149`) — a runtime field, **not in the topics table**, so it does not
+        enter the knowledge structure
+      * which database is connected = **MVE's own `data_source`**, with no counterpart in the
+        companion
     """
     try:
         import subjects
@@ -2275,15 +2493,19 @@ def _data_source() -> str:
 
 
 def _entity_values(kind: str) -> list[str]:
-    """这个学科下**可填入的具体值**（赛事号 / 团队名 / 地图名 / 选手名）。
+    """The **fillable concrete values** under this subject (series id / team name / map name /
+    player name).
 
-    只读两份**落盘缓存**，不在这里连库 ——
-    图谱必须保持"不连库、面板秒开"。缓存由 `entity_catalog.py` 刷新。
+    Reads only two **persisted caches**, it does not connect to the database here —
+    the graph must stay "no database connection, dashboard opens instantly". The caches are
+    refreshed by `entity_catalog.py`.
 
-    学科是**人可填写的归属容器**（`subjects.py`），不是从库里枚举出来的：
-    接入新数据源（换一个公开源）后，人先填一个学科（比如某赛事 / 某战队域），
-    之后 VLML / Voyager 跑出来的条目就挂到它下面。所以这里是
-    「实查到的」+「人登记的」两份合并 —— 只取前者，换库就空、没接库就没得选。
+    A subject is a **human-fillable ownership container** (`subjects.py`), not something enumerated
+    from the database: after connecting a new data source (swapping to another public source), a
+    human first fills in a subject (say a given tournament / team domain), and the entries VLML /
+    Voyager produce afterwards hang beneath it. So this is the merge of "actually queried" and
+    "registered by a human" — taking only the former leaves it empty when the database is swapped,
+    and with no database connected there is nothing to choose from.
     """
     if not kind:
         return []
@@ -2308,10 +2530,10 @@ def _entity_values(kind: str) -> list[str]:
 
 
 def _subject_key_of(col: str) -> str:
-    """列名 → 实体域（赛事/团队/选手/…）。照 `question_gen._subject_key_of`。
+    """Column name → subject (series/team/player/…). Mirrors `question_gen._subject_key_of`.
 
-    这里复制一份而不是 import：question_gen 会拉起 vlml_env（连库），
-    knowledge_graph 必须保持"只 import 标准库"的轻量性质。
+    Copied here rather than imported: question_gen pulls in vlml_env (connects to the database),
+    while knowledge_graph must stay lightweight — "standard library imports only".
     """
     c = str(col or "").lower()
     if "player" in c:
@@ -2332,13 +2554,15 @@ def _subject_key_of(col: str) -> str:
 
 
 def _subjects_of(d: dict[str, Any]) -> list[str]:
-    """这个知识点属于哪些**学科**（实体域）—— 全部从真实列派生，不手写。"""
+    """Which **subjects** (entity domains) this knowledge point belongs to — all derived from real
+    columns, nothing hand-written."""
     keys: list[str] = []
     for c in list(d.get("columns") or []):
         k = _subject_key_of(c)
         if k and k not in keys:
             keys.append(k)
-    # 工具路径没有列：从 value_path 里认（key_metrics.economy.pistol → 无实体域）
+    # The tool path has no columns: recognise them from value_path instead
+    # (key_metrics.economy.pistol → no entity domain)
     for c in str(d.get("value_path") or "").split("."):
         k = _subject_key_of(c)
         if k and k not in keys:
@@ -2347,16 +2571,17 @@ def _subjects_of(d: dict[str, Any]) -> list[str]:
 
 
 def _stage_of(d: dict[str, Any]) -> str:
-    """要拿下这个知识点，最低得动用哪一级**工具集**（梯度）。
+    """The lowest level of **tool set** needed to master this knowledge point (the gradient).
 
-    tool（只能靠报告工具内聚合）> insight（要套洞察 SQL／多表 JOIN／窗口）
-    > agg（查派生聚合表）> raw（直接查原始事件表）。
+    tool (only reachable via aggregation inside a report tool) > insight (needs insight SQL /
+    multi-table JOIN / window functions) > agg (query a derived aggregate table) > raw (query the
+    raw event table directly).
     """
     if d.get("tool") and not d.get("tables"):
         return "tool"
     tables = [str(t) for t in (d.get("tables") or [])]
     recipe = str(d.get("recipe") or "")
-    # 洞察级：多表 JOIN + 窗口函数/子查询 —— 这正是洞察 SQL 的形态
+    # Insight level: multi-table JOIN + window function/subquery — precisely the shape of insight SQL
     if len(tables) >= 3 or _sql_difficulty(recipe) >= 4:
         return "insight"
     if any(t.startswith("agg_") for t in tables):
@@ -2365,9 +2590,10 @@ def _stage_of(d: dict[str, Any]) -> str:
 
 
 def _chapter_of(dim: str, d: dict[str, Any]) -> str:
-    """实体域下的**主题域**（伴学 chapter 的同构物）。
+    """The **topic domain** under the subject (isomorphic to the companion's chapter).
 
-    从维度名 + 表名 + 口径里认，认不出就退回数据层名 —— 宁可粗，不编。
+    Recognised from the dimension name + table names + metric definition; when unrecognised it
+    falls back to the data layer name — better coarse than invented.
     """
     hay = " ".join([str(dim or "").lower(),
                     " ".join(str(t) for t in (d.get("tables") or [])),
@@ -2378,11 +2604,12 @@ def _chapter_of(dim: str, d: dict[str, Any]) -> str:
             return label
     primary = (d.get("tables") or [""])[0]
     return (LAYER_LABEL.get(str((d.get("layer") or "")), "")
-            or (f"表 {primary}" if primary else "工具内聚合"))
+            or (f"table {primary}" if primary else "aggregation inside a tool"))
 
 
 def _table_depth(g: KnowledgeGraph, name: str, seen: set[str] | None = None) -> int:
-    """这张表在数据流里被推导了几层（伴学 `depth` 的同构物）。"""
+    """How many derivation layers deep this table sits in the data flow (isomorphic to the
+    companion's `depth`)."""
     seen = seen or set()
     nid = f"table:{name}"
     if nid in seen:
@@ -2397,18 +2624,19 @@ def _table_depth(g: KnowledgeGraph, name: str, seen: set[str] | None = None) -> 
 
 
 def _add_dimension_declarations(g: KnowledgeGraph, specs: dict[str, Any]) -> None:
-    """给 15 个维度节点补上伴学式的声明字段。
+    """Fill in companion-style declaration fields on the 15 dimension nodes.
 
-    此前这些字段**只存在于 detail 里由 tasks.py 临时派生的那几项**
-    （tables / columns / semantics），而且没有任何一项是"教学声明"——
-    没有难度、没有单位、没有先修、没有知识点级的典型错法。出题器要挑
-    "上一档更难的点"时无从下手，只能自己数 SQL 关键字（还数错了）。
+    Previously these fields **existed only as the handful that tasks.py derives on the fly** inside
+    detail (tables / columns / semantics), and not one of them was a "teaching declaration" —
+    no difficulty, no unit, no prerequisites, no knowledge-point-level typical mistakes. When the
+    question generator wanted to pick "a point one tier harder" it had nowhere to start, so it
+    counted SQL keywords itself (and miscounted).
     """
     tbl_specs = specs.get("tables") or {}
-    # 难度要从**完整 SQL** 数，不能从 detail 里的 `semantics` 数 ——
-    # semantics 只是 SELECT 投影（"ROUND(AVG(fb_team_won)*100,1) AS conv"），
-    # 里面没有 GROUP BY / JOIN，于是明明要分组的题被判成 1 档（实测
-    # map_fb_conv 就是这样，出题器按"最简单"把它排在了最后）。
+    # Difficulty must be counted from the **full SQL**, not from detail's `semantics` —
+    # semantics is only the SELECT projection ("ROUND(AVG(fb_team_won)*100,1) AS conv"), with no
+    # GROUP BY / JOIN inside, so a question that clearly needs grouping was judged tier 1
+    # (measured with map_fb_conv: the question generator ranked it last as "the easiest").
     sql_by_dim: dict[str, list[str]] = {}
     try:
         from tasks import TASKS
@@ -2428,12 +2656,14 @@ def _add_dimension_declarations(g: KnowledgeGraph, specs: dict[str, Any]) -> Non
         d = node.detail
         tables = list(d.get("tables") or [])
         recipe = str(d.get("recipe") or d.get("semantics") or "")
-        # 只认 `recipe`（真 SQL 骨架）。`semantics` 对工具路径来说是
-        # 一句中文说明，拿它数关键字会凭空得到 1 档 —— 工具维度应当是 0。
+        # Only `recipe` (a real SQL skeleton) counts. For the tool path `semantics` is
+        # a sentence of prose, so counting keywords in it yields tier 1 out of thin air — a tool
+        # dimension should be 0.
         sqls = sql_by_dim.get(dim) or ([d["recipe"]] if d.get("recipe") else [])
 
-        # --- difficulty：图谱自带，出题器不再各数各的 ---
-        # 工具路径没有 SQL 可数，标 0（不参与 1-4 分档），不假装是 1 档。
+        # --- difficulty: carried by the graph, so the question generator no longer counts separately ---
+        # The tool path has no SQL to count, so it is marked 0 (it does not take part in the 1-4
+        # tiers) rather than pretending to be tier 1.
         d["difficulty"] = (max((_sql_difficulty(s) for s in sqls), default=0)
                            if sqls else 0)
         # --- unit / skills / question_types ---
@@ -2444,56 +2674,65 @@ def _add_dimension_declarations(g: KnowledgeGraph, specs: dict[str, Any]) -> Non
         d["question_types"] = (["sql_recipe"] if d.get("tables")
                                else ["tool_recipe"])
 
-        # --- 伴学四层：阶段（工具集梯度）/ 学科（实体域）/ 章节（主题域）---
-        # 原来这里只有 chapter + depth，而 chapter 存的是数据层名（主干表/
-        # 派生表）—— 那是**梯度**，占的是伴学 stage 的位。现在归位。
+        # --- The companion's four layers: stage (tool-set gradient) / subject (entity domain) /
+        #     chapter (topic domain) ---
+        # Previously this only had chapter + depth, and chapter held the data layer name (core table
+        # / derived table) — which is the **gradient**, occupying the companion's stage slot. Now it
+        # is put back in place.
         d["stage"] = _stage_of(d)
         d["stage_label"] = TOOLSET_STAGE_LABEL.get(d["stage"], d["stage"])
         subs = _subjects_of(d)
         d["subjects"] = subs
-        # 伴学 `topic["subject"]` 是单值（一个知识点归一个学科）；MVE 的维度
-        # 常常跨实体（map_fb_conv 既是地图又是队伍），主学科取**最具体**的
-        # 那个：选手 > 地图 > 团队 > 赛事。
+        # The companion's `topic["subject"]` is single-valued (one knowledge point belongs to one
+        # subject); MVE's dimensions often span entities (map_fb_conv is both a map and a team), so
+        # the primary subject is taken as the **most specific** one:
+        # player > map > team > series.
         d["subject"] = (next((k for k in ("player", "map", "team", "series",
                                           "round", "game", "tournament")
                               if k in subs), (subs[0] if subs else "")))
         d["chapter"] = _chapter_of(dim, d)
         if not d["subject"]:
-            # 工具内聚合的维度没有列可认（pistol_win_rate / eco_win_rate），
-            # 从章节反推学科 —— 宁可粗，也不留空（伴学每个知识点都有 subject）。
+            # Dimensions aggregated inside a tool have no recognisable column
+            # (pistol_win_rate / eco_win_rate), so the subject is back-derived from the chapter —
+            # better coarse than left empty (every knowledge point in the companion has a subject).
             d["subject"] = CHAPTER_SUBJECT.get(d["chapter"], "")
         d["subject_label"] = SUBJECT_LABEL.get(d["subject"], d["subject"])
-        # 这一栏**可填什么值**（赛事号 / 团队名 / …）：人导入或出题时填它，
-        # 换一个值就是一道新题，也是一次迁移（同一知识点换个队伍算不算得出）。
-        # 实测：数据源只有 1 赛事 / 2 队伍 / 3 地图 / 10 选手，所以赛事这一栏
-        # 换不了值 —— 如实呈现，不假装有得选。
+        # Which **values** this column accepts (series id / team name / …): a human fills it in when
+        # importing or when generating a question, and swapping the value yields a new question and
+        # also a transfer (can the same knowledge point be computed for a different team?).
+        # Measured: the data source has only 1 tournament / 2 teams / 3 maps / 10 players, so the
+        # tournament column cannot have its value swapped — present it honestly rather than
+        # pretending there is a choice.
         d["subject_values"] = _entity_values(d["subject"])
         primary = tables[0] if tables else ""
         d["depth"] = (1 + max((_table_depth(g, t) for t in tables), default=0)
                       if tables else 0)
 
-        # --- prerequisites：先修 = 上游表（伴学 prerequisites 的同构物）---
+        # --- prerequisites: prerequisite = an upstream table (isomorphic to the companion's
+        #     prerequisites) ---
         ups: list[str] = []
         for t in tables:
-            # `upstream_tables` 返回的是**节点 id**，不是表名 —— 忘了剥前缀
-            # 就会写出 "table:table:base_events"（实测就是这样）。
+            # `upstream_tables` returns **node ids**, not table names — forgetting to strip the
+            # prefix yields "table:table:base_events" (measured exactly that).
             for u in g.upstream_tables(t, depth=2):
                 u = u[len("table:"):] if u.startswith("table:") else u
                 if u != t and u not in ups:
                     ups.append(u)
-        # 派生表本身也是"先会它的上游才谈得上用它"；再加一层建模文档声明的
+        # A derived table is itself "you must know its upstream before you can use it"; add a layer
+        # of upstreams declared by the modelling doc too
         for t in tables:
             for u in (tbl_specs.get(t) or {}).get("upstream") or []:
                 if u != t and u not in ups:
                     ups.append(u)
         d["prerequisites"] = [
             {"id": f"table:{u}", "relation": "prerequisite",
-             "reason": f"{dim} 读的表 {primary or '（工具）'} 由 {u} 算出"
-                       + (f"（{(tbl_specs.get(u) or {}).get('grain') or ''}）"
+             "reason": f"the table {primary or '(tool)'} read by {dim} is computed from {u}"
+                       + (f" ({(tbl_specs.get(u) or {}).get('grain') or ''})"
                           if (tbl_specs.get(u) or {}).get("grain") else "")}
             for u in ups[:4]]
 
-        # --- related：易混 / 共现（图里本来就有边，这里做成节点可读的）---
+        # --- related: confusable / co-occurring (the edges already exist in the graph; here they
+        #     become readable on the node) ---
         rel: list[dict[str, str]] = []
         for e in g._out.get(f"dim:{dim}", []) + g._in.get(f"dim:{dim}", []):
             other = e.dst if e.src == f"dim:{dim}" else e.src
@@ -2508,23 +2747,24 @@ def _add_dimension_declarations(g: KnowledgeGraph, specs: dict[str, Any]) -> Non
         if rel:
             d["related"] = rel[:6]
 
-        # --- typical_misconceptions：种子错法 + 建模文档推出来的错法 ---
+        # --- typical_misconceptions: seed mistakes + mistakes derived from the modelling doc ---
         misc = list(d.get("typical_errors") or [])
         for t in tables:
             s = tbl_specs.get(t) or {}
             grain = str(s.get("grain") or "")
             if s.get("layer") == "derived" and "round" in grain:
                 misc.append(
-                    f"{t} 已经是「{grain}」一行（主键 {','.join(s.get('pk') or []) or '见文档'}），"
-                    "不要再 JOIN rounds 去重 —— 会放大行数")
+                    f"{t} is already one row per \"{grain}\" (primary key "
+                    f"{','.join(s.get('pk') or []) or 'see the doc'}), "
+                    "so do not JOIN rounds to deduplicate — that multiplies the row count")
             for m, formula in list((s.get("metrics") or {}).items())[:1]:
-                misc.append(f"{t}.{m} 是「{formula}」算出来的，"
-                            "不能直接 AVG 那个同名列")
+                misc.append(f"{t}.{m} is computed by \"{formula}\", "
+                            "so the same-named column must not be AVG'd directly")
             break
         if misc:
             d["typical_misconceptions"] = list(dict.fromkeys(misc))[:5]
 
-        # --- examples：口径示例（伴学 examples 的同构物）---
+        # --- examples: metric definition examples (isomorphic to the companion's examples) ---
         ex: list[str] = []
         if d.get("recipe"):
             ex.append(str(d["recipe"])[:400])
@@ -2537,31 +2777,37 @@ def _add_dimension_declarations(g: KnowledgeGraph, specs: dict[str, Any]) -> Non
         if ex:
             d["examples"] = ex[:2]
         d["name"] = dim
-        # ⚠️ 这里**原来写的是 `d["subject"] = "vlml0"`**，把上面 2322 行算出来
-        # 的真实学科（赛事/团队/选手）整个覆盖掉了 —— 学科位被"数据源"占了。
-        # 现在：接哪个库 = `data_source`（MVE 自己的键），学科位回到实体域。
+        # ⚠️ This **used to write `d["subject"] = "vlml0"`**, overwriting the real subject
+        # (tournament/team/player) computed above — the subject slot was taken over by "data source".
+        # Now: which database is connected = `data_source` (MVE's own key), and the subject slot goes
+        # back to the entity domain.
         #
-        # 知识点**不写死某个赛事/团队**：照伴学
-        # `entry_tutor_question_entries.py:1043-1051`，subject / chapter /
-        # course_family 都是 **list_topics 的筛选参数**，知识点库是共享的一份。
-        # 把赛事号写进知识点 = 换一次赛事就重建一次工具集，那是白做功 ——
-        # 用户原话：「学科下的这些知识点/这些工具集都是一样的啊」。
+        # A knowledge point is **not hard-wired to a given tournament/team**: per the companion's
+        # `entry_tutor_question_entries.py:1043-1051`, subject / chapter / course_family are all
+        # **list_topics filter parameters**, and the knowledge point store is one shared copy.
+        # Writing a tournament id into a knowledge point means rebuilding the tool set every time
+        # the tournament changes — wasted effort. In the user's own words: "the knowledge points and
+        # tool sets under a subject are all the same anyway".
         d["data_source"] = _data_source()
-        # 这个知识点**可以用哪些值去筛**（赛事号 / 队伍名 / …）—— 可空，
-        # 语义同伴学运行期 `entity`：只影响这次取数，不改变知识结构。
+        # Which **values** this knowledge point can be filtered by (series id / team name / …) —
+        # nullable, semantically the same as the companion's runtime `entity`: it only affects this
+        # retrieval, it does not change the knowledge structure.
         d["entity_values"] = _entity_values(d["subject"])
-        d["declared_by"] = ("VLML 建模文档 + tasks.py 的 answer_spec"
-                            "（难度/单位/先修由文档推，口径由 answer_spec 定）")
+        d["declared_by"] = ("VLML modelling doc + tasks.py's answer_spec"
+                            " (difficulty/unit/prerequisites derived from the doc, metric "
+                            "definitions fixed by answer_spec)")
 
 
 def _add_vlml_schema(g: KnowledgeGraph, schema: dict[str, Any]) -> None:
-    """把 VLML 的四层结构写进图：表 / 派生关系 / 洞察 / 工具 section。
+    """Write VLML's four-layer structure into the graph: tables / derivation relations / insights /
+    tool sections.
 
-    全部来自**实查与源码解析**（`vlml_schema.py`），没有一条是手写的。
+    Everything comes from **live queries and source parsing** (`vlml_schema.py`); not one entry is
+    hand-written.
     """
     import vlml_schema
 
-    # --- 表：21 张，带 stage / grain / 列 / 行数 ---
+    # --- Tables: 21, with stage / grain / columns / row count ---
     for name, info in sorted((schema.get("tables") or {}).items()):
         g.add_node(Node(
             id=f"table:{name}", kind="table", label=name,
@@ -2574,16 +2820,17 @@ def _add_vlml_schema(g: KnowledgeGraph, schema: dict[str, Any]) -> None:
                 "source": info.get("source", ""),
             }))
 
-    # --- 派生：agg 表 ← 上游表（数据流的上游 = 伴学 prerequisite 的同构物）---
+    # --- Derivation: agg table ← upstream table (an upstream in the data flow = the isomorphic
+    #     counterpart of the companion's prerequisite) ---
     for target, ups in sorted((schema.get("lineage") or {}).items()):
         for up in ups:
             g.add_edge(Edge(
                 src=f"table:{up}", dst=f"table:{target}",
                 relation=DERIVED_FROM, origin="declared",
-                reason=f"transformations 定义：{target} 由 {up} 算出",
+                reason=f"defined by transformations: {target} is computed from {up}",
                 confidence=1.0))
 
-    # --- 洞察：46 个 SQL 单元 ---
+    # --- Insights: 46 SQL units ---
     for name, info in sorted((schema.get("insights") or {}).items()):
         g.add_node(Node(
             id=f"insight:{name}", kind="insight", label=name,
@@ -2598,16 +2845,16 @@ def _add_vlml_schema(g: KnowledgeGraph, schema: dict[str, Any]) -> None:
             g.add_edge(Edge(
                 src=f"table:{t}", dst=f"insight:{name}",
                 relation=READS, origin="declared",
-                reason=f"{info.get('file', name)} 的 FROM/JOIN",
+                reason=f"the FROM/JOIN of {info.get('file', name)}",
                 confidence=1.0))
         for r in info.get("reports") or []:
             if f"tool:{r}" in g.nodes:
                 g.add_edge(Edge(
                     src=f"tool:{r}", dst=f"insight:{name}",
                     relation=COMPOSES, origin="declared",
-                    reason=f"{r} 通过 load_sql 使用它", confidence=0.9))
+                    reason=f"{r} uses it via load_sql", confidence=0.9))
 
-    # --- 工具：补 section（洞察目录）---
+    # --- Tools: fill in sections (the insight directory) ---
     for name, info in sorted((schema.get("tools") or {}).items()):
         nid = f"tool:{name}"
         if nid not in g.nodes:
@@ -2615,7 +2862,8 @@ def _add_vlml_schema(g: KnowledgeGraph, schema: dict[str, Any]) -> None:
         node = g.nodes[nid]
         node.detail["stage"] = vlml_schema.STAGE_TOOL
         node.detail["sections"] = info.get("sections") or []
-        # section → 由哪些洞察 SQL 组成（洞察层要能进 prompt 就靠这一张表）
+        # section → which insight SQLs compose it (the insight layer reaches the prompt through this
+        # table)
         si = (schema.get("section_insights") or {}).get(name) or {}
         if si:
             node.detail["section_insights"] = si
@@ -2623,8 +2871,10 @@ def _add_vlml_schema(g: KnowledgeGraph, schema: dict[str, Any]) -> None:
         if desc:
             node.detail["section_desc"] = dict(list(desc.items())[:12])
 
-    # --- 维度：标出它取工具的哪一段（value_path 的第一段就是 section）---
-    # 这是"知道调哪个工具、不知道值从哪一段来"的那一层。
+    # --- Dimensions: mark which section of the tool they take (the first segment of value_path is
+    #     the section) ---
+    # This is the layer of "knows which tool to call, does not know which section the value comes
+    # from".
     for node in list(g.nodes.values()):
         if node.kind != "dimension":
             continue
@@ -2634,7 +2884,8 @@ def _add_vlml_schema(g: KnowledgeGraph, schema: dict[str, Any]) -> None:
         if not head:
             continue
         node.detail["section"] = head
-        # 找哪些工具的 section 清单里有这一段（可能有多个工具都出这一段）
+        # Find which tools list this section among their sections (several tools may produce the
+        # same section)
         for tnode in g.nodes.values():
             if tnode.kind != "tool":
                 continue
@@ -2642,20 +2893,23 @@ def _add_vlml_schema(g: KnowledgeGraph, schema: dict[str, Any]) -> None:
                 g.add_edge(Edge(
                     src=tnode.id, dst=node.id,
                     relation=FROM_SECTION, origin="declared",
-                    reason=f"value_path 段首 `{head}` = {tnode.label} 的一个 section",
+                    reason=f"the head of value_path `{head}` is a section of {tnode.label}",
                     confidence=0.8))
 
 
 def _add_seed_facts(g: KnowledgeGraph, schema: dict[str, Any]) -> None:
-    """种子层：**独立于题目**的指标全集（伴学 topics 的同构物）。
+    """The seed layer: the complete set of metrics **independent of any question** (isomorphic to
+    the companion's topics).
 
-    为什么必须有它：`build()` 里的维度节点全部来自 `TASKS[].rubric`——
-    出过题的才进图（实测只有 13 个维度，对应 5 道题）。新题进来，图谱里
-    没有它的任何节点，`subgraph_for_topic` 直接返回 found=False。
-    伴学不是这么做的：它的 82 个知识点种子先于题目存在，题目只用
-    `match_topics(query)` 去匹配焦点，所以**任何题**都能配上图谱。
-    这里照搬：从 VLML 发现的四层结构抽出所有可问的事实（洞察 / 工具段 / 表），
-    不依赖任何一道题。
+    Why it is mandatory: the dimension nodes in `build()` all come from `TASKS[].rubric` —
+    only questions that have been generated enter the graph (measured: just 13 dimensions, covering
+    5 questions). When a new question arrives the graph holds none of its nodes and
+    `subgraph_for_topic` returns found=False straight away.
+    The companion does not work that way: its 82 knowledge point seeds exist prior to any question,
+    and a question merely uses `match_topics(query)` to match the focus, so **any** question can be
+    paired with a graph.
+    That is ported verbatim here: every askable fact (insight / tool section / table) is extracted
+    from the four-layer structure discovered from VLML, depending on no question at all.
     """
     try:
         import graph_topics
@@ -2665,7 +2919,7 @@ def _add_seed_facts(g: KnowledgeGraph, schema: dict[str, Any]) -> None:
     for n in graph_topics.seed_facts_to_nodes(facts):
         g.add_node(Node(id=n["id"], kind=n["kind"], label=n["label"],
                         detail=n["detail"]))
-    # 事实 → 它的来源（工具 / 段 / 洞察 / 表）：让 focused_context 能归桶
+    # Fact → its source (tool / section / insight / table), so focused_context can bucket it
     for f in facts:
         fid = str(f.get("id") or "").strip()
         if not fid or fid not in g.nodes:
@@ -2674,26 +2928,28 @@ def _add_seed_facts(g: KnowledgeGraph, schema: dict[str, Any]) -> None:
         if tool and f"tool:{tool}" in g.nodes:
             g.add_edge(Edge(src=f"tool:{tool}", dst=fid,
                             relation=PRODUCED_BY, origin="declared",
-                            reason="VLML 源码：该工具产出这个事实",
+                            reason="VLML source: that tool produces this fact",
                             confidence=0.9))
         for i in f.get("insights") or []:
             if f"insight:{i}" in g.nodes:
                 g.add_edge(Edge(src=f"insight:{i}", dst=fid,
                                 relation=COMPOSES, origin="declared",
-                                reason=f"{i} 是它的计算单元", confidence=0.9))
+                                reason=f"{i} is its computation unit", confidence=0.9))
         for t in f.get("tables") or []:
             if f"table:{t}" in g.nodes:
                 g.add_edge(Edge(src=f"table:{t}", dst=fid,
                                 relation=DERIVED_FROM, origin="declared",
-                                reason=f"数据取自 {t}", confidence=0.9))
+                                reason=f"data read from {t}", confidence=0.9))
     g.detail_seed_facts = len(facts)    # type: ignore[attr-defined]
 
 
 async def _observe_procedure(g: KnowledgeGraph) -> None:
-    """跑一遍裁判，用实测的编排顺序补 procedure_step 边。
+    """Run the referee once and fill in the procedure_step edges with the **measured** orchestration
+    order.
 
-    声明式信息能回答"哪个工具出哪个维度"，但回答不了"先调哪个再调哪个"——
-    那个顺序只有真跑一遍才知道（裁判的 trajectory 就是实测顺序）。
+    Declarative information can answer "which tool produces which dimension", but it cannot answer
+    "which is called first, which second" — that order is only knowable by actually running it
+    (the referee's trajectory *is* the measured order).
     """
     import vlml0_referee
     from tasks import TASKS
@@ -2715,9 +2971,9 @@ async def _observe_procedure(g: KnowledgeGraph) -> None:
                 g.add_node(Node(id=f"tool:{b}", kind="tool", label=b))
             g.add_edge(Edge(src=f"tool:{a}", dst=f"tool:{b}",
                             relation=PROCEDURE_STEP, origin="observed",
-                            reason=f"{topic_id}：裁判实测的编排顺序",
+                            reason=f"{topic_id}: orchestration order measured by the referee",
                             confidence=0.95))
-        # 实测的 produced_by：裁判 fact 的 source.tool 就是真正取到它的工具
+        # Measured produced_by: the source.tool of a referee fact is the tool that truly retrieved it
         for f in (getattr(ref, "facts", None) or []):
             src = (f.get("source") or {}).get("tool") or ""
             if not src.startswith("vlml0_referee::"):
@@ -2732,7 +2988,7 @@ async def _observe_procedure(g: KnowledgeGraph) -> None:
                 g.add_node(Node(id=f"dim:{dim}", kind="dimension", label=dim))
             g.add_edge(Edge(src=f"tool:{tool}", dst=f"dim:{dim}",
                             relation=PRODUCED_BY, origin="observed",
-                            reason=f"{topic_id}：裁判实测取到",
+                            reason=f"{topic_id}: measured as retrieved by the referee",
                             confidence=1.0))
 
 
@@ -2740,37 +2996,41 @@ async def _observe_procedure(g: KnowledgeGraph) -> None:
 # CLI
 # --------------------------------------------------------------------------
 def _main() -> int:
-    ap = argparse.ArgumentParser(description="MVE 知识图谱：维度/工具/表")
-    ap.add_argument("--build", action="store_true", help="重建图谱并落盘")
+    ap = argparse.ArgumentParser(description="MVE knowledge graph: dimensions / tools / tables")
+    ap.add_argument("--build", action="store_true", help="rebuild the graph and persist it")
     ap.add_argument("--observe", action="store_true",
-                    help="--build 时额外跑裁判补实测边（慢）")
-    ap.add_argument("--who", default="", help="查这个维度由哪个工具出")
-    ap.add_argument("--topic", default="", help="列出这道题涉及的维度及其来源")
+                    help="with --build, additionally run the referee to fill in measured edges "
+                         "(slow)")
+    ap.add_argument("--who", default="", help="look up which tool produces this dimension")
+    ap.add_argument("--topic", default="",
+                    help="list the dimensions this question touches and their sources")
     ap.add_argument("--render", default="",
-                    help="把这道题的子图渲染成给模型的文本（control_primitives 等价物）")
+                    help="render this question's subgraph as text for the model (the equivalent of "
+                         "control_primitives)")
     ap.add_argument("--no-recipe", action="store_true",
-                    help="--render 时不给 SQL 结构骨架（只给语义与列）")
-    ap.add_argument("--stats", action="store_true", help="只看统计")
+                    help="with --render, do not give the SQL structural skeleton (only semantics "
+                         "and columns)")
+    ap.add_argument("--stats", action="store_true", help="show statistics only")
     args = ap.parse_args()
 
     if args.build:
         g = build(observe=args.observe)
         g.save()
         s = g.to_dict()["summary"]
-        print(f"图谱已写入 {GRAPH_PATH}")
-        print(f"  维度 {s['dimensions']} · 工具 {s['tools']} · "
-              f"表 {s['tables']} · 边 {s['edges']}")
+        print(f"Graph written to {GRAPH_PATH}")
+        print(f"  dimensions {s['dimensions']} · tools {s['tools']} · "
+              f"tables {s['tables']} · edges {s['edges']}")
         for d in g.dimensions():
             prod = g.who_produces(d)
             tbl = g.tables_for(d)
-            src = (f"工具 {','.join(prod)}" if prod else
-                   (f"表 {','.join(tbl)}" if tbl else "（无来源）"))
+            src = (f"tool {','.join(prod)}" if prod else
+                   (f"table {','.join(tbl)}" if tbl else "(no source)"))
             print(f"    {d:<28} ← {src}")
         return 0
 
     g = KnowledgeGraph.load()
     if not g.nodes:
-        print("图谱不存在，先跑 --build")
+        print("The graph does not exist yet, run --build first")
         return 1
 
     if args.stats:
@@ -2780,18 +3040,18 @@ def _main() -> int:
     if args.who:
         sub = g.subgraph_for(args.who)
         if not sub.get("found"):
-            print(f"图谱里没有维度 {args.who}")
+            print(f"The graph has no dimension {args.who}")
             return 1
-        print(f"维度        : {args.who}")
-        print(f"  由工具产出: {', '.join(sub['produced_by']) or '（无）'}")
-        print(f"  由表算出  : {', '.join(sub['derived_from']) or '（无）'}")
-        print(f"  易混维度  : {', '.join(sub['confusable']) or '（无）'}")
+        print(f"Dimension   : {args.who}")
+        print(f"  Produced by tool: {', '.join(sub['produced_by']) or '(none)'}")
+        print(f"  Computed from table: {', '.join(sub['derived_from']) or '(none)'}")
+        print(f"  Confusable with: {', '.join(sub['confusable']) or '(none)'}")
         return 0
 
     if args.render:
         text = g.render_for_prompt(args.render, with_recipe=not args.no_recipe)
         if not text:
-            print(f"图谱里没有题目 {args.render} 的维度，先跑 --build")
+            print(f"The graph has no dimensions for the question {args.render}, run --build first")
             return 1
         print(text)
         return 0
@@ -2801,20 +3061,20 @@ def _main() -> int:
         from tasks import TASKS
         task = TASKS.get(args.topic)
         if task is None:
-            print(f"未知题目 {args.topic}")
+            print(f"Unknown question {args.topic}")
             return 1
-        print(f"题目        : {args.topic}")
-        print(f"  声明工具  : {', '.join(task.requires_tools) or '（无）'}")
+        print(f"Question    : {args.topic}")
+        print(f"  Declared tools: {', '.join(task.requires_tools) or '(none)'}")
         for p in task.rubric:
             d = str(p.dimension)
             prod = g.who_produces(d)
             tbl = g.tables_for(d)
-            src = (f"工具 {','.join(prod)}" if prod else
-                   (f"表 {','.join(tbl)}" if tbl else "（无来源）"))
+            src = (f"tool {','.join(prod)}" if prod else
+                   (f"table {','.join(tbl)}" if tbl else "(no source)"))
             print(f"  {d:<28} ← {src}")
         return 0
 
-    print("用法：--build / --who <维度> / --topic <题目> / --stats")
+    print("Usage: --build / --who <dimension> / --topic <question> / --stats")
     return 0
 
 
