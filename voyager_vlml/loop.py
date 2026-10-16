@@ -461,6 +461,10 @@ async def run_one_round(
             str(ex[0].get("prompt") or "") if ex and isinstance(ex[0], dict) else ""
         ) or f"Fetch one data point from the DB for the topic \"{topic.get('name') or tid}\"."
 
+    # Isomorphic to original voyager.py:340 — print the task before the rollout so a human
+    # watching the log can see what the loop is about to attempt (and which one failed).
+    print(f"Starting task {tid} (reason={reason}) for at most {max_iters} attempts")
+
     # ---- write SQL + fetch data (LLM + VLML MCP, with iterative correction) ----
     #
     # Following the original Voyager's order (`voyager.py:195` → `:199` → `:370`):

@@ -150,6 +150,12 @@ class VLMLActionAgent:
         observations: list[dict[str, Any]] = []
         sql = ""
         critique = ""
+        n_skills = len(list(skills or []))
+        # Isomorphic to original voyager.py:196-198 — print how many skills were
+        # retrieved and injected into the system message (the original shows the count,
+        # never the whole message: dumping the schema + recipe library would bury the log).
+        print(f"[Action Agent] rendering system message with {n_skills} learned recipe(s)")
+        print(f"[Action Agent] task: {question[:140]}")
         for i in range(max_iters):
             sql = self.write_sql(
                 question, schema=schema, critique=critique, last_sql=sql,
@@ -158,10 +164,13 @@ class VLMLActionAgent:
             if not sql:
                 observations.append(
                     {"ok": False, "tool": "write_sql", "rows": 0,
-                     "error": "模型没给出 SELECT 语句"}
+                     "error": "model produced no SELECT statement"}
                 )
-                critique = "上一轮没给出 SELECT。请先写一行 Explain 说明思路，再用 SQL: 前缀给出一条 SELECT。"
+                print(f"  [attempt {i + 1}/{max_iters}] no SELECT produced -> trying again")
+                critique = "Previous round produced no SELECT. First write one line of Explain, then give a SELECT prefixed with SQL:."
                 continue
+            # Isomorphic to original voyager.py:218 — print the proposed action (AI message).
+            print(f"  [attempt {i + 1}/{max_iters}] proposed SQL: {sql[:200]}")
             obs = await self.run_sql(sql)
             observations.append(obs)
             ok, critique = critic.check_task_success(
@@ -170,7 +179,17 @@ class VLMLActionAgent:
                 schema=schema,
             )
             if ok:
+                print(f"  [attempt {i + 1}/{max_iters}] ok -> tool={obs.get('tool')} rows={obs.get('rows')}")
+                print(f"[Action Agent] task succeeded on attempt {i + 1}")
                 break
+            # Isomorphic to original voyager.py:293-274 — show the environment feedback
+            # (what the tool returned) + the critic verdict, then "Trying again".
+            print(f"  [attempt {i + 1}/{max_iters}] failed -> {str(obs.get('error') or 'no data returned')[:160]}")
+            print(f"  [critic] {critique[:240]}")
+            print("  -> Trying again!")
+        else:
+            # for/else: reached only when the loop finished without a success break.
+            print(f"[Action Agent] task failed after {max_iters} attempts (last critique: {critique[:240]})")
         return observations, sql
 
     # ---------- 迭代修正的 prompt（语言 = SQL） ----------
