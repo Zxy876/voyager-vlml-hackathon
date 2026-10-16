@@ -39,6 +39,105 @@ import pilot  # noqa: E402
 ROOT = Path(__file__).resolve().parent
 
 
+# --- Knowledge-graph self-check: avoid "not built" after git pull / DB swap ---
+import threading as _threading
+
+_graph_build_lock = _threading.RLock()
+
+
+def _do_build_graph():
+    """Rebuild and persist the graph while holding _graph_build_lock (no own lock)."""
+    import knowledge_graph as kg
+    # build()'s `from tasks import TASKS` needs the repo root; the dashboard only
+    # injects mve/ onto sys.path.
+    _repo_root = str(ROOT.parent)
+    if _repo_root not in sys.path:
+        sys.path.insert(0, _repo_root)
+    g = kg.build()
+    g.save()
+    return g
+
+
+def _ensure_knowledge_graph(verbose: bool = True) -> bool:
+    """Startup self-check: rebuild the graph if it is missing or stale.
+
+    Staleness = schema_version + task fingerprint + modelling-doc fingerprint
+    (reuses knowledge_graph._stale) + the default duckdb being newer than the graph
+    (DB swap). So the gitignored json dropped by `git pull`, and a stale graph after
+    swapping the DB, both rebuild automatically - no manual `--build` needed.
+    A failed rebuild never blocks panel startup.
+    """
+    try:
+        import knowledge_graph as kg
+    except Exception as e:
+        if verbose:
+            print(f"[graph self-check] cannot import knowledge_graph: {type(e).__name__}: {e}")
+        return False
+
+    gp = kg.GRAPH_PATH
+    need, reason = True, "unknown"
+    if gp.exists() and gp.stat().st_size > 0:
+        try:
+            raw = json.loads(gp.read_text(encoding="utf-8", errors="replace"))
+            need = kg._stale(raw)
+            reason = "schema/task/model-doc fingerprint stale" if need else ""
+            if not need:
+                # DB-swap detection: default duckdb newer than graph -> stale
+                db = ROOT.parent / "vlml" / "data" / "vlml_rib.duckdb"
+                if db.exists() and db.stat().st_mtime > gp.stat().st_mtime:
+                    need, reason = True, f"database updated ({db.name})"
+        except Exception as e:
+            need, reason = True, f"graph read failed: {type(e).__name__}"
+
+    if not need:
+        if verbose:
+            print(f"[graph self-check] graph already up to date ({gp.name})")
+        return True
+
+    if verbose:
+        print(f"[graph self-check] {reason}, auto-rebuilding graph…")
+    try:
+        with _graph_build_lock:
+            g = _do_build_graph()
+        s = g.to_dict()["summary"]
+        if verbose:
+            print(f"[graph self-check] rebuild done: dimensions {s['dimensions']} · "
+                  f"tools {s['tools']} · tables {s['tables']} · edges {s['edges']}")
+        return True
+    except Exception as e:
+        if verbose:
+            print(f"[graph self-check] rebuild failed (panel still starts, /api/graph "
+                  f"falls back to prompt): {type(e).__name__}: {e}")
+        return gp.exists()
+
+
+def _rebuild_graph_if_missing() -> bool:
+    """Hot-path fallback: rebuild only if the graph is genuinely missing/empty
+    (e.g. deleted at runtime by a baseline exam's library wipe)."""
+    try:
+        import knowledge_graph as kg
+    except Exception:
+        return False
+    gp = kg.GRAPH_PATH
+    try:
+        if gp.exists() and gp.stat().st_size > 0 and kg.KnowledgeGraph.load().nodes:
+            return True
+    except Exception:
+        pass
+    with _graph_build_lock:
+        try:
+            if gp.exists() and gp.stat().st_size > 0 and kg.KnowledgeGraph.load().nodes:
+                return True
+        except Exception:
+            pass
+        try:
+            _do_build_graph()
+            return True
+        except Exception as e:
+            print(f"[graph self-check] fallback rebuild failed: {type(e).__name__}: {e}")
+            return False
+
+
 def _graph_json() -> str:
     """Knowledge graph: read the stored JSON without importing vlml_env (keeps the dashboard lightweight and fast).
 
@@ -51,6 +150,14 @@ def _graph_json() -> str:
     except Exception as e:
         return json.dumps({"empty": True, "error": f"{type(e).__name__}: {e}"},
                           ensure_ascii=False)
+    if not g.nodes:
+        # Startup self-check normally already rebuilt it; this is the fallback
+        # (e.g. deleted at runtime by a baseline exam's library wipe).
+        if _rebuild_graph_if_missing():
+            try:
+                g = knowledge_graph.KnowledgeGraph.load()
+            except Exception:
+                pass
     if not g.nodes:
         return json.dumps({"empty": True, "error": "Knowledge graph not built. Run python mve/knowledge_graph.py --build first"},
                           ensure_ascii=False)
@@ -2817,6 +2924,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def main() -> None:
     srv = ThreadingHTTPServer((HOST, PORT), Handler)
+    _ensure_knowledge_graph()   # startup self-check: auto-rebuild if missing/stale
     print(f"MVE dashboard started: http://{HOST}:{PORT}")
     print("Stop: Ctrl-C")
     try:
