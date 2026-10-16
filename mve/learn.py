@@ -50,6 +50,12 @@ from typing import Any
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+# Repo root too: llm_client.chat lazily imports voyager_vlml.llm (the English gateway).
+# Same crash as exam.py (ModuleNotFoundError: No module named 'voyager_vlml') when
+# spawned by the cockpit without the dashboard's sys.path injection.
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
 LOG_PATH = HERE / "learn.log"
 
