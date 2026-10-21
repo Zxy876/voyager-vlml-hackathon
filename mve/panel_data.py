@@ -13,6 +13,8 @@ VLML has no frontend (no html/tsx/jsx in the repo), so the dashboard form comes 
 from __future__ import annotations
 
 import json
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +24,40 @@ import skill_store  # noqa: E402
 import practice_scope  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent
+
+
+# ---------------------------------------------------------------------------
+# build_state 的单飞 + 短缓存（2026-10-21 黑客松面板挂死取证后补）
+#
+# 事故形态：前端每 4 秒轮询 /api/state，每次 build_state 里 probe_env 都要
+# 新开一个 duckdb 连接；第一个请求一慢（内存吃紧 / duckdb 争锁），后续轮询
+# **并发堆线程**——ThreadingHTTPServer 来者不拒，几十个线程各自开 duckdb、
+# 各自算一遍完整 state，内存冲到 3.2G 开始换页 → 更慢 → 更多堆积。接口永远
+# 不返回，浏览器侧就是 "Unexpected end of JSON input"（py-spy 实锤：几十个
+# 线程卡在 probe_env / _load_raw，77 个 duckdb fd 同时开着）。
+#
+# 治法：同一时刻只允许一个 build 在跑（单飞），其余请求等它算完拿**同一份**；
+# 算完的结果缓存 3 秒。数据是日志聚合，3 秒内的旧值人眼看不出差别。
+# ---------------------------------------------------------------------------
+_STATE_CACHE: dict[str, Any] = {"at": 0.0, "value": None}
+_STATE_LOCK = threading.Lock()
+_STATE_TTL = 3.0
+
+# 单飞的闸门：同一时刻只允许一个 build 在算。
+_INFLIGHT_LOCK = threading.Lock()
+_INFLIGHT: dict[str, Any] = {"on": False, "done": threading.Event()}
+
+# probe_env 每次都要新开 duckdb 连接（即开即关），一个 build 里还会调两次；
+# 换库/切场景之外没必要那么勤。15s 足够。
+_ENV_CACHE: dict[str, Any] = {"at": 0.0, "value": None}
+_ENV_TTL = 15.0
+
+
+def build_state_invalidate() -> None:
+    """改动了账目（学习落盘/清库/切场景）之后叫一声，让下一轮强制重算。"""
+    with _STATE_LOCK:
+        _STATE_CACHE["at"] = 0.0
+        _ENV_CACHE["at"] = 0.0
 
 
 def _task_library() -> list[dict[str, Any]]:
@@ -471,7 +507,22 @@ def _next_recommend() -> dict[str, Any]:
                 "question": "", "difficulty": 0}
 
 
-def probe_env() -> dict[str, Any]:
+def probe_env(force: bool = False) -> dict[str, Any]:
+    """探测 VLML 是否可用（带 15s 缓存：每次探测都要新开 duckdb 连接，
+    面板轮询下这是最贵的一步，事故里 77 个 fd 全卡在这）。"""
+    if not force:
+        with _STATE_LOCK:
+            if (_ENV_CACHE["value"] is not None
+                    and time.time() - _ENV_CACHE["at"] < _ENV_TTL):
+                return _ENV_CACHE["value"]
+    result = _probe_env_uncached()
+    with _STATE_LOCK:
+        _ENV_CACHE["value"] = result
+        _ENV_CACHE["at"] = time.time()
+    return result
+
+
+def _probe_env_uncached() -> dict[str, Any]:
     """Probe whether VLML is available.
 
     The midwife's requirement from round three: when MCP is unreachable the dashboard must say so clearly, not silently display empty.
@@ -503,7 +554,59 @@ def probe_env() -> dict[str, Any]:
                 "reason": f"{type(e).__name__}: {e}"[:200]}
 
 
+def _scene_cache_key() -> str:
+    """缓存必须按场景分桶，否则切了场景前端还在读上一份。"""
+    try:
+        import scenes as _sc
+        return str(_sc.current_scene_id() or "A")
+    except Exception:
+        return "A"
+
+
 def build_state() -> dict[str, Any]:
+    """聚合面板全部视图（单飞 + 3s 缓存，为什么必须：见文件头的事故记录）。"""
+    key = _scene_cache_key()
+    with _STATE_LOCK:
+        if (_STATE_CACHE["value"] is not None
+                and _STATE_CACHE.get("key") == key
+                and time.time() - _STATE_CACHE["at"] < _STATE_TTL):
+            return _STATE_CACHE["value"]
+    with _INFLIGHT_LOCK:
+        if _INFLIGHT["on"]:
+            ev, mine = _INFLIGHT["done"], False
+        else:
+            _INFLIGHT["on"] = True
+            _INFLIGHT["done"] = ev = threading.Event()
+            mine = True
+    if not mine:
+        # 已经有一个 build 在跑：等它算完拿同一份，而不是各自再开 duckdb。
+        ev.wait(timeout=30.0)
+        with _STATE_LOCK:
+            cached, cached_key = _STATE_CACHE["value"], _STATE_CACHE.get("key")
+        if cached is not None and cached_key == key:
+            return cached
+        # 等不到 / 刚切了场景：给**合法 JSON**，前端不再报 JSON 解析失败。
+        return {"ok": False, "pending": True,
+                "reasons": ["面板正在聚合数据，请稍后刷新"], "scene": {}}
+    try:
+        state = _build_state_uncached()
+    except Exception as e:  # 闸门必须放行，否则面板永久 500
+        with _INFLIGHT_LOCK:
+            _INFLIGHT["on"] = False
+            ev.set()
+        return {"ok": False, "pending": False,
+                "reasons": [f"聚合失败：{type(e).__name__}: {e}"[:200]], "scene": {}}
+    with _INFLIGHT_LOCK:
+        _INFLIGHT["on"] = False
+        ev.set()
+    with _STATE_LOCK:
+        _STATE_CACHE["value"] = state
+        _STATE_CACHE["key"] = key
+        _STATE_CACHE["at"] = time.time()
+    return state
+
+
+def _build_state_uncached() -> dict[str, Any]:
     rows = run_log.load_all()
     memory = skill_store.load()
     # Whether bloat/hallucination prevention is self-evident comes down to these two numbers
